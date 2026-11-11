@@ -128,8 +128,7 @@ jobs:
                   "txn", "payees", "net_items", "loans", "senders", "merchant_rules", "parse_patterns", "nb_words", "toll_trips", "toll_plazas"
               )
 
-              private fun q(s: String) = "\"" + s.replace("\n", " ").replace("\"", "\"\"") + "\"
-              
+              private fun q(s: String) = """ + s.replace("\n", " ").replace(""", """") + """
 
               fun export(ctx: Context): String {
                   val db = Db.get(ctx).readableDatabase
@@ -137,15 +136,12 @@ jobs:
                   for (t in tables) {
                       val cols = ArrayList<String>()
                       db.rawQuery("PRAGMA table_info($t)", null).use { c -> while (c.moveToNext()) cols.add(c.getString(1)) }
-                      sb.append("## ").append(t).append('
-').append(cols.joinToString(",")).append('
-')
+                      sb.append("## ").append(t).append("\n").append(cols.joinToString(",")).append("\n")
                       db.rawQuery("SELECT * FROM $t", null).use { c ->
                           while (c.moveToNext()) {
                               val parts = ArrayList<String>()
                               for (i in 0 until c.columnCount) parts.add(if (c.isNull(i)) "" else q(c.getString(i)))
-                              sb.append(parts.joinToString(",")).append('
-')
+                              sb.append(parts.joinToString(",")).append("\n")
                           }
                       }
                   }
@@ -380,7 +376,7 @@ jobs:
                       db.exec("INSERT OR IGNORE INTO payees(merchant_key, display) VALUES(?,?)", key, t.merchant)
                       val vpa = t.vpa
                       if (vpa != null) {
-                          db.exec("UPDATE payees SET upi_id=? WHERE merchant_key=? AND (upi_id IS NULL OR upi_id='')", vpa, key)
+                          db.exec("UPDATE payees SET upi_id=? WHERE merchant_key=? AND (upi_id IS NULL OR UPI_id='')", vpa, key)
                       }
                   }
               }
@@ -491,7 +487,7 @@ jobs:
                       val l = p["left_ctx"] ?: ""
                       val r = p["right_ctx"] ?: ""
                       val head = if (l.isEmpty()) "^" else ctxRegex(l) + "\s+"
-                      val tail = if (r.isEmpty()) "(?=\s+\d|\s*[.,;]|\s*\$)" else "\s+" + ctxRegex(r)
+                      val tail = if (r.isEmpty()) "(?=\s+\d|\s*[.,;]|\s*$)" else "\s+" + ctxRegex(r)
                       val m = Regex("(?i)$head(.{2,40}?)$tail").find(body)
                       if (m != null) return m.groupValues[1].trim()
                   }
@@ -1885,10 +1881,10 @@ Parse: ${t.status}" + (if (t.vpa != null) "  •  UPI: ${t.vpa}" else "") +
               private val vpaRe = Regex("(?i)\b([a-z0-9][\w.\-]+@[a-z][a-z0-9]+)\b(?!\.[a-z]{2,3}\b)")
               private val tollRe = Regex("(?i)\b(fastag|netc|toll|plaza|nhai|ihmcl)\b")
 
-              private val toRe = Regex("(?i)\b(?:to|at|against)\s+([A-Za-z][A-Za-z0-9 &.\-']{2,30}?)(?=\s+(?:on|ref\w*|via|upi|using|avl|bal|a/c|account|txn|not|if|vide|dated|date|may)\b|[.,;(]|$)")
-              private val fromRe = Regex("(?i)\b(?:from|by)\s+([A-Za-z][A-Za-z0-9 &.\-']{2,30}?)(?=\s+(?:on|ref\w*|via|upi|using|avl|bal|a/c|account|txn|not|if|vide|dated|date)\b|[.,;(]|$)")
+              private val toRe = Regex("(?i)\b(?:to|at|against)\s+([A-Za-z][A-Za-z0-9 &.\-']{2,30}?)(?=\s+(?:on|ref\w*|via|upi|using|avl|bal|a/c|account|txn|not|if|vide|dated|date|may)\b|[.,;(]|\$)")
+              private val fromRe = Regex("(?i)\b(?:from|by)\s+([A-Za-z][A-Za-z0-9 &.\-']{2,30}?)(?=\s+(?:on|ref\w*|via|upi|using|avl|bal|a/c|account|txn|not|if|vide|dated|date)\b|[.,;(]|\$)")
               private val vpaWordRe = Regex("(?i)\bvpa\s+([\w.\-]+@[\w.\-]+)")
-              private val upiSlashRe = Regex("(?i)upi/\w+/\d+/([A-Za-z][A-Za-z0-9 .\-]{2,30}?)(?:/|$)")
+              private val upiSlashRe = Regex("(?i)upi/\w+/\d+/([A-Za-z][A-Za-z0-9 .\-]{2,30}?)(?:/|\$)")
               private val semiRe = Regex("(?i)[;,]\s*([A-Za-z][A-Za-z0-9 &.\-']{2,30}?)\s+credited")
               private val infoRe = Regex("(?i)info[:\-\s]+([A-Za-z0-9 &.\-/@']{3,30})")
 
@@ -2648,4 +2644,7 @@ Parse: ${t.status}" + (if (t.vpa != null) "  •  UPI: ${t.vpa}" else "") +
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="v1.0.${{ github.run_number }}"
-          gh release create "$VERSION" /tmp/proj/app/build/outputs/apk/debug/app-debug.apk             --repo "${{ github.repository }}"             --title "FinTrack Build ${{ github.run_number }}"             --notes "Automated complete build including AI parsing, wallet support, CSV reconciliation, and dynamic toll JSON import."
+          gh release create "$VERSION" /tmp/proj/app/build/outputs/apk/debug/app-debug.apk \
+            --repo "${{ github.repository }}" \
+            --title "FinTrack Build ${{ github.run_number }}" \
+            --notes "Automated complete build including AI parsing, wallet support, CSV reconciliation, and dynamic toll JSON import."
