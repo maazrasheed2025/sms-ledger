@@ -1,0 +1,845 @@
+name: Build APK
+on:
+  workflow_dispatch:
+  push:
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+      - name: Generate project files
+        run: |
+          mkdir -p /tmp/proj/app /tmp/proj/app/src/main /tmp/proj/app/src/main/java/com/example/wfcmonitor /tmp/proj/app/src/main/res/drawable /tmp/proj/app/src/main/res/layout /tmp/proj/app/src/main/res/xml
+          cd /tmp/proj
+          cat > settings.gradle.kts <<'EOF_0'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "WfcMonitor"
+          include(":app")
+          EOF_0
+          cat > build.gradle.kts <<'EOF_1'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF_1
+          cat > gradle.properties <<'EOF_2'
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx2g
+          EOF_2
+          cat > app/build.gradle.kts <<'EOF_3'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.example.wfcmonitor"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.example.wfcmonitor"
+                  minSdk = 31
+                  targetSdk = 33
+                  versionCode = 2
+                  versionName = "2.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies {
+              implementation("androidx.appcompat:appcompat:1.7.0")
+              implementation("androidx.core:core-ktx:1.13.1")
+          }
+          EOF_3
+          cat > app/src/main/AndroidManifest.xml <<'EOF_4'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.READ_PHONE_STATE"/>
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+              <application android:label="WFC Monitor" android:theme="@style/Theme.AppCompat.Light.DarkActionBar">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <service android:name=".MonitorService" android:exported="false"/>
+                  <service
+                      android:name=".WfcTileService"
+                      android:exported="true"
+                      android:label="Wi-Fi Calling"
+                      android:icon="@drawable/ic_tile"
+                      android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+                      <intent-filter>
+                          <action android:name="android.service.quicksettings.action.QS_TILE"/>
+                      </intent-filter>
+                  </service>
+                  <receiver android:name=".WfcWidget" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+                      </intent-filter>
+                      <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_info"/>
+                  </receiver>
+                  <receiver android:name=".BootReceiver" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                      </intent-filter>
+                  </receiver>
+              </application>
+          </manifest>
+          EOF_4
+          cat > app/src/main/java/com/example/wfcmonitor/MainActivity.kt <<'EOF_5'
+          package com.example.wfcmonitor
+
+          import android.Manifest
+          import android.content.ContentValues
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.Paint
+          import android.graphics.Path
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.Environment
+          import android.os.Handler
+          import android.os.Looper
+          import android.provider.MediaStore
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.view.View
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import android.widget.Toast
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.core.app.ActivityCompat
+          import androidx.core.content.ContextCompat
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+
+          class MainActivity : AppCompatActivity() {
+
+              private lateinit var banner: TextView
+              private lateinit var sig: TextView
+              private lateinit var callLine: TextView
+              private lateinit var graph: GraphView
+              private lateinit var info: TextView
+              private val handler = Handler(Looper.getMainLooper())
+              private val ticker = object : Runnable {
+                  override fun run() { refresh(); handler.postDelayed(this, 2000) }
+              }
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+              private fun button(label: String, onClick: () -> Unit) = Button(this).apply {
+                  text = label
+                  setOnClickListener { onClick() }
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  banner = TextView(this).apply {
+                      textSize = 20f; gravity = Gravity.CENTER; setPadding(dp(12), dp(28), dp(12), dp(28))
+                      setTextColor(Color.WHITE); setBackgroundColor(Color.GRAY)
+                  }
+                  sig = TextView(this).apply { textSize = 22f; setPadding(dp(12), dp(12), dp(12), dp(4)) }
+                  callLine = TextView(this).apply { textSize = 15f; setPadding(dp(12), 0, dp(12), dp(8)) }
+                  graph = GraphView(this)
+                  info = TextView(this).apply { textSize = 13f; setPadding(dp(12), dp(12), dp(12), dp(24)) }
+
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      addView(banner); addView(sig); addView(callLine)
+                      addView(graph)
+                      addView(button("Wi-Fi Calling / network settings kholo") {
+                          startActivity(Intent(Settings.ACTION_WIRELESS_SETTINGS))
+                      })
+                      addView(button("Battery optimization band karo (background ke liye)") {
+                          startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                      })
+                      addView(button("History CSV export (Downloads folder)") { exportCsv() })
+                      addView(info)
+                  }
+                  setContentView(ScrollView(this).apply { addView(root) })
+
+                  if (!coreGranted()) {
+                      val perms = mutableListOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.ACCESS_FINE_LOCATION)
+                      if (Build.VERSION.SDK_INT >= 33) perms.add(Manifest.permission.POST_NOTIFICATIONS)
+                      ActivityCompat.requestPermissions(this, perms.toTypedArray(), 1)
+                  }
+              }
+
+              private fun coreGranted(): Boolean =
+                  ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED &&
+                      ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
+              private fun startMonitor() {
+                  try {
+                      ContextCompat.startForegroundService(this, Intent(this, MonitorService::class.java))
+                  } catch (e: Exception) {
+                      info.text = "Service start error: ${e.message}"
+                  }
+              }
+
+              override fun onRequestPermissionsResult(code: Int, p: Array<out String>, r: IntArray) {
+                  super.onRequestPermissionsResult(code, p, r)
+                  if (coreGranted()) startMonitor() else info.text = "Phone + Location permission zaroori hai."
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  if (coreGranted()) startMonitor()
+                  handler.post(ticker)
+              }
+
+              override fun onPause() {
+                  super.onPause()
+                  handler.removeCallbacks(ticker)
+              }
+
+              private fun refresh() {
+                  val ss = Status.service
+                  val wfc = Util.isWfc(ss)
+                  val wifi = Util.wifiConnected(this)
+                  val dbm = Util.bestDbm(Status.signal)
+
+                  if (ss == null && Status.signal == null) {
+                      banner.text = "⏳ Monitoring start ho rahi hai..."
+                      banner.setBackgroundColor(Color.GRAY)
+                  } else {
+                      banner.text = Util.bannerText(wfc, wifi)
+                      banner.setBackgroundColor(Util.bannerColor(wfc, wifi))
+                  }
+                  sig.text = if (dbm == null) "Signal: cellular signal nahi" else "Signal: $dbm dBm (${Util.cellTech(ss)})"
+                  sig.setTextColor(Util.dbmColor(dbm))
+                  callLine.text = Util.callLine()
+                  graph.data = Util.History.read(this, 400)
+                  graph.invalidate()
+
+                  val sb = StringBuilder()
+                  sb.append(Util.wifiDetails(this)).append("\n\n")
+                  sb.append(Util.cellDetails(this)).append("\n\n")
+                  Status.signal?.cellSignalStrengths?.forEach {
+                      sb.append("${it.javaClass.simpleName.removePrefix("CellSignalStrength")}: ${it.dbm} dBm, level ${it.level}/4\n")
+                  }
+                  sb.append("\n--- DEBUG ---\n")
+                  ss?.networkRegistrationInfoList?.forEach { sb.append(it.toString()).append("\n\n") }
+                  info.text = sb.toString()
+              }
+
+              private fun exportCsv() {
+                  try {
+                      val name = "wfc_history_" + SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date()) + ".csv"
+                      val values = ContentValues().apply {
+                          put(MediaStore.Downloads.DISPLAY_NAME, name)
+                          put(MediaStore.Downloads.MIME_TYPE, "text/csv")
+                          put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                      }
+                      val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                      if (uri == null) {
+                          Toast.makeText(this, "Export fail ho gaya", Toast.LENGTH_LONG).show()
+                          return
+                      }
+                      contentResolver.openOutputStream(uri)?.use { it.write(Util.History.csv(this).toByteArray()) }
+                      Toast.makeText(this, "Downloads me save: $name", Toast.LENGTH_LONG).show()
+                  } catch (e: Exception) {
+                      Toast.makeText(this, "Export error: ${e.message}", Toast.LENGTH_LONG).show()
+                  }
+              }
+          }
+
+          class GraphView(ctx: Context) : View(ctx) {
+              var data: List<Rec> = emptyList()
+              private val lineP = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                  color = Color.parseColor("#1565C0"); strokeWidth = 5f; style = Paint.Style.STROKE
+              }
+              private val shadeP = Paint().apply { color = Color.parseColor("#442E7D32"); style = Paint.Style.FILL }
+              private val gridP = Paint().apply { color = Color.LTGRAY; strokeWidth = 2f }
+              private val txtP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.GRAY; textSize = 28f }
+
+              override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                  setMeasuredDimension(MeasureSpec.getSize(widthMeasureSpec), (resources.displayMetrics.density * 220).toInt())
+              }
+
+              override fun onDraw(canvas: Canvas) {
+                  super.onDraw(canvas)
+                  val w = width.toFloat()
+                  val h = height.toFloat()
+                  val left = 120f
+                  val top = -60f
+                  val bottom = -130f
+                  fun yOf(d: Float): Float = h * (top - d) / (top - bottom)
+                  for (g in intArrayOf(-70, -90, -110, -130)) {
+                      val y = yOf(g.toFloat())
+                      canvas.drawLine(left, y, w, y, gridP)
+                      canvas.drawText("$g", 4f, y - 4f, txtP)
+                  }
+                  if (data.size < 2) {
+                      canvas.drawText("History ban rahi hai...", left + 20f, h / 2, txtP)
+                      return
+                  }
+                  val t0 = data.first().t
+                  val span = maxOf(1L, data.last().t - t0).toFloat()
+                  fun xOf(t: Long): Float = left + (w - left) * (t - t0).toFloat() / span
+                  for (i in 0 until data.size - 1) {
+                      if (data[i].wfc) canvas.drawRect(xOf(data[i].t), 0f, xOf(data[i + 1].t), h, shadeP)
+                  }
+                  val path = Path()
+                  var pen = false
+                  for (r in data) {
+                      val d = r.dbm
+                      if (d == null) { pen = false; continue }
+                      val x = xOf(r.t)
+                      val y = yOf(d.toFloat().coerceIn(-130f, -60f))
+                      if (pen) path.lineTo(x, y) else { path.moveTo(x, y); pen = true }
+                  }
+                  canvas.drawPath(path, lineP)
+                  canvas.drawText("hara = Wi-Fi Calling ON", left + 8f, 30f, txtP)
+              }
+          }
+          EOF_5
+          cat > app/src/main/java/com/example/wfcmonitor/MonitorService.kt <<'EOF_6'
+          package com.example.wfcmonitor
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.PendingIntent
+          import android.app.Service
+          import android.content.ComponentName
+          import android.content.Intent
+          import android.os.Handler
+          import android.os.IBinder
+          import android.os.Looper
+          import android.service.quicksettings.TileService
+          import android.telephony.ServiceState
+          import android.telephony.SignalStrength
+          import android.telephony.TelephonyCallback
+          import android.telephony.TelephonyManager
+
+          class MonitorService : Service() {
+
+              companion object {
+                  const val NOTIF_ID = 1
+                  const val CH_STATUS = "status"
+                  const val CH_ALERT = "alerts"
+                  const val WEAK_DBM = -110
+              }
+
+              private lateinit var tm: TelephonyManager
+              private lateinit var nm: NotificationManager
+              private val handler = Handler(Looper.getMainLooper())
+              private var registered = false
+              private var lastWfc: Boolean? = null
+              private var lastNet = ""
+              private var lastLogMs = 0L
+              private var lastWeakAlertMs = 0L
+              private var lastDropAlertMs = 0L
+              private var callStartMs = 0L
+
+              private val cb = object : TelephonyCallback(),
+                  TelephonyCallback.SignalStrengthsListener,
+                  TelephonyCallback.ServiceStateListener,
+                  TelephonyCallback.CallStateListener {
+                  override fun onSignalStrengthsChanged(s: SignalStrength) { Status.signal = s; update() }
+                  override fun onServiceStateChanged(s: ServiceState) { Status.service = s; update() }
+                  override fun onCallStateChanged(state: Int) { handleCall(state) }
+              }
+
+              private val ticker = object : Runnable {
+                  override fun run() { update(); handler.postDelayed(this, 5000) }
+              }
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onCreate() {
+                  super.onCreate()
+                  tm = getSystemService(TELEPHONY_SERVICE) as TelephonyManager
+                  nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                  nm.createNotificationChannel(NotificationChannel(CH_STATUS, "Status", NotificationManager.IMPORTANCE_LOW))
+                  nm.createNotificationChannel(NotificationChannel(CH_ALERT, "Alerts", NotificationManager.IMPORTANCE_HIGH))
+              }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  startForeground(NOTIF_ID, statusNotification("Monitoring start ho rahi hai...", ""))
+                  if (!registered) {
+                      try {
+                          tm.registerTelephonyCallback(mainExecutor, cb)
+                          registered = true
+                          handler.post(ticker)
+                      } catch (e: SecurityException) {
+                          stopSelf()
+                      }
+                  }
+                  return START_STICKY
+              }
+
+              override fun onDestroy() {
+                  handler.removeCallbacks(ticker)
+                  if (registered) {
+                      try { tm.unregisterTelephonyCallback(cb) } catch (_: Exception) {}
+                  }
+                  super.onDestroy()
+              }
+
+              private fun openApp(): PendingIntent =
+                  PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+
+              private fun statusNotification(title: String, text: String): Notification =
+                  Notification.Builder(this, CH_STATUS)
+                      .setSmallIcon(R.drawable.ic_tile)
+                      .setContentTitle(title)
+                      .setContentText(text.lineSequence().firstOrNull() ?: "")
+                      .setStyle(Notification.BigTextStyle().bigText(text))
+                      .setOngoing(true)
+                      .setOnlyAlertOnce(true)
+                      .setContentIntent(openApp())
+                      .build()
+
+              private fun alert(id: Int, title: String, text: String) {
+                  val n = Notification.Builder(this, CH_ALERT)
+                      .setSmallIcon(R.drawable.ic_tile)
+                      .setContentTitle(title)
+                      .setContentText(text)
+                      .setStyle(Notification.BigTextStyle().bigText(text))
+                      .setAutoCancel(true)
+                      .setContentIntent(openApp())
+                      .build()
+                  nm.notify(id, n)
+              }
+
+              private fun record(event: String) {
+                  Util.History.add(
+                      this, Util.bestDbm(Status.signal), Util.isWfc(Status.service),
+                      Util.wifiConnected(this), Util.cellTech(Status.service), event
+                  )
+              }
+
+              private fun handleCall(state: Int) {
+                  val now = System.currentTimeMillis()
+                  if (state == TelephonyManager.CALL_STATE_OFFHOOK && Status.callState != TelephonyManager.CALL_STATE_OFFHOOK) {
+                      callStartMs = now
+                      Status.callOnWifi = Util.isWfc(Status.service)
+                      record("CALL_START")
+                  } else if (state == TelephonyManager.CALL_STATE_IDLE && Status.callState == TelephonyManager.CALL_STATE_OFFHOOK) {
+                      val secs = (now - callStartMs) / 1000
+                      val where = if (Status.callOnWifi == true) "Wi-Fi par" else "cellular par"
+                      Status.lastCall = "Pichli call: $where (${secs}s)"
+                      record("CALL_END")
+                      Status.callOnWifi = null
+                  }
+                  Status.callState = state
+                  update()
+              }
+
+              private fun update() {
+                  val wfc = Util.isWfc(Status.service)
+                  val wifi = Util.wifiConnected(this)
+                  val dbm = Util.bestDbm(Status.signal)
+                  val net = Util.cellTech(Status.service)
+                  val now = System.currentTimeMillis()
+                  if (Status.callState == TelephonyManager.CALL_STATE_OFFHOOK) Status.callOnWifi = wfc
+
+                  val ready = Status.service != null && Status.signal != null
+                  if (ready) {
+                      // Alert: Wi-Fi Calling dropped
+                      if (lastWfc == true && !wfc && now - lastDropAlertMs > 120_000) {
+                          lastDropAlertMs = now
+                          val msg = if (wifi) "Wi-Fi connected hai par Wi-Fi Calling register nahi raha. Settings check karo."
+                                    else "Wi-Fi disconnect ho gaya, Wi-Fi Calling band hai."
+                          alert(3, "❌ Wi-Fi Calling band ho gayi", msg)
+                      }
+                      // Alert: weak signal and no Wi-Fi Calling
+                      if (!wfc && (dbm == null || dbm < WEAK_DBM) && now - lastWeakAlertMs > 600_000) {
+                          lastWeakAlertMs = now
+                          val sig = if (dbm == null) "nahi hai" else "$dbm dBm"
+                          val msg = if (wifi) "Cell signal $sig. Wi-Fi Calling on karo (app me settings button)."
+                                    else "Cell signal $sig. Wi-Fi se connect karke Wi-Fi Calling on karo."
+                          alert(2, "⚠️ Signal weak hai", msg)
+                      }
+                      // History log
+                      val event = when {
+                          lastWfc != null && lastWfc != wfc -> if (wfc) "WFC_ON" else "WFC_OFF"
+                          lastNet.isNotEmpty() && lastNet != net -> "NET_CHANGE"
+                          else -> ""
+                      }
+                      if (event.isNotEmpty() || lastWfc == null || now - lastLogMs > 30_000) {
+                          record(event)
+                          lastLogMs = now
+                      }
+                      if (lastWfc != wfc) {
+                          try {
+                              TileService.requestListeningState(this, ComponentName(this, WfcTileService::class.java))
+                          } catch (_: Exception) {}
+                      }
+                      lastWfc = wfc
+                      lastNet = net
+                  }
+
+                  nm.notify(NOTIF_ID, statusNotification(Util.bannerText(wfc, wifi), Util.summary(this)))
+                  Util.updateWidgets(this)
+              }
+          }
+          EOF_6
+          cat > app/src/main/java/com/example/wfcmonitor/Util.kt <<'EOF_7'
+          package com.example.wfcmonitor
+
+          import android.annotation.SuppressLint
+          import android.app.PendingIntent
+          import android.appwidget.AppWidgetManager
+          import android.content.ComponentName
+          import android.content.Context
+          import android.content.Intent
+          import android.graphics.Color
+          import android.net.ConnectivityManager
+          import android.net.NetworkCapabilities
+          import android.net.wifi.WifiManager
+          import android.telephony.CellIdentityNr
+          import android.telephony.CellInfoLte
+          import android.telephony.CellInfoNr
+          import android.telephony.ServiceState
+          import android.telephony.SignalStrength
+          import android.telephony.TelephonyManager
+          import android.widget.RemoteViews
+          import java.io.File
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+
+          object Status {
+              @Volatile var signal: SignalStrength? = null
+              @Volatile var service: ServiceState? = null
+              @Volatile var callState: Int = TelephonyManager.CALL_STATE_IDLE
+              @Volatile var callOnWifi: Boolean? = null
+              @Volatile var lastCall: String = ""
+          }
+
+          data class Rec(val t: Long, val dbm: Int?, val wfc: Boolean, val wifi: Boolean, val net: String, val event: String)
+
+          object Util {
+
+              fun isWfc(ss: ServiceState?): Boolean =
+                  ss?.networkRegistrationInfoList?.any {
+                      it.accessNetworkTechnology == TelephonyManager.NETWORK_TYPE_IWLAN
+                  } == true
+
+              fun bestDbm(s: SignalStrength?): Int? =
+                  s?.cellSignalStrengths?.map { it.dbm }?.filter { it != Int.MAX_VALUE && it < 0 }?.maxOrNull()
+
+              fun typeName(t: Int): String = when (t) {
+                  TelephonyManager.NETWORK_TYPE_NR -> "5G NR"
+                  TelephonyManager.NETWORK_TYPE_LTE -> "4G LTE"
+                  TelephonyManager.NETWORK_TYPE_IWLAN -> "IWLAN"
+                  TelephonyManager.NETWORK_TYPE_UMTS, TelephonyManager.NETWORK_TYPE_HSDPA,
+                  TelephonyManager.NETWORK_TYPE_HSUPA, TelephonyManager.NETWORK_TYPE_HSPA,
+                  TelephonyManager.NETWORK_TYPE_HSPAP -> "3G"
+                  TelephonyManager.NETWORK_TYPE_EDGE, TelephonyManager.NETWORK_TYPE_GPRS -> "2G"
+                  else -> "type $t"
+              }
+
+              // Cellular (WWAN) technology currently registered, e.g. "4G LTE" / "5G NR"
+              fun cellTech(ss: ServiceState?): String {
+                  val tech = ss?.networkRegistrationInfoList
+                      ?.firstOrNull { it.transportType == 1 && it.accessNetworkTechnology != TelephonyManager.NETWORK_TYPE_UNKNOWN }
+                      ?.accessNetworkTechnology ?: return "No cellular"
+                  return typeName(tech)
+              }
+
+              fun dbmColor(dbm: Int?): Int = when {
+                  dbm == null -> Color.GRAY
+                  dbm >= -85 -> Color.parseColor("#2E7D32")
+                  dbm >= -100 -> Color.parseColor("#F9A825")
+                  dbm >= -110 -> Color.parseColor("#EF6C00")
+                  else -> Color.parseColor("#C62828")
+              }
+
+              fun bannerText(wfc: Boolean, wifi: Boolean): String = when {
+                  wfc -> "✅ Wi-Fi Calling ACTIVE"
+                  wifi -> "⚠️ Wi-Fi hai, par Wi-Fi Calling register nahi"
+                  else -> "📶 Calls cellular par (Wi-Fi nahi)"
+              }
+
+              fun bannerColor(wfc: Boolean, wifi: Boolean): Int = when {
+                  wfc -> Color.parseColor("#2E7D32")
+                  wifi -> Color.parseColor("#F9A825")
+                  else -> Color.parseColor("#546E7A")
+              }
+
+              fun wifiConnected(ctx: Context): Boolean {
+                  val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                  val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
+                  return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+              }
+
+              @Suppress("DEPRECATION")
+              fun wifiDetails(ctx: Context): String {
+                  if (!wifiConnected(ctx)) return "Wi-Fi: connected nahi"
+                  return try {
+                      val wm = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                      val i = wm.connectionInfo
+                      val q = when { i.rssi >= -60 -> "achha"; i.rssi >= -70 -> "theek"; else -> "weak" }
+                      "Wi-Fi: ${i.rssi} dBm ($q), ${i.linkSpeed} Mbps, ${if (i.frequency >= 4900) "5 GHz" else "2.4 GHz"}"
+                  } catch (e: Exception) {
+                      "Wi-Fi: details n/a"
+                  }
+              }
+
+              private var cellCache = ""
+              private var cellCacheMs = 0L
+
+              @SuppressLint("MissingPermission")
+              fun cellDetails(ctx: Context): String {
+                  val now = System.currentTimeMillis()
+                  if (now - cellCacheMs < 10_000 && cellCache.isNotEmpty()) return cellCache
+                  val text = try {
+                      val tm = ctx.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+                      val sb = StringBuilder("Operator: ${tm.networkOperatorName}")
+                      tm.allCellInfo?.filter { it.isRegistered }?.forEach { ci ->
+                          when (ci) {
+                              is CellInfoLte -> {
+                                  val id = ci.cellIdentity
+                                  sb.append("\nLTE cell: CI ${id.ci}, PCI ${id.pci}, EARFCN ${id.earfcn}, band ${id.bands.joinToString("/")}")
+                              }
+                              is CellInfoNr -> {
+                                  val id = ci.cellIdentity as CellIdentityNr
+                                  sb.append("\n5G cell: NCI ${id.nci}, PCI ${id.pci}, NRARFCN ${id.nrarfcn}, band ${id.bands.joinToString("/")}")
+                              }
+                              else -> sb.append("\n${ci.javaClass.simpleName}")
+                          }
+                      }
+                      sb.toString()
+                  } catch (e: SecurityException) {
+                      "Cell info: permission chahiye"
+                  } catch (e: Exception) {
+                      "Cell info: n/a"
+                  }
+                  cellCache = text
+                  cellCacheMs = now
+                  return text
+              }
+
+              fun callLine(): String = when {
+                  Status.callState == TelephonyManager.CALL_STATE_OFFHOOK ->
+                      "📞 Call chal rahi hai: " + (if (Status.callOnWifi == true) "Wi-Fi par ✅" else "cellular par")
+                  Status.lastCall.isNotEmpty() -> Status.lastCall
+                  else -> ""
+              }
+
+              fun summary(ctx: Context): String {
+                  val dbm = bestDbm(Status.signal)
+                  val sb = StringBuilder()
+                  sb.append(if (dbm == null) "Cell signal: nahi" else "Cell: $dbm dBm (${cellTech(Status.service)})")
+                  sb.append("\n").append(wifiDetails(ctx))
+                  val c = callLine()
+                  if (c.isNotEmpty()) sb.append("\n").append(c)
+                  return sb.toString()
+              }
+
+              fun updateWidgets(ctx: Context) {
+                  try {
+                      val mgr = AppWidgetManager.getInstance(ctx)
+                      val ids = mgr.getAppWidgetIds(ComponentName(ctx, WfcWidget::class.java))
+                      if (ids.isEmpty()) return
+                      val wfc = isWfc(Status.service)
+                      val wifi = wifiConnected(ctx)
+                      val dbm = bestDbm(Status.signal)
+                      val rv = RemoteViews(ctx.packageName, R.layout.widget)
+                      rv.setTextViewText(R.id.w_title, bannerText(wfc, wifi))
+                      rv.setTextViewText(R.id.w_sub, (if (dbm == null) "No cell signal" else "$dbm dBm") + " • " + cellTech(Status.service))
+                      rv.setInt(R.id.w_root, "setBackgroundColor", bannerColor(wfc, wifi))
+                      val pi = PendingIntent.getActivity(ctx, 0, Intent(ctx, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+                      rv.setOnClickPendingIntent(R.id.w_root, pi)
+                      mgr.updateAppWidget(ids, rv)
+                  } catch (_: Exception) {
+                  }
+              }
+
+              object History {
+                  private fun file(ctx: Context) = File(ctx.filesDir, "history.csv")
+
+                  @Synchronized
+                  fun add(ctx: Context, dbm: Int?, wfc: Boolean, wifi: Boolean, net: String, event: String) {
+                      val f = file(ctx)
+                      f.appendText("${System.currentTimeMillis()},${dbm ?: ""},${if (wfc) 1 else 0},${if (wifi) 1 else 0},$net,$event\n")
+                      if (f.length() > 200_000) {
+                          val lines = f.readLines()
+                          f.writeText(lines.takeLast(1500).joinToString("\n") + "\n")
+                      }
+                  }
+
+                  @Synchronized
+                  fun read(ctx: Context, max: Int): List<Rec> {
+                      val f = file(ctx)
+                      if (!f.exists()) return emptyList()
+                      return f.readLines().takeLast(max).mapNotNull { line ->
+                          try {
+                              val p = line.split(",")
+                              Rec(p[0].toLong(), p[1].toIntOrNull(), p[2] == "1", p[3] == "1", p[4], p.getOrElse(5) { "" })
+                          } catch (e: Exception) {
+                              null
+                          }
+                      }
+                  }
+
+                  @Synchronized
+                  fun csv(ctx: Context): String {
+                      val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+                      val sb = StringBuilder("time,signal_dbm,wifi_calling,wifi_connected,cell_tech,event\n")
+                      for (r in read(ctx, 100000)) {
+                          sb.append(sdf.format(Date(r.t))).append(",")
+                          sb.append(r.dbm?.toString() ?: "").append(",")
+                          sb.append(if (r.wfc) "YES" else "NO").append(",")
+                          sb.append(if (r.wifi) "YES" else "NO").append(",")
+                          sb.append(r.net).append(",").append(r.event).append("\n")
+                      }
+                      return sb.toString()
+                  }
+              }
+          }
+          EOF_7
+          cat > app/src/main/java/com/example/wfcmonitor/WfcTileService.kt <<'EOF_8'
+          package com.example.wfcmonitor
+
+          import android.app.PendingIntent
+          import android.content.Intent
+          import android.os.Build
+          import android.provider.Settings
+          import android.service.quicksettings.Tile
+          import android.service.quicksettings.TileService
+
+          class WfcTileService : TileService() {
+
+              override fun onStartListening() {
+                  refresh()
+              }
+
+              private fun refresh() {
+                  val tile = qsTile ?: return
+                  val on = Util.isWfc(Status.service)
+                  tile.state = if (on) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
+                  tile.label = "Wi-Fi Calling"
+                  tile.subtitle = if (Status.service == null) "Monitor off" else if (on) "Active" else "Inactive"
+                  tile.updateTile()
+              }
+
+              @Suppress("DEPRECATION")
+              override fun onClick() {
+                  val i = Intent(Settings.ACTION_WIRELESS_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                  if (Build.VERSION.SDK_INT >= 34) {
+                      startActivityAndCollapse(PendingIntent.getActivity(this, 0, i, PendingIntent.FLAG_IMMUTABLE))
+                  } else {
+                      startActivityAndCollapse(i)
+                  }
+              }
+          }
+          EOF_8
+          cat > app/src/main/java/com/example/wfcmonitor/WfcWidget.kt <<'EOF_9'
+          package com.example.wfcmonitor
+
+          import android.appwidget.AppWidgetManager
+          import android.appwidget.AppWidgetProvider
+          import android.content.Context
+
+          class WfcWidget : AppWidgetProvider() {
+              override fun onUpdate(context: Context, appWidgetManager: AppWidgetManager, appWidgetIds: IntArray) {
+                  Util.updateWidgets(context)
+              }
+          }
+          EOF_9
+          cat > app/src/main/java/com/example/wfcmonitor/BootReceiver.kt <<'EOF_10'
+          package com.example.wfcmonitor
+
+          import android.Manifest
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import androidx.core.content.ContextCompat
+
+          class BootReceiver : BroadcastReceiver() {
+              override fun onReceive(context: Context, intent: Intent) {
+                  if (intent.action == Intent.ACTION_BOOT_COMPLETED &&
+                      ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED
+                  ) {
+                      try {
+                          ContextCompat.startForegroundService(context, Intent(context, MonitorService::class.java))
+                      } catch (_: Exception) {
+                      }
+                  }
+              }
+          }
+          EOF_10
+          cat > app/src/main/res/layout/widget.xml <<'EOF_11'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:id="@+id/w_root"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:orientation="vertical"
+              android:padding="12dp"
+              android:background="#546E7A">
+              <TextView
+                  android:id="@+id/w_title"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:textColor="#FFFFFF"
+                  android:textSize="15sp"
+                  android:textStyle="bold"/>
+              <TextView
+                  android:id="@+id/w_sub"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:textColor="#FFFFFF"
+                  android:textSize="13sp"/>
+          </LinearLayout>
+          EOF_11
+          cat > app/src/main/res/xml/widget_info.xml <<'EOF_12'
+          <?xml version="1.0" encoding="utf-8"?>
+          <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+              android:minWidth="180dp"
+              android:minHeight="70dp"
+              android:updatePeriodMillis="0"
+              android:initialLayout="@layout/widget"
+              android:resizeMode="horizontal|vertical"
+              android:widgetCategory="home_screen"/>
+          EOF_12
+          cat > app/src/main/res/drawable/ic_tile.xml <<'EOF_13'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp"
+              android:height="24dp"
+              android:viewportWidth="24"
+              android:viewportHeight="24">
+              <path
+                  android:fillColor="#FFFFFFFF"
+                  android:pathData="M1,9l2,2c4.97,-4.97 13.03,-4.97 18,0l2,-2C16.93,2.93 7.08,2.93 1,9zM9,17l3,3 3,-3c-1.65,-1.66 -4.34,-1.66 -6,0zM5,13l2,2c2.76,-2.76 7.24,-2.76 10,0l2,-2C15.14,9.14 8.87,9.14 5,13z"/>
+          </vector>
+          EOF_13
+      - name: Build
+        working-directory: /tmp/proj
+        run: gradle assembleDebug --no-daemon
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "v${{ github.run_number }}" /tmp/proj/app/build/outputs/apk/debug/app-debug.apk --repo "${{ github.repository }}" --title "WFC Monitor build ${{ github.run_number }}" --notes "Debug APK"
