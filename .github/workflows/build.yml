@@ -18,12 +18,12 @@ jobs:
           gradle-version: 8.9
       - name: Generate project files
         run: |
-          mkdir -p /tmp/proj/app /tmp/proj/app/src/main /tmp/proj/app/src/main/java/com/example/wfcmonitor /tmp/proj/app/src/main/res/drawable /tmp/proj/app/src/main/res/layout /tmp/proj/app/src/main/res/xml
+          mkdir -p /tmp/proj/app /tmp/proj/app/src/main /tmp/proj/app/src/main/java/com/example/smsledger
           cd /tmp/proj
           cat > settings.gradle.kts <<'EOF_0'
           pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
           dependencyResolutionManagement { repositories { google(); mavenCentral() } }
-          rootProject.name = "WfcMonitor"
+          rootProject.name = "SmsLedger"
           include(":app")
           EOF_0
           cat > build.gradle.kts <<'EOF_1'
@@ -42,14 +42,14 @@ jobs:
               id("org.jetbrains.kotlin.android")
           }
           android {
-              namespace = "com.example.wfcmonitor"
+              namespace = "com.example.smsledger"
               compileSdk = 34
               defaultConfig {
-                  applicationId = "com.example.wfcmonitor"
-                  minSdk = 31
+                  applicationId = "com.example.smsledger"
+                  minSdk = 29
                   targetSdk = 33
-                  versionCode = 2
-                  versionName = "2.0"
+                  versionCode = 1
+                  versionName = "1.0"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -65,192 +65,278 @@ jobs:
           cat > app/src/main/AndroidManifest.xml <<'EOF_4'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-              <uses-permission android:name="android.permission.READ_PHONE_STATE"/>
-              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
-              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
-              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
-              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
-              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
-              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
-              <application android:label="WFC Monitor" android:theme="@style/Theme.AppCompat.Light.DarkActionBar">
+              <uses-permission android:name="android.permission.READ_SMS"/>
+              <application android:label="SMS Ledger" android:theme="@style/Theme.AppCompat.Light.DarkActionBar">
                   <activity android:name=".MainActivity" android:exported="true">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN"/>
                           <category android:name="android.intent.category.LAUNCHER"/>
                       </intent-filter>
                   </activity>
-                  <service android:name=".MonitorService" android:exported="false"/>
-                  <service
-                      android:name=".WfcTileService"
-                      android:exported="true"
-                      android:label="Wi-Fi Calling"
-                      android:icon="@drawable/ic_tile"
-                      android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
-                      <intent-filter>
-                          <action android:name="android.service.quicksettings.action.QS_TILE"/>
-                      </intent-filter>
-                  </service>
-                  <receiver android:name=".WfcWidget" android:exported="true">
-                      <intent-filter>
-                          <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
-                      </intent-filter>
-                      <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_info"/>
-                  </receiver>
-                  <receiver android:name=".BootReceiver" android:exported="true">
-                      <intent-filter>
-                          <action android:name="android.intent.action.BOOT_COMPLETED"/>
-                      </intent-filter>
-                  </receiver>
               </application>
           </manifest>
           EOF_4
-          cat > app/src/main/java/com/example/wfcmonitor/MainActivity.kt <<'EOF_5'
-          package com.example.wfcmonitor
+          cat > app/src/main/java/com/example/smsledger/MainActivity.kt <<'EOF_5'
+          package com.example.smsledger
 
           import android.Manifest
           import android.content.ContentValues
           import android.content.Context
-          import android.content.Intent
           import android.content.pm.PackageManager
-          import android.graphics.Canvas
           import android.graphics.Color
-          import android.graphics.Paint
-          import android.graphics.Path
-          import android.os.Build
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
           import android.os.Bundle
           import android.os.Environment
-          import android.os.Handler
-          import android.os.Looper
           import android.provider.MediaStore
-          import android.provider.Settings
           import android.view.Gravity
           import android.view.View
+          import android.view.ViewGroup
+          import android.widget.BaseAdapter
           import android.widget.Button
+          import android.widget.EditText
+          import android.widget.HorizontalScrollView
           import android.widget.LinearLayout
-          import android.widget.ScrollView
+          import android.widget.ListView
           import android.widget.TextView
           import android.widget.Toast
+          import androidx.appcompat.app.AlertDialog
           import androidx.appcompat.app.AppCompatActivity
           import androidx.core.app.ActivityCompat
           import androidx.core.content.ContextCompat
+          import androidx.core.widget.doAfterTextChanged
           import java.text.SimpleDateFormat
+          import java.util.Calendar
           import java.util.Date
           import java.util.Locale
 
           class MainActivity : AppCompatActivity() {
 
-              private lateinit var banner: TextView
-              private lateinit var sig: TextView
-              private lateinit var callLine: TextView
-              private lateinit var graph: GraphView
-              private lateinit var info: TextView
-              private val handler = Handler(Looper.getMainLooper())
-              private val ticker = object : Runnable {
-                  override fun run() { refresh(); handler.postDelayed(this, 2000) }
-              }
+              private class Holder(val name: TextView, val sub: TextView, val amt: TextView)
+
+              private var txns: List<Txn> = emptyList()
+              private var shown: List<Txn> = emptyList()
+              private val cal: Calendar = Calendar.getInstance()
+              private var allTime = false
+              private var query = ""
+              private var selCat: String? = null
+
+              private lateinit var monthLabel: TextView
+              private lateinit var summary: TextView
+              private lateinit var chips: LinearLayout
+              private lateinit var listView: ListView
+              private val txnAdapter = TxnAdapter()
+              private val dateFmt = SimpleDateFormat("dd MMM yy", Locale.getDefault())
 
               private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
-              private fun button(label: String, onClick: () -> Unit) = Button(this).apply {
+              private fun money(v: Double): String =
+                  if (v % 1.0 == 0.0) String.format(Locale.US, "%,.0f", v) else String.format(Locale.US, "%,.2f", v)
+
+              private fun smallBtn(label: String, onClick: () -> Unit) = Button(this).apply {
                   text = label
+                  isAllCaps = false
+                  minWidth = 0
+                  minimumWidth = 0
+                  setPadding(dp(10), 0, dp(10), 0)
                   setOnClickListener { onClick() }
+              }
+
+              private fun chip(label: String, sel: Boolean, onClick: () -> Unit) = TextView(this).apply {
+                  text = label
+                  textSize = 13f
+                  setPadding(dp(12), dp(6), dp(12), dp(6))
+                  setTextColor(if (sel) Color.WHITE else Color.BLACK)
+                  background = GradientDrawable().apply {
+                      cornerRadius = dp(16).toFloat()
+                      setColor(Color.parseColor(if (sel) "#1565C0" else "#E0E0E0"))
+                  }
+                  setOnClickListener { onClick() }
+                  layoutParams = LinearLayout.LayoutParams(
+                      ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                  ).apply { setMargins(dp(4), dp(4), dp(4), dp(4)) }
               }
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
+                  cal.set(Calendar.DAY_OF_MONTH, 1)
 
-                  banner = TextView(this).apply {
-                      textSize = 20f; gravity = Gravity.CENTER; setPadding(dp(12), dp(28), dp(12), dp(28))
-                      setTextColor(Color.WHITE); setBackgroundColor(Color.GRAY)
+                  monthLabel = TextView(this).apply {
+                      textSize = 17f
+                      gravity = Gravity.CENTER
+                      setTypeface(null, Typeface.BOLD)
                   }
-                  sig = TextView(this).apply { textSize = 22f; setPadding(dp(12), dp(12), dp(12), dp(4)) }
-                  callLine = TextView(this).apply { textSize = 15f; setPadding(dp(12), 0, dp(12), dp(8)) }
-                  graph = GraphView(this)
-                  info = TextView(this).apply { textSize = 13f; setPadding(dp(12), dp(12), dp(12), dp(24)) }
+                  summary = TextView(this).apply {
+                      textSize = 15f
+                      setPadding(dp(12), dp(6), dp(12), dp(6))
+                  }
+                  chips = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      setPadding(dp(6), 0, dp(6), 0)
+                  }
+                  val chipScroll = HorizontalScrollView(this).apply {
+                      isHorizontalScrollBarEnabled = false
+                      addView(chips)
+                  }
+                  val search = EditText(this).apply {
+                      hint = "Search: naam ya dukaan (jaise ramesh)"
+                      setSingleLine()
+                      doAfterTextChanged { e ->
+                          query = e?.toString()?.trim() ?: ""
+                          refresh()
+                      }
+                  }
+                  listView = ListView(this).apply {
+                      adapter = txnAdapter
+                      setOnItemClickListener { _, _, pos, _ -> shown.getOrNull(pos)?.let { showTxn(it) } }
+                  }
+
+                  val topRow = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                      setPadding(dp(4), dp(4), dp(4), 0)
+                      addView(smallBtn("◀") { allTime = false; cal.add(Calendar.MONTH, -1); refresh() })
+                      addView(monthLabel, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                      addView(smallBtn("▶") { allTime = false; cal.add(Calendar.MONTH, 1); refresh() })
+                      addView(smallBtn("All") { allTime = !allTime; refresh() })
+                      addView(smallBtn("⟳") { loadSms() })
+                      addView(smallBtn("CSV") { exportCsv() })
+                  }
 
                   val root = LinearLayout(this).apply {
                       orientation = LinearLayout.VERTICAL
-                      addView(banner); addView(sig); addView(callLine)
-                      addView(graph)
-                      addView(button("Wi-Fi Calling / network settings kholo") {
-                          startActivity(Intent(Settings.ACTION_WIRELESS_SETTINGS))
-                      })
-                      addView(button("Battery optimization band karo (background ke liye)") {
-                          startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
-                      })
-                      addView(button("History CSV export (Downloads folder)") { exportCsv() })
-                      addView(info)
+                      addView(topRow)
+                      addView(summary)
+                      addView(chipScroll)
+                      addView(search)
+                      addView(listView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
                   }
-                  setContentView(ScrollView(this).apply { addView(root) })
+                  setContentView(root)
+                  refresh()
 
-                  if (!coreGranted()) {
-                      val perms = mutableListOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.ACCESS_FINE_LOCATION)
-                      if (Build.VERSION.SDK_INT >= 33) perms.add(Manifest.permission.POST_NOTIFICATIONS)
-                      ActivityCompat.requestPermissions(this, perms.toTypedArray(), 1)
-                  }
+                  if (hasSms()) loadSms()
+                  else ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.READ_SMS), 1)
               }
 
-              private fun coreGranted(): Boolean =
-                  ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED &&
-                      ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-
-              private fun startMonitor() {
-                  try {
-                      ContextCompat.startForegroundService(this, Intent(this, MonitorService::class.java))
-                  } catch (e: Exception) {
-                      info.text = "Service start error: ${e.message}"
-                  }
-              }
+              private fun hasSms() =
+                  ContextCompat.checkSelfPermission(this, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED
 
               override fun onRequestPermissionsResult(code: Int, p: Array<out String>, r: IntArray) {
                   super.onRequestPermissionsResult(code, p, r)
-                  if (coreGranted()) startMonitor() else info.text = "Phone + Location permission zaroori hai."
+                  if (hasSms()) loadSms()
+                  else summary.text = "SMS permission nahi mili. Phone Settings → Apps → SMS Ledger → Permissions me SMS allow karo " +
+                      "(Android 13+ par pehle app info me ⋮ → 'Allow restricted settings' dabana pad sakta hai)."
               }
 
-              override fun onResume() {
-                  super.onResume()
-                  if (coreGranted()) startMonitor()
-                  handler.post(ticker)
-              }
-
-              override fun onPause() {
-                  super.onPause()
-                  handler.removeCallbacks(ticker)
+              private fun loadSms() {
+                  if (!hasSms()) {
+                      ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.READ_SMS), 1)
+                      return
+                  }
+                  summary.text = "SMS padhe ja rahe hain..."
+                  Thread {
+                      var err: String? = null
+                      val list = try {
+                          SmsLoader.load(this)
+                      } catch (e: Exception) {
+                          err = e.message
+                          emptyList<Txn>()
+                      }
+                      runOnUiThread {
+                          txns = list
+                          refresh()
+                          if (err != null) summary.text = "Error: $err"
+                      }
+                  }.start()
               }
 
               private fun refresh() {
-                  val ss = Status.service
-                  val wfc = Util.isWfc(ss)
-                  val wifi = Util.wifiConnected(this)
-                  val dbm = Util.bestDbm(Status.signal)
-
-                  if (ss == null && Status.signal == null) {
-                      banner.text = "⏳ Monitoring start ho rahi hai..."
-                      banner.setBackgroundColor(Color.GRAY)
-                  } else {
-                      banner.text = Util.bannerText(wfc, wifi)
-                      banner.setBackgroundColor(Util.bannerColor(wfc, wifi))
+                  val start = Calendar.getInstance().apply {
+                      timeInMillis = cal.timeInMillis
+                      set(Calendar.DAY_OF_MONTH, 1)
+                      set(Calendar.HOUR_OF_DAY, 0)
+                      set(Calendar.MINUTE, 0)
+                      set(Calendar.SECOND, 0)
+                      set(Calendar.MILLISECOND, 0)
                   }
-                  sig.text = if (dbm == null) "Signal: cellular signal nahi" else "Signal: $dbm dBm (${Util.cellTech(ss)})"
-                  sig.setTextColor(Util.dbmColor(dbm))
-                  callLine.text = Util.callLine()
-                  graph.data = Util.History.read(this, 400)
-                  graph.invalidate()
-
-                  val sb = StringBuilder()
-                  sb.append(Util.wifiDetails(this)).append("\n\n")
-                  sb.append(Util.cellDetails(this)).append("\n\n")
-                  Status.signal?.cellSignalStrengths?.forEach {
-                      sb.append("${it.javaClass.simpleName.removePrefix("CellSignalStrength")}: ${it.dbm} dBm, level ${it.level}/4\n")
+                  val end = Calendar.getInstance().apply {
+                      timeInMillis = start.timeInMillis
+                      add(Calendar.MONTH, 1)
                   }
-                  sb.append("\n--- DEBUG ---\n")
-                  ss?.networkRegistrationInfoList?.forEach { sb.append(it.toString()).append("\n\n") }
-                  info.text = sb.toString()
+                  monthLabel.text = if (allTime) "Poora record"
+                  else SimpleDateFormat("MMMM yyyy", Locale.getDefault()).format(start.time)
+
+                  val q = query.lowercase()
+                  val base = txns.filter { t ->
+                      (allTime || (t.date >= start.timeInMillis && t.date < end.timeInMillis)) &&
+                          (q.isEmpty() || t.merchant.lowercase().contains(q) ||
+                              t.category.lowercase().contains(q) || t.body.lowercase().contains(q))
+                  }
+
+                  val spent = base.filter { it.debit }.sumOf { it.amount }
+                  val recv = base.filter { !it.debit }.sumOf { it.amount }
+                  summary.text = "Kharch: ₹${money(spent)}     Mila: ₹${money(recv)}\n${base.size} transactions" +
+                      (if (txns.isEmpty()) "  (koi bank SMS nahi mila)" else "")
+
+                  val cats = base.groupBy { it.category }
+                  val sc = selCat
+                  if (sc != null && !cats.containsKey(sc)) selCat = null
+
+                  chips.removeAllViews()
+                  chips.addView(chip("All", selCat == null) { selCat = null; refresh() })
+                  cats.entries.sortedByDescending { e -> e.value.sumOf { it.amount } }.forEach { e ->
+                      val d = e.value.filter { it.debit }.sumOf { it.amount }
+                      val c = e.value.filter { !it.debit }.sumOf { it.amount }
+                      val label = e.key + " " + (if (d > 0) "₹" + money(d) else "+₹" + money(c))
+                      chips.addView(chip(label, selCat == e.key) { selCat = e.key; refresh() })
+                  }
+
+                  val cur = selCat
+                  shown = if (cur == null) base else base.filter { it.category == cur }
+                  txnAdapter.notifyDataSetChanged()
               }
+
+              private fun showTxn(t: Txn) {
+                  val msg = dateFmt.format(Date(t.date)) + " • " + t.category + "\n" +
+                      (if (t.debit) "Kharch: ₹" else "Mila: ₹") + money(t.amount) +
+                      "\nSender: " + t.sender + "\n\n" + t.body
+                  AlertDialog.Builder(this)
+                      .setTitle(t.merchant)
+                      .setMessage(msg)
+                      .setPositiveButton("Category badlo") { _, _ -> pickCategory(t) }
+                      .setNegativeButton("Band karo", null)
+                      .show()
+              }
+
+              private fun pickCategory(t: Txn) {
+                  AlertDialog.Builder(this)
+                      .setTitle("Category chuno")
+                      .setItems(Parser.CATEGORIES.toTypedArray()) { _, which ->
+                          val cat = Parser.CATEGORIES[which]
+                          val key = Parser.keyOf(t)
+                          getSharedPreferences("ledger", Context.MODE_PRIVATE).edit().putString("ov:$key", cat).apply()
+                          txns.filter { Parser.keyOf(it) == key }.forEach { it.category = cat }
+                          refresh()
+                      }
+                      .show()
+              }
+
+              private fun csvq(s: String): String = "\"" + s.replace("\"", "\"\"") + "\""
 
               private fun exportCsv() {
                   try {
-                      val name = "wfc_history_" + SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date()) + ".csv"
+                      val f = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US)
+                      val sb = StringBuilder("date,type,amount,merchant,category,sender,sms\n")
+                      for (t in shown) {
+                          sb.append(f.format(Date(t.date))).append(',')
+                              .append(if (t.debit) "DEBIT" else "CREDIT").append(',')
+                              .append(t.amount).append(',')
+                              .append(csvq(t.merchant)).append(',')
+                              .append(csvq(t.category)).append(',')
+                              .append(csvq(t.sender)).append(',')
+                              .append(csvq(t.body)).append('\n')
+                      }
+                      val name = "ledger_" + SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date()) + ".csv"
                       val values = ContentValues().apply {
                           put(MediaStore.Downloads.DISPLAY_NAME, name)
                           put(MediaStore.Downloads.MIME_TYPE, "text/csv")
@@ -261,585 +347,227 @@ jobs:
                           Toast.makeText(this, "Export fail ho gaya", Toast.LENGTH_LONG).show()
                           return
                       }
-                      contentResolver.openOutputStream(uri)?.use { it.write(Util.History.csv(this).toByteArray()) }
-                      Toast.makeText(this, "Downloads me save: $name", Toast.LENGTH_LONG).show()
+                      contentResolver.openOutputStream(uri)?.use { it.write(sb.toString().toByteArray()) }
+                      Toast.makeText(this, "Downloads me save: $name (${shown.size} rows)", Toast.LENGTH_LONG).show()
                   } catch (e: Exception) {
                       Toast.makeText(this, "Export error: ${e.message}", Toast.LENGTH_LONG).show()
                   }
               }
-          }
 
-          class GraphView(ctx: Context) : View(ctx) {
-              var data: List<Rec> = emptyList()
-              private val lineP = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                  color = Color.parseColor("#1565C0"); strokeWidth = 5f; style = Paint.Style.STROKE
-              }
-              private val shadeP = Paint().apply { color = Color.parseColor("#442E7D32"); style = Paint.Style.FILL }
-              private val gridP = Paint().apply { color = Color.LTGRAY; strokeWidth = 2f }
-              private val txtP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.GRAY; textSize = 28f }
+              inner class TxnAdapter : BaseAdapter() {
+                  override fun getCount(): Int = shown.size
+                  override fun getItem(position: Int): Any = shown[position]
+                  override fun getItemId(position: Int): Long = shown[position].id
 
-              override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-                  setMeasuredDimension(MeasureSpec.getSize(widthMeasureSpec), (resources.displayMetrics.density * 220).toInt())
-              }
+                  private fun makeRow(): LinearLayout {
+                      val name = TextView(this@MainActivity).apply {
+                          textSize = 15f
+                          setTypeface(null, Typeface.BOLD)
+                          setSingleLine()
+                      }
+                      val sub = TextView(this@MainActivity).apply {
+                          textSize = 12f
+                          setTextColor(Color.GRAY)
+                      }
+                      val amt = TextView(this@MainActivity).apply {
+                          textSize = 16f
+                          setTypeface(null, Typeface.BOLD)
+                      }
+                      val left = LinearLayout(this@MainActivity).apply {
+                          orientation = LinearLayout.VERTICAL
+                          addView(name)
+                          addView(sub)
+                      }
+                      return LinearLayout(this@MainActivity).apply {
+                          orientation = LinearLayout.HORIZONTAL
+                          gravity = Gravity.CENTER_VERTICAL
+                          setPadding(dp(12), dp(10), dp(12), dp(10))
+                          addView(left, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                          addView(amt)
+                          tag = Holder(name, sub, amt)
+                      }
+                  }
 
-              override fun onDraw(canvas: Canvas) {
-                  super.onDraw(canvas)
-                  val w = width.toFloat()
-                  val h = height.toFloat()
-                  val left = 120f
-                  val top = -60f
-                  val bottom = -130f
-                  fun yOf(d: Float): Float = h * (top - d) / (top - bottom)
-                  for (g in intArrayOf(-70, -90, -110, -130)) {
-                      val y = yOf(g.toFloat())
-                      canvas.drawLine(left, y, w, y, gridP)
-                      canvas.drawText("$g", 4f, y - 4f, txtP)
+                  override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
+                      val row = convertView as? LinearLayout ?: makeRow()
+                      val h = row.tag as Holder
+                      val t = shown[position]
+                      h.name.text = t.merchant
+                      h.sub.text = dateFmt.format(Date(t.date)) + " • " + t.category
+                      h.amt.text = (if (t.debit) "-₹" else "+₹") + money(t.amount)
+                      h.amt.setTextColor(Color.parseColor(if (t.debit) "#C62828" else "#2E7D32"))
+                      return row
                   }
-                  if (data.size < 2) {
-                      canvas.drawText("History ban rahi hai...", left + 20f, h / 2, txtP)
-                      return
-                  }
-                  val t0 = data.first().t
-                  val span = maxOf(1L, data.last().t - t0).toFloat()
-                  fun xOf(t: Long): Float = left + (w - left) * (t - t0).toFloat() / span
-                  for (i in 0 until data.size - 1) {
-                      if (data[i].wfc) canvas.drawRect(xOf(data[i].t), 0f, xOf(data[i + 1].t), h, shadeP)
-                  }
-                  val path = Path()
-                  var pen = false
-                  for (r in data) {
-                      val d = r.dbm
-                      if (d == null) { pen = false; continue }
-                      val x = xOf(r.t)
-                      val y = yOf(d.toFloat().coerceIn(-130f, -60f))
-                      if (pen) path.lineTo(x, y) else { path.moveTo(x, y); pen = true }
-                  }
-                  canvas.drawPath(path, lineP)
-                  canvas.drawText("hara = Wi-Fi Calling ON", left + 8f, 30f, txtP)
               }
           }
           EOF_5
-          cat > app/src/main/java/com/example/wfcmonitor/MonitorService.kt <<'EOF_6'
-          package com.example.wfcmonitor
+          cat > app/src/main/java/com/example/smsledger/Parser.kt <<'EOF_6'
+          package com.example.smsledger
 
-          import android.app.Notification
-          import android.app.NotificationChannel
-          import android.app.NotificationManager
-          import android.app.PendingIntent
-          import android.app.Service
-          import android.content.ComponentName
-          import android.content.Intent
-          import android.os.Handler
-          import android.os.IBinder
-          import android.os.Looper
-          import android.service.quicksettings.TileService
-          import android.telephony.ServiceState
-          import android.telephony.SignalStrength
-          import android.telephony.TelephonyCallback
-          import android.telephony.TelephonyManager
+          import android.content.Context
+          import android.net.Uri
 
-          class MonitorService : Service() {
+          data class Txn(
+              val id: Long,
+              val date: Long,
+              val sender: String,
+              val amount: Double,
+              val debit: Boolean,
+              val merchant: String,
+              var category: String,
+              val body: String
+          )
 
-              companion object {
-                  const val NOTIF_ID = 1
-                  const val CH_STATUS = "status"
-                  const val CH_ALERT = "alerts"
-                  const val WEAK_DBM = -110
+          object Parser {
+
+              val CATEGORIES = listOf(
+                  "Grocery", "Fuel", "Food", "Travel", "Shopping", "Bills & Recharge", "Entertainment",
+                  "Health", "Cash", "EMI/Loan", "Transfer", "Salary/Income", "Received", "Other"
+              )
+
+              private val amountRe = Regex("(?i)(?:\\b(?:rs\\.?|inr)|₹)\\s*([0-9][0-9,]*(?:\\.[0-9]{1,2})?)")
+              private val excludeRe = Regex("(?i)\\b(otp|one[- ]time|verification|requested|request|will be|due|pre-?approved|eligible|reminder|statement|failed|declined|unsuccessful|offer|apply)\\b")
+              private val accountRe = Regex("(?i)(a/c|\\bac\\b|acct|account|card|upi|bank|wallet|neft|imps|rtgs|atm|x{2,}\\d{2,}|\\*{2,}\\d{2,})")
+              private val debitRe = Regex("(?i)\\b(debited|spent|paid|withdrawn|withdrawal|purchase|sent|transferred|debit of)\\b")
+              private val creditRe = Regex("(?i)\\b(credited|received|deposited|refund(?:ed)?)\\b")
+
+              private val toRe = Regex("(?i)\\b(?:to|at)\\s+([A-Za-z][A-Za-z0-9 &.\\-']{2,30}?)(?=\\s+(?:on|ref\\w*|via|upi|using|avl|bal|a/c|account|txn|not|if|vide|dated|date)\\b|[.,;(]|$)")
+              private val fromRe = Regex("(?i)\\b(?:from|by)\\s+([A-Za-z][A-Za-z0-9 &.\\-']{2,30}?)(?=\\s+(?:on|ref\\w*|via|upi|using|avl|bal|a/c|account|txn|not|if|vide|dated|date)\\b|[.,;(]|$)")
+              private val vpaRe = Regex("(?i)\\bvpa\\s+([\\w.\\-]+@[\\w.\\-]+)")
+              private val upiSlashRe = Regex("(?i)upi/\\w+/\\d+/([A-Za-z][A-Za-z0-9 .\\-]{2,30}?)(?:/|$)")
+              private val semiRe = Regex("(?i)[;,]\\s*([A-Za-z][A-Za-z0-9 &.\\-']{2,30}?)\\s+credited")
+              private val infoRe = Regex("(?i)info[:\\-\\s]+([A-Za-z0-9 &.\\-/@']{3,30})")
+              private val amountAfterRe = Regex("(?i)\\b(?:debited|credited|spent|paid|withdrawn|sent|received|deposited)\\s+(?:by|for|of|with)?\\s*(?:rs\\.?|inr|₹)?\\s*([0-9][0-9,]*(?:\\.[0-9]{1,2})?)")
+              private val atmRe = Regex("(?i)\\batm\\b")
+              private val upiWordRe = Regex("(?i)\\b(upi|imps|neft|rtgs|vpa)\\b")
+
+              private val stopExact = setOf("upi", "neft", "imps", "rtgs", "a/c", "ac", "acct", "account", "you", "bank", "card", "self")
+              private val stopStarts = listOf("your", "a/c", "ac ", "acct", "account", "upi ", "bank", "card", "you ")
+
+              private fun rule(name: String, words: String) = name to Regex("(?i)\\b(?:$words)\\b")
+
+              private val rules = listOf(
+                  rule("Grocery", "bigbasket|big basket|blinkit|zepto|dmart|d-mart|avenue supermarts|grofers|jiomart|instamart|kirana|grocery|groceries|supermarket|super market|vegetable|vegetables|fruits|dairy|milk|reliance fresh|more retail|spencer|provision|general store"),
+                  rule("Fuel", "petrol|diesel|fuel|hpcl|bpcl|iocl|indian ?oil|indianoil|bharat petroleum|hindustan petroleum|shell|nayara|essar|filling station|hp pay"),
+                  rule("Food", "swiggy|zomato|restaurant|cafe|dominos|domino's|mcdonald's|mcdonalds|kfc|pizza|burger|hotel|dhaba|biryani|bakery|sweets|food|eatery|starbucks|chai|canteen|barbeque"),
+                  rule("Travel", "uber|ola|rapido|irctc|redbus|makemytrip|goibibo|railway|metro|fastag|toll|indigo|air india|spicejet|yatra|cleartrip|ixigo|cab|taxi|travels"),
+                  rule("Bills & Recharge", "airtel|jio|vodafone|bsnl|electricity|bijli|bescom|msedcl|tneb|water bill|piped gas|dth|tata play|tatasky|dish tv|recharge|broadband|postpaid|prepaid|bill|insurance|lic|municipal|property tax|bbps"),
+                  rule("Shopping", "amazon|flipkart|myntra|ajio|meesho|nykaa|snapdeal|decathlon|retail|mall|fashion|garments|clothing|electronics|croma|reliance digital|lenskart"),
+                  rule("Entertainment", "netflix|hotstar|spotify|prime video|bookmyshow|youtube|pvr|inox|sonyliv|zee5|gaming|dream11"),
+                  rule("Health", "pharmacy|medical|medicos|apollo|1mg|pharmeasy|hospital|clinic|diagnostic|labs|netmeds|dental|doctor")
+              )
+
+              private val bodyRules = listOf(
+                  rule("Cash", "atm|cash withdrawal|cash wdl|atm wdl"),
+                  rule("EMI/Loan", "emi|loan"),
+                  rule("Salary/Income", "salary"),
+                  rule("Bills & Recharge", "recharge|fastag|insurance|bbps|electricity|bill payment|dth")
+              )
+
+              fun keyFor(merchant: String, id: Long): String =
+                  if (merchant == "Unknown") "sms$id" else merchant.lowercase()
+
+              fun keyOf(t: Txn): String = keyFor(t.merchant, t.id)
+
+              fun parse(id: Long, date: Long, sender: String, rawBody: String, overrides: (String) -> String?): Txn? {
+                  if (sender.none { it.isLetter() }) return null
+                  val body = rawBody.replace("\n", " ").replace(Regex("\\s+"), " ").trim()
+                  if (excludeRe.containsMatchIn(body)) return null
+                  if (!accountRe.containsMatchIn(body)) return null
+                  val d = debitRe.find(body)
+                  val c = creditRe.find(body)
+                  if (d == null && c == null) return null
+                  val debit = if (d != null && c != null) d.range.first < c.range.first else d != null
+                  val amount = findAmount(body) ?: return null
+                  val found = findMerchant(body, debit)
+                  val merchant = if (found == "Unknown" && debit && atmRe.containsMatchIn(body)) "ATM Withdrawal" else found
+                  val category = overrides(keyFor(merchant, id)) ?: classify(merchant, body, debit)
+                  return Txn(id, date, sender, amount, debit, merchant, category, body)
               }
 
-              private lateinit var tm: TelephonyManager
-              private lateinit var nm: NotificationManager
-              private val handler = Handler(Looper.getMainLooper())
-              private var registered = false
-              private var lastWfc: Boolean? = null
-              private var lastNet = ""
-              private var lastLogMs = 0L
-              private var lastWeakAlertMs = 0L
-              private var lastDropAlertMs = 0L
-              private var callStartMs = 0L
-
-              private val cb = object : TelephonyCallback(),
-                  TelephonyCallback.SignalStrengthsListener,
-                  TelephonyCallback.ServiceStateListener,
-                  TelephonyCallback.CallStateListener {
-                  override fun onSignalStrengthsChanged(s: SignalStrength) { Status.signal = s; update() }
-                  override fun onServiceStateChanged(s: ServiceState) { Status.service = s; update() }
-                  override fun onCallStateChanged(state: Int) { handleCall(state) }
+              private fun findAmount(body: String): Double? {
+                  for (m in amountRe.findAll(body)) {
+                      val start = maxOf(0, m.range.first - 18)
+                      val before = body.substring(start, m.range.first).lowercase()
+                      if (before.contains("bal") || before.contains("avl") || before.contains("available") || before.contains("limit")) continue
+                      val v = m.groupValues[1].replace(",", "").toDoubleOrNull()
+                      if (v != null && v > 0) return v
+                  }
+                  val m2 = amountAfterRe.find(body)
+                  if (m2 != null) {
+                      val v = m2.groupValues[1].replace(",", "").toDoubleOrNull()
+                      if (v != null && v > 0) return v
+                  }
+                  return null
               }
 
-              private val ticker = object : Runnable {
-                  override fun run() { update(); handler.postDelayed(this, 5000) }
+              private fun valid(s: String): Boolean {
+                  val t = s.trim().lowercase()
+                  if (t.length < 3) return false
+                  if (t in stopExact) return false
+                  for (p in stopStarts) if (t.startsWith(p)) return false
+                  return true
               }
 
-              override fun onBind(intent: Intent?): IBinder? = null
-
-              override fun onCreate() {
-                  super.onCreate()
-                  tm = getSystemService(TELEPHONY_SERVICE) as TelephonyManager
-                  nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-                  nm.createNotificationChannel(NotificationChannel(CH_STATUS, "Status", NotificationManager.IMPORTANCE_LOW))
-                  nm.createNotificationChannel(NotificationChannel(CH_ALERT, "Alerts", NotificationManager.IMPORTANCE_HIGH))
+              private fun pretty(s: String): String {
+                  var t = s.trim().trimEnd('.', '-', ',', ' ')
+                  if (t.contains("@")) return t.lowercase()
+                  if (t.none { it.isLowerCase() }) {
+                      t = t.lowercase().split(" ").joinToString(" ") { w -> w.replaceFirstChar { ch -> ch.uppercase() } }
+                  }
+                  return t.take(30)
               }
 
-              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-                  startForeground(NOTIF_ID, statusNotification("Monitoring start ho rahi hai...", ""))
-                  if (!registered) {
-                      try {
-                          tm.registerTelephonyCallback(mainExecutor, cb)
-                          registered = true
-                          handler.post(ticker)
-                      } catch (e: SecurityException) {
-                          stopSelf()
+              private fun findMerchant(body: String, debit: Boolean): String {
+                  val cands = ArrayList<String>()
+                  upiSlashRe.find(body)?.let { cands.add(it.groupValues[1]) }
+                  val primary = if (debit) toRe else fromRe
+                  for (m in primary.findAll(body)) cands.add(m.groupValues[1])
+                  if (debit) semiRe.find(body)?.let { cands.add(it.groupValues[1]) }
+                  vpaRe.find(body)?.let { cands.add(it.groupValues[1]) }
+                  infoRe.find(body)?.let { cands.add(it.groupValues[1]) }
+                  for (cand in cands) if (valid(cand)) return pretty(cand)
+                  return "Unknown"
+              }
+
+              private fun classify(merchant: String, body: String, debit: Boolean): String {
+                  for ((name, re) in rules) if (re.containsMatchIn(merchant)) return name
+                  for ((name, re) in bodyRules) if (re.containsMatchIn(body)) return name
+                  if (!debit) return "Received"
+                  return if (upiWordRe.containsMatchIn(body)) "Transfer" else "Other"
+              }
+          }
+
+          object SmsLoader {
+              fun load(ctx: Context): List<Txn> {
+                  val prefs = ctx.getSharedPreferences("ledger", Context.MODE_PRIVATE)
+                  val out = ArrayList<Txn>()
+                  val cur = ctx.contentResolver.query(
+                      Uri.parse("content://sms/inbox"),
+                      arrayOf("_id", "address", "body", "date"),
+                      null, null, "date DESC"
+                  ) ?: return out
+                  cur.use { c ->
+                      val iId = c.getColumnIndex("_id")
+                      val iAddr = c.getColumnIndex("address")
+                      val iBody = c.getColumnIndex("body")
+                      val iDate = c.getColumnIndex("date")
+                      while (c.moveToNext()) {
+                          val t = Parser.parse(
+                              c.getLong(iId), c.getLong(iDate),
+                              c.getString(iAddr) ?: "", c.getString(iBody) ?: ""
+                          ) { key -> prefs.getString("ov:$key", null) }
+                          if (t != null) out.add(t)
                       }
                   }
-                  return START_STICKY
-              }
-
-              override fun onDestroy() {
-                  handler.removeCallbacks(ticker)
-                  if (registered) {
-                      try { tm.unregisterTelephonyCallback(cb) } catch (_: Exception) {}
-                  }
-                  super.onDestroy()
-              }
-
-              private fun openApp(): PendingIntent =
-                  PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
-
-              private fun statusNotification(title: String, text: String): Notification =
-                  Notification.Builder(this, CH_STATUS)
-                      .setSmallIcon(R.drawable.ic_tile)
-                      .setContentTitle(title)
-                      .setContentText(text.lineSequence().firstOrNull() ?: "")
-                      .setStyle(Notification.BigTextStyle().bigText(text))
-                      .setOngoing(true)
-                      .setOnlyAlertOnce(true)
-                      .setContentIntent(openApp())
-                      .build()
-
-              private fun alert(id: Int, title: String, text: String) {
-                  val n = Notification.Builder(this, CH_ALERT)
-                      .setSmallIcon(R.drawable.ic_tile)
-                      .setContentTitle(title)
-                      .setContentText(text)
-                      .setStyle(Notification.BigTextStyle().bigText(text))
-                      .setAutoCancel(true)
-                      .setContentIntent(openApp())
-                      .build()
-                  nm.notify(id, n)
-              }
-
-              private fun record(event: String) {
-                  Util.History.add(
-                      this, Util.bestDbm(Status.signal), Util.isWfc(Status.service),
-                      Util.wifiConnected(this), Util.cellTech(Status.service), event
-                  )
-              }
-
-              private fun handleCall(state: Int) {
-                  val now = System.currentTimeMillis()
-                  if (state == TelephonyManager.CALL_STATE_OFFHOOK && Status.callState != TelephonyManager.CALL_STATE_OFFHOOK) {
-                      callStartMs = now
-                      Status.callOnWifi = Util.isWfc(Status.service)
-                      record("CALL_START")
-                  } else if (state == TelephonyManager.CALL_STATE_IDLE && Status.callState == TelephonyManager.CALL_STATE_OFFHOOK) {
-                      val secs = (now - callStartMs) / 1000
-                      val where = if (Status.callOnWifi == true) "Wi-Fi par" else "cellular par"
-                      Status.lastCall = "Pichli call: $where (${secs}s)"
-                      record("CALL_END")
-                      Status.callOnWifi = null
-                  }
-                  Status.callState = state
-                  update()
-              }
-
-              private fun update() {
-                  val wfc = Util.isWfc(Status.service)
-                  val wifi = Util.wifiConnected(this)
-                  val dbm = Util.bestDbm(Status.signal)
-                  val net = Util.cellTech(Status.service)
-                  val now = System.currentTimeMillis()
-                  if (Status.callState == TelephonyManager.CALL_STATE_OFFHOOK) Status.callOnWifi = wfc
-
-                  val ready = Status.service != null && Status.signal != null
-                  if (ready) {
-                      // Alert: Wi-Fi Calling dropped
-                      if (lastWfc == true && !wfc && now - lastDropAlertMs > 120_000) {
-                          lastDropAlertMs = now
-                          val msg = if (wifi) "Wi-Fi connected hai par Wi-Fi Calling register nahi raha. Settings check karo."
-                                    else "Wi-Fi disconnect ho gaya, Wi-Fi Calling band hai."
-                          alert(3, "❌ Wi-Fi Calling band ho gayi", msg)
-                      }
-                      // Alert: weak signal and no Wi-Fi Calling
-                      if (!wfc && (dbm == null || dbm < WEAK_DBM) && now - lastWeakAlertMs > 600_000) {
-                          lastWeakAlertMs = now
-                          val sig = if (dbm == null) "nahi hai" else "$dbm dBm"
-                          val msg = if (wifi) "Cell signal $sig. Wi-Fi Calling on karo (app me settings button)."
-                                    else "Cell signal $sig. Wi-Fi se connect karke Wi-Fi Calling on karo."
-                          alert(2, "⚠️ Signal weak hai", msg)
-                      }
-                      // History log
-                      val event = when {
-                          lastWfc != null && lastWfc != wfc -> if (wfc) "WFC_ON" else "WFC_OFF"
-                          lastNet.isNotEmpty() && lastNet != net -> "NET_CHANGE"
-                          else -> ""
-                      }
-                      if (event.isNotEmpty() || lastWfc == null || now - lastLogMs > 30_000) {
-                          record(event)
-                          lastLogMs = now
-                      }
-                      if (lastWfc != wfc) {
-                          try {
-                              TileService.requestListeningState(this, ComponentName(this, WfcTileService::class.java))
-                          } catch (_: Exception) {}
-                      }
-                      lastWfc = wfc
-                      lastNet = net
-                  }
-
-                  nm.notify(NOTIF_ID, statusNotification(Util.bannerText(wfc, wifi), Util.summary(this)))
-                  Util.updateWidgets(this)
+                  return out
               }
           }
           EOF_6
-          cat > app/src/main/java/com/example/wfcmonitor/Util.kt <<'EOF_7'
-          package com.example.wfcmonitor
-
-          import android.annotation.SuppressLint
-          import android.app.PendingIntent
-          import android.appwidget.AppWidgetManager
-          import android.content.ComponentName
-          import android.content.Context
-          import android.content.Intent
-          import android.graphics.Color
-          import android.net.ConnectivityManager
-          import android.net.NetworkCapabilities
-          import android.net.wifi.WifiManager
-          import android.telephony.CellIdentityNr
-          import android.telephony.CellInfoLte
-          import android.telephony.CellInfoNr
-          import android.telephony.ServiceState
-          import android.telephony.SignalStrength
-          import android.telephony.TelephonyManager
-          import android.widget.RemoteViews
-          import java.io.File
-          import java.text.SimpleDateFormat
-          import java.util.Date
-          import java.util.Locale
-
-          object Status {
-              @Volatile var signal: SignalStrength? = null
-              @Volatile var service: ServiceState? = null
-              @Volatile var callState: Int = TelephonyManager.CALL_STATE_IDLE
-              @Volatile var callOnWifi: Boolean? = null
-              @Volatile var lastCall: String = ""
-          }
-
-          data class Rec(val t: Long, val dbm: Int?, val wfc: Boolean, val wifi: Boolean, val net: String, val event: String)
-
-          object Util {
-
-              fun isWfc(ss: ServiceState?): Boolean =
-                  ss?.networkRegistrationInfoList?.any {
-                      it.accessNetworkTechnology == TelephonyManager.NETWORK_TYPE_IWLAN
-                  } == true
-
-              fun bestDbm(s: SignalStrength?): Int? =
-                  s?.cellSignalStrengths?.map { it.dbm }?.filter { it != Int.MAX_VALUE && it < 0 }?.maxOrNull()
-
-              fun typeName(t: Int): String = when (t) {
-                  TelephonyManager.NETWORK_TYPE_NR -> "5G NR"
-                  TelephonyManager.NETWORK_TYPE_LTE -> "4G LTE"
-                  TelephonyManager.NETWORK_TYPE_IWLAN -> "IWLAN"
-                  TelephonyManager.NETWORK_TYPE_UMTS, TelephonyManager.NETWORK_TYPE_HSDPA,
-                  TelephonyManager.NETWORK_TYPE_HSUPA, TelephonyManager.NETWORK_TYPE_HSPA,
-                  TelephonyManager.NETWORK_TYPE_HSPAP -> "3G"
-                  TelephonyManager.NETWORK_TYPE_EDGE, TelephonyManager.NETWORK_TYPE_GPRS -> "2G"
-                  else -> "type $t"
-              }
-
-              // Cellular (WWAN) technology currently registered, e.g. "4G LTE" / "5G NR"
-              fun cellTech(ss: ServiceState?): String {
-                  val tech = ss?.networkRegistrationInfoList
-                      ?.firstOrNull { it.transportType == 1 && it.accessNetworkTechnology != TelephonyManager.NETWORK_TYPE_UNKNOWN }
-                      ?.accessNetworkTechnology ?: return "No cellular"
-                  return typeName(tech)
-              }
-
-              fun dbmColor(dbm: Int?): Int = when {
-                  dbm == null -> Color.GRAY
-                  dbm >= -85 -> Color.parseColor("#2E7D32")
-                  dbm >= -100 -> Color.parseColor("#F9A825")
-                  dbm >= -110 -> Color.parseColor("#EF6C00")
-                  else -> Color.parseColor("#C62828")
-              }
-
-              fun bannerText(wfc: Boolean, wifi: Boolean): String = when {
-                  wfc -> "✅ Wi-Fi Calling ACTIVE"
-                  wifi -> "⚠️ Wi-Fi hai, par Wi-Fi Calling register nahi"
-                  else -> "📶 Calls cellular par (Wi-Fi nahi)"
-              }
-
-              fun bannerColor(wfc: Boolean, wifi: Boolean): Int = when {
-                  wfc -> Color.parseColor("#2E7D32")
-                  wifi -> Color.parseColor("#F9A825")
-                  else -> Color.parseColor("#546E7A")
-              }
-
-              fun wifiConnected(ctx: Context): Boolean {
-                  val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-                  val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
-                  return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-              }
-
-              @Suppress("DEPRECATION")
-              fun wifiDetails(ctx: Context): String {
-                  if (!wifiConnected(ctx)) return "Wi-Fi: connected nahi"
-                  return try {
-                      val wm = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-                      val i = wm.connectionInfo
-                      val q = when { i.rssi >= -60 -> "achha"; i.rssi >= -70 -> "theek"; else -> "weak" }
-                      "Wi-Fi: ${i.rssi} dBm ($q), ${i.linkSpeed} Mbps, ${if (i.frequency >= 4900) "5 GHz" else "2.4 GHz"}"
-                  } catch (e: Exception) {
-                      "Wi-Fi: details n/a"
-                  }
-              }
-
-              private var cellCache = ""
-              private var cellCacheMs = 0L
-
-              @SuppressLint("MissingPermission")
-              fun cellDetails(ctx: Context): String {
-                  val now = System.currentTimeMillis()
-                  if (now - cellCacheMs < 10_000 && cellCache.isNotEmpty()) return cellCache
-                  val text = try {
-                      val tm = ctx.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
-                      val sb = StringBuilder("Operator: ${tm.networkOperatorName}")
-                      tm.allCellInfo?.filter { it.isRegistered }?.forEach { ci ->
-                          when (ci) {
-                              is CellInfoLte -> {
-                                  val id = ci.cellIdentity
-                                  sb.append("\nLTE cell: CI ${id.ci}, PCI ${id.pci}, EARFCN ${id.earfcn}, band ${id.bands.joinToString("/")}")
-                              }
-                              is CellInfoNr -> {
-                                  val id = ci.cellIdentity as CellIdentityNr
-                                  sb.append("\n5G cell: NCI ${id.nci}, PCI ${id.pci}, NRARFCN ${id.nrarfcn}, band ${id.bands.joinToString("/")}")
-                              }
-                              else -> sb.append("\n${ci.javaClass.simpleName}")
-                          }
-                      }
-                      sb.toString()
-                  } catch (e: SecurityException) {
-                      "Cell info: permission chahiye"
-                  } catch (e: Exception) {
-                      "Cell info: n/a"
-                  }
-                  cellCache = text
-                  cellCacheMs = now
-                  return text
-              }
-
-              fun callLine(): String = when {
-                  Status.callState == TelephonyManager.CALL_STATE_OFFHOOK ->
-                      "📞 Call chal rahi hai: " + (if (Status.callOnWifi == true) "Wi-Fi par ✅" else "cellular par")
-                  Status.lastCall.isNotEmpty() -> Status.lastCall
-                  else -> ""
-              }
-
-              fun summary(ctx: Context): String {
-                  val dbm = bestDbm(Status.signal)
-                  val sb = StringBuilder()
-                  sb.append(if (dbm == null) "Cell signal: nahi" else "Cell: $dbm dBm (${cellTech(Status.service)})")
-                  sb.append("\n").append(wifiDetails(ctx))
-                  val c = callLine()
-                  if (c.isNotEmpty()) sb.append("\n").append(c)
-                  return sb.toString()
-              }
-
-              fun updateWidgets(ctx: Context) {
-                  try {
-                      val mgr = AppWidgetManager.getInstance(ctx)
-                      val ids = mgr.getAppWidgetIds(ComponentName(ctx, WfcWidget::class.java))
-                      if (ids.isEmpty()) return
-                      val wfc = isWfc(Status.service)
-                      val wifi = wifiConnected(ctx)
-                      val dbm = bestDbm(Status.signal)
-                      val rv = RemoteViews(ctx.packageName, R.layout.widget)
-                      rv.setTextViewText(R.id.w_title, bannerText(wfc, wifi))
-                      rv.setTextViewText(R.id.w_sub, (if (dbm == null) "No cell signal" else "$dbm dBm") + " • " + cellTech(Status.service))
-                      rv.setInt(R.id.w_root, "setBackgroundColor", bannerColor(wfc, wifi))
-                      val pi = PendingIntent.getActivity(ctx, 0, Intent(ctx, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
-                      rv.setOnClickPendingIntent(R.id.w_root, pi)
-                      mgr.updateAppWidget(ids, rv)
-                  } catch (_: Exception) {
-                  }
-              }
-
-              object History {
-                  private fun file(ctx: Context) = File(ctx.filesDir, "history.csv")
-
-                  @Synchronized
-                  fun add(ctx: Context, dbm: Int?, wfc: Boolean, wifi: Boolean, net: String, event: String) {
-                      val f = file(ctx)
-                      f.appendText("${System.currentTimeMillis()},${dbm ?: ""},${if (wfc) 1 else 0},${if (wifi) 1 else 0},$net,$event\n")
-                      if (f.length() > 200_000) {
-                          val lines = f.readLines()
-                          f.writeText(lines.takeLast(1500).joinToString("\n") + "\n")
-                      }
-                  }
-
-                  @Synchronized
-                  fun read(ctx: Context, max: Int): List<Rec> {
-                      val f = file(ctx)
-                      if (!f.exists()) return emptyList()
-                      return f.readLines().takeLast(max).mapNotNull { line ->
-                          try {
-                              val p = line.split(",")
-                              Rec(p[0].toLong(), p[1].toIntOrNull(), p[2] == "1", p[3] == "1", p[4], p.getOrElse(5) { "" })
-                          } catch (e: Exception) {
-                              null
-                          }
-                      }
-                  }
-
-                  @Synchronized
-                  fun csv(ctx: Context): String {
-                      val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
-                      val sb = StringBuilder("time,signal_dbm,wifi_calling,wifi_connected,cell_tech,event\n")
-                      for (r in read(ctx, 100000)) {
-                          sb.append(sdf.format(Date(r.t))).append(",")
-                          sb.append(r.dbm?.toString() ?: "").append(",")
-                          sb.append(if (r.wfc) "YES" else "NO").append(",")
-                          sb.append(if (r.wifi) "YES" else "NO").append(",")
-                          sb.append(r.net).append(",").append(r.event).append("\n")
-                      }
-                      return sb.toString()
-                  }
-              }
-          }
-          EOF_7
-          cat > app/src/main/java/com/example/wfcmonitor/WfcTileService.kt <<'EOF_8'
-          package com.example.wfcmonitor
-
-          import android.app.PendingIntent
-          import android.content.Intent
-          import android.os.Build
-          import android.provider.Settings
-          import android.service.quicksettings.Tile
-          import android.service.quicksettings.TileService
-
-          class WfcTileService : TileService() {
-
-              override fun onStartListening() {
-                  refresh()
-              }
-
-              private fun refresh() {
-                  val tile = qsTile ?: return
-                  val on = Util.isWfc(Status.service)
-                  tile.state = if (on) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
-                  tile.label = "Wi-Fi Calling"
-                  tile.subtitle = if (Status.service == null) "Monitor off" else if (on) "Active" else "Inactive"
-                  tile.updateTile()
-              }
-
-              @Suppress("DEPRECATION")
-              override fun onClick() {
-                  val i = Intent(Settings.ACTION_WIRELESS_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                  if (Build.VERSION.SDK_INT >= 34) {
-                      startActivityAndCollapse(PendingIntent.getActivity(this, 0, i, PendingIntent.FLAG_IMMUTABLE))
-                  } else {
-                      startActivityAndCollapse(i)
-                  }
-              }
-          }
-          EOF_8
-          cat > app/src/main/java/com/example/wfcmonitor/WfcWidget.kt <<'EOF_9'
-          package com.example.wfcmonitor
-
-          import android.appwidget.AppWidgetManager
-          import android.appwidget.AppWidgetProvider
-          import android.content.Context
-
-          class WfcWidget : AppWidgetProvider() {
-              override fun onUpdate(context: Context, appWidgetManager: AppWidgetManager, appWidgetIds: IntArray) {
-                  Util.updateWidgets(context)
-              }
-          }
-          EOF_9
-          cat > app/src/main/java/com/example/wfcmonitor/BootReceiver.kt <<'EOF_10'
-          package com.example.wfcmonitor
-
-          import android.Manifest
-          import android.content.BroadcastReceiver
-          import android.content.Context
-          import android.content.Intent
-          import android.content.pm.PackageManager
-          import androidx.core.content.ContextCompat
-
-          class BootReceiver : BroadcastReceiver() {
-              override fun onReceive(context: Context, intent: Intent) {
-                  if (intent.action == Intent.ACTION_BOOT_COMPLETED &&
-                      ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED
-                  ) {
-                      try {
-                          ContextCompat.startForegroundService(context, Intent(context, MonitorService::class.java))
-                      } catch (_: Exception) {
-                      }
-                  }
-              }
-          }
-          EOF_10
-          cat > app/src/main/res/layout/widget.xml <<'EOF_11'
-          <?xml version="1.0" encoding="utf-8"?>
-          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-              android:id="@+id/w_root"
-              android:layout_width="match_parent"
-              android:layout_height="match_parent"
-              android:orientation="vertical"
-              android:padding="12dp"
-              android:background="#546E7A">
-              <TextView
-                  android:id="@+id/w_title"
-                  android:layout_width="match_parent"
-                  android:layout_height="wrap_content"
-                  android:textColor="#FFFFFF"
-                  android:textSize="15sp"
-                  android:textStyle="bold"/>
-              <TextView
-                  android:id="@+id/w_sub"
-                  android:layout_width="match_parent"
-                  android:layout_height="wrap_content"
-                  android:textColor="#FFFFFF"
-                  android:textSize="13sp"/>
-          </LinearLayout>
-          EOF_11
-          cat > app/src/main/res/xml/widget_info.xml <<'EOF_12'
-          <?xml version="1.0" encoding="utf-8"?>
-          <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
-              android:minWidth="180dp"
-              android:minHeight="70dp"
-              android:updatePeriodMillis="0"
-              android:initialLayout="@layout/widget"
-              android:resizeMode="horizontal|vertical"
-              android:widgetCategory="home_screen"/>
-          EOF_12
-          cat > app/src/main/res/drawable/ic_tile.xml <<'EOF_13'
-          <?xml version="1.0" encoding="utf-8"?>
-          <vector xmlns:android="http://schemas.android.com/apk/res/android"
-              android:width="24dp"
-              android:height="24dp"
-              android:viewportWidth="24"
-              android:viewportHeight="24">
-              <path
-                  android:fillColor="#FFFFFFFF"
-                  android:pathData="M1,9l2,2c4.97,-4.97 13.03,-4.97 18,0l2,-2C16.93,2.93 7.08,2.93 1,9zM9,17l3,3 3,-3c-1.65,-1.66 -4.34,-1.66 -6,0zM5,13l2,2c2.76,-2.76 7.24,-2.76 10,0l2,-2C15.14,9.14 8.87,9.14 5,13z"/>
-          </vector>
-          EOF_13
       - name: Build
         working-directory: /tmp/proj
         run: gradle assembleDebug --no-daemon
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "v${{ github.run_number }}" /tmp/proj/app/build/outputs/apk/debug/app-debug.apk --repo "${{ github.repository }}" --title "WFC Monitor build ${{ github.run_number }}" --notes "Debug APK"
+        run: gh release create "v${{ github.run_number }}" /tmp/proj/app/build/outputs/apk/debug/app-debug.apk --repo "${{ github.repository }}" --title "SMS Ledger build ${{ github.run_number }}" --notes "Debug APK"
