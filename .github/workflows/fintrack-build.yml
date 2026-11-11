@@ -128,8 +128,8 @@ jobs:
                   "txn", "payees", "net_items", "loans", "senders", "merchant_rules", "parse_patterns", "nb_words", "toll_trips", "toll_plazas"
               )
 
-              private fun q(s: String) = """ + s.replace("
-", " ").replace(""", """") + """
+              private fun q(s: String) = "\"" + s.replace("\n", " ").replace("\"", "\"\"") + "\"
+              
 
               fun export(ctx: Context): String {
                   val db = Db.get(ctx).readableDatabase
