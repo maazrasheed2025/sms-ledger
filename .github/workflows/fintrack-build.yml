@@ -34,9 +34,6 @@ jobs:
           mkdir -p /tmp/proj/app /tmp/proj/app/src/main /tmp/proj/app/src/main/java/com/example/fintrack /tmp/proj/app/src/main/res/drawable /tmp/proj/app/src/main/res/values
           cd /tmp/proj
 
-          # =========================================================
-          # settings.gradle.kts
-          # =========================================================
           cat > settings.gradle.kts <<'EOF_0'
           pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
           dependencyResolutionManagement { repositories { google(); mavenCentral() } }
@@ -44,9 +41,6 @@ jobs:
           include(":app")
           EOF_0
 
-          # =========================================================
-          # build.gradle.kts
-          # =========================================================
           cat > build.gradle.kts <<'EOF_1'
           plugins {
               id("com.android.application") version "8.5.2" apply false
@@ -54,17 +48,11 @@ jobs:
           }
           EOF_1
 
-          # =========================================================
-          # gradle.properties
-          # =========================================================
           cat > gradle.properties <<'EOF_2'
           android.useAndroidX=true
           org.gradle.jvmargs=-Xmx3g
           EOF_2
 
-          # =========================================================
-          # app/build.gradle.kts
-          # =========================================================
           cat > app/build.gradle.kts <<'EOF_3'
           plugins {
               id("com.android.application")
@@ -93,9 +81,6 @@ jobs:
           }
           EOF_3
 
-          # =========================================================
-          # AndroidManifest.xml
-          # =========================================================
           cat > app/src/main/AndroidManifest.xml <<'EOF_4'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
@@ -125,9 +110,6 @@ jobs:
           </manifest>
           EOF_4
 
-          # =========================================================
-          # Backup.kt   (canonical 7-column CSV + round-trip)
-          # =========================================================
           cat > app/src/main/java/com/example/fintrack/Backup.kt <<'EOF_5'
           package com.example.fintrack
 
@@ -139,8 +121,6 @@ jobs:
           import java.util.Locale
 
           object Backup {
-              // Canonical schema: this same set of columns is used for
-              // Backup export AND for CSV import -> perfect round-trip.
               val CANONICAL = listOf(
                   "Bank", "Account_No", "Txn_Date", "Description",
                   "Ref_No", "Withdrawal", "Deposit", "Category", "UPI_ID"
@@ -162,12 +142,10 @@ jobs:
               fun export(ctx: Context): String {
                   val db = Db.get(ctx).readableDatabase
                   val sb = StringBuilder()
-                  // ---- canonical block (round-trippable through CsvImporter)
                   sb.append("## CANONICAL").append('\n')
                   sb.append(CANONICAL.joinToString(",")).append('\n')
                   db.rawQuery(
-                      "SELECT institution, account, ts, body, ref, debit, amount, category, vpa " +
-                          "FROM txn ORDER BY ts ASC", null
+                      "SELECT institution, account, ts, body, ref, debit, amount, category, vpa FROM txn ORDER BY ts ASC", null
                   ).use { c ->
                       while (c.moveToNext()) {
                           val bank = if (c.isNull(0)) "" else c.getString(0)
@@ -189,7 +167,6 @@ jobs:
                           ).append('\n')
                       }
                   }
-                  // ---- raw tables block (lossless app backup)
                   for (t in tables) {
                       val cols = ArrayList<String>()
                       db.rawQuery("PRAGMA table_info($t)", null).use { c ->
@@ -265,9 +242,6 @@ jobs:
           }
           EOF_5
 
-          # =========================================================
-          # Db.kt   (schema v3, review groups, budgets, tags, skipped)
-          # =========================================================
           cat > app/src/main/java/com/example/fintrack/Db.kt <<'EOF_6'
           package com.example.fintrack
 
@@ -391,19 +365,18 @@ jobs:
                   put("review_hash", t.reviewHash)
               }
 
-              /** Returns 0 if a row with same smsKey already exists. */
               fun insertTxn(t: Txn): Long {
-                  val existing = if (t.smsKey != null)
-                      one("SELECT id FROM txn WHERE sms_key=?", t.smsKey)?.toLongOrNull() else null
+                  // FIX: avoid smart-cast problem on nullable smsKey by using let
+                  val existing = t.smsKey?.let { one("SELECT id FROM txn WHERE sms_key=?", it)?.toLongOrNull() }
                   if (existing != null) return 0
-                  // duplicate-ref check: same ref + institution + account => skip
-                  if (!t.ref.isNullOrBlank()) {
+                  val ref = t.ref
+                  if (!ref.isNullOrBlank()) {
                       val dup = one(
                           "SELECT id FROM txn WHERE ref=? AND institution=? AND IFNULL(account,'')=? LIMIT 1",
-                          t.ref!!, t.institution, t.account ?: ""
+                          ref, t.institution, t.account ?: ""
                       )
                       if (dup != null) {
-                          logSkipped("duplicate-ref", t.ref ?: "", t.body, t.ts)
+                          logSkipped("duplicate-ref", ref, t.body, t.ts)
                           return 0
                       }
                   }
@@ -529,9 +502,6 @@ jobs:
           }
           EOF_6
 
-          # =========================================================
-          # Learner.kt   (raw-string regexes; unchanged logic)
-          # =========================================================
           cat > app/src/main/java/com/example/fintrack/Learner.kt <<'EOF_7'
           package com.example.fintrack
 
@@ -682,9 +652,6 @@ jobs:
           }
           EOF_7
 
-          # =========================================================
-          # LoanCalc.kt
-          # =========================================================
           cat > app/src/main/java/com/example/fintrack/LoanCalc.kt <<'EOF_8'
           package com.example.fintrack
 
@@ -724,7 +691,6 @@ jobs:
                   return outstanding(p, rate, e, paid)
               }
 
-              /** Simulate payoff with extra monthly payment. Returns (months, interestSaved). */
               fun payoffPlan(principal: Double, annualRate: Double, emi: Double, extra: Double): Pair<Int, Double> {
                   val r = annualRate / 1200.0
                   if (emi <= 0) return 0 to 0.0
@@ -740,15 +706,11 @@ jobs:
                       bal -= principalPart
                       paidMonths++
                   }
-                  val baseInterest = principal * r * 0 // not used
                   return paidMonths to totalInterest
               }
           }
           EOF_8
 
-          # =========================================================
-          # AiParser.kt
-          # =========================================================
           cat > app/src/main/java/com/example/fintrack/AiParser.kt <<'EOF_9'
           package com.example.fintrack
 
@@ -815,19 +777,14 @@ jobs:
           }
           EOF_9
 
-          # =========================================================
-          # CsvImporter.kt  (auto-detect columns, canonical schema, dedupe)
-          # =========================================================
           cat > app/src/main/java/com/example/fintrack/CsvImporter.kt <<'EOF_10'
           package com.example.fintrack
 
           import android.content.Context
           import android.net.Uri
           import java.text.SimpleDateFormat
-          import java.util.Date
           import java.util.Locale
 
-          /** Column synonyms used to auto-detect mapping. */
           object CsvMap {
               val synonyms: Map<String, List<String>> = mapOf(
                   "Bank" to listOf("bank", "bank_name", "bankname"),
@@ -840,7 +797,7 @@ jobs:
               )
 
               fun normalizeHeader(h: String): String =
-                  h.trim().lowercase().replace("""[_\-/.]""".toRegex(), " ").replace("""\s+""".toRegex(), " ").trim()
+                  h.trim().lowercase().replace(Regex("""[_\-/.]"""), " ").replace(Regex("""\s+"""), " ").trim()
 
               fun guess(cols: List<String>): Map<String, Int> {
                   val normCols = cols.map { normalizeHeader(it) }
@@ -852,7 +809,6 @@ jobs:
                           }
                       }
                       if (map[field] == null) {
-                          // fuzzy: contains
                           for (i in normCols.indices) {
                               val c = normCols[i]
                               if (syns.any { c.contains(normalizeHeader(it)) }) { map[field] = i; break }
@@ -866,7 +822,6 @@ jobs:
           object CsvImporter {
               data class ParseResult(val header: List<String>, val rows: List<List<String>>)
 
-              /** Split a CSV line, honoring quotes. */
               fun splitCsv(line: String): List<String> {
                   val out = ArrayList<String>()
                   val sb = StringBuilder()
@@ -929,12 +884,12 @@ jobs:
                   var dup = 0
                   var failed = 0
                   val w = db.writableDatabase
+                  fun cell(row: List<String>, field: String): String {
+                      val idx = mapping[field] ?: return ""
+                      return row.getOrNull(idx)?.trim() ?: ""
+                  }
                   w.beginTransaction()
                   try {
-                      fun cell(row: List<String>, field: String): String {
-                          val idx = mapping[field] ?: return ""
-                          return row.getOrNull(idx)?.trim() ?: ""
-                      }
                       for (row in pr.rows) {
                           val bank = cell(row, "Bank").ifBlank { "Unknown Bank" }
                           val acct = cell(row, "Account_No")
@@ -975,9 +930,6 @@ jobs:
           }
           EOF_10
 
-          # =========================================================
-          # Importer.kt  (toll JSON — unchanged)
-          # =========================================================
           cat > app/src/main/java/com/example/fintrack/Importer.kt <<'EOF_11'
           package com.example.fintrack
 
@@ -1021,9 +973,6 @@ jobs:
           }
           EOF_11
 
-          # =========================================================
-          # Subs.kt   (subscription detector + recurring pattern)
-          # =========================================================
           cat > app/src/main/java/com/example/fintrack/Subs.kt <<'EOF_12'
           package com.example.fintrack
 
@@ -1049,7 +998,7 @@ jobs:
                   val gaps = timestamps.zipWithNext { a, b -> (a - b) / 86_400_000L }
                   if (gaps.isEmpty()) return
                   val avgGap = gaps.average()
-                  if (avgGap in 25.0..35.0) { // ~monthly
+                  if (avgGap in 25.0..35.0) {
                       db.exec(
                           "INSERT OR REPLACE INTO subs_detected(merchant_key, avg_amt, last_ts, count) VALUES(?,?,?,?)",
                           key, avg, timestamps.first(), amounts.size
@@ -1059,9 +1008,6 @@ jobs:
           }
           EOF_12
 
-          # =========================================================
-          # SmsEngine.kt   (canonical 7 fields + wallet + toll→Travel + UPI clean)
-          # =========================================================
           cat > app/src/main/java/com/example/fintrack/SmsEngine.kt <<'EOF_13'
           package com.example.fintrack
 
@@ -1075,7 +1021,6 @@ jobs:
               var walletName: String? = null
           )
 
-          /** Canonical row: every transaction — SMS or CSV — maps to these fields. */
           data class Canonical(
               val bank: String,
               val accountNo: String,
@@ -1206,7 +1151,6 @@ jobs:
               private val vpaRe = Regex("""(?i)\b([a-z0-9][\w.\-]+@[a-z][a-z0-9]+)\b(?!\.[a-z]{2,3}\b)""")
               private val tollRe = Regex("""(?i)\b(fastag|netc|toll|plaza|nhai|ihmcl)\b""")
 
-              // Wallet patterns: "…<word> wallet…" or "…wallet <word>…"
               private val walletAfterRe = Regex("""(?i)\b([A-Za-z][A-Za-z0-9]{1,20})\s+wallet\b""")
               private val walletBeforeRe = Regex("""(?i)\bwallet\s+([A-Za-z][A-Za-z0-9]{1,20})\b""")
               private val knownWallets = setOf("paytm", "mobikwik", "amazon", "airtel", "jio", "phonepe", "freecharge", "olamoney", "slice", "dhani")
@@ -1240,7 +1184,6 @@ jobs:
                   return t.take(30)
               }
 
-              /** Cleans UPI id: strips .ref, trailing punctuation. */
               private fun cleanVpa(raw: String?): String? {
                   if (raw.isNullOrBlank()) return null
                   var v = raw.trim().lowercase()
@@ -1275,14 +1218,10 @@ jobs:
 
               private fun detectWallet(body: String): String? {
                   val a = walletAfterRe.find(body)?.groupValues?.get(1)
-                  if (a != null) {
-                      if (a.lowercase() in knownWallets) return pretty(a) + " Wallet"
-                  }
+                  if (a != null && a.lowercase() in knownWallets) return pretty(a) + " Wallet"
                   val b = walletBeforeRe.find(body)?.groupValues?.get(1)
                   if (b != null && b.lowercase() in knownWallets) return pretty(b) + " Wallet"
-                  if (body.contains("wallet", true)) {
-                      if (a != null) return pretty(a) + " Wallet"
-                  }
+                  if (body.contains("wallet", true) && a != null) return pretty(a) + " Wallet"
                   return null
               }
 
@@ -1433,9 +1372,6 @@ jobs:
           }
           EOF_13
 
-          # =========================================================
-          # SenderMap.kt
-          # =========================================================
           cat > app/src/main/java/com/example/fintrack/SenderMap.kt <<'EOF_14'
           package com.example.fintrack
 
@@ -1492,9 +1428,6 @@ jobs:
           }
           EOF_14
 
-          # =========================================================
-          # SmsReceiver.kt
-          # =========================================================
           cat > app/src/main/java/com/example/fintrack/SmsReceiver.kt <<'EOF_15'
           package com.example.fintrack
 
@@ -1526,9 +1459,6 @@ jobs:
           }
           EOF_15
 
-          # =========================================================
-          # Tolls.kt
-          # =========================================================
           cat > app/src/main/java/com/example/fintrack/Tolls.kt <<'EOF_16'
           package com.example.fintrack
 
@@ -1611,9 +1541,6 @@ jobs:
           }
           EOF_16
 
-          # =========================================================
-          # Merge / Payee helpers
-          # =========================================================
           cat > app/src/main/java/com/example/fintrack/PayeeOps.kt <<'EOF_17'
           package com.example.fintrack
 
@@ -1621,14 +1548,12 @@ jobs:
           import android.content.Context
 
           object PayeeOps {
-              /** Merge multiple payee_keys into a single survivor. */
               fun merge(ctx: Context, keys: List<String>, survivorKey: String, survivorName: String) {
                   if (keys.size < 2) return
                   val db = Db.get(ctx)
                   val w = db.writableDatabase
                   w.beginTransaction()
                   try {
-                      // Collect alt upis
                       val alt = ArrayList<String>()
                       for (k in keys) {
                           val upi = db.one("SELECT upi_id FROM payees WHERE merchant_key=?", k)
@@ -1637,21 +1562,18 @@ jobs:
                           if (!existingAlt.isNullOrBlank()) alt.add(existingAlt)
                       }
                       val marks = keys.joinToString(",") { "?" }
-                      // Move txns
                       val cv = ContentValues().apply {
                           put("merchant_key", survivorKey)
                           put("merchant", survivorName)
                       }
                       w.update("txn", cv, "merchant_key IN ($marks)", keys.toTypedArray())
-                      // Merge merchant_rules (keep survivor's, delete others)
                       w.delete("merchant_rules", "merchant_key IN ($marks) AND merchant_key != ?", (keys + survivorKey).toTypedArray())
-                      // Survivor payee row
+                      val survivorUpi = db.one("SELECT upi_id FROM payees WHERE merchant_key=?", survivorKey)
+                      val allAlt = alt.distinct().joinToString(",")
                       w.execSQL(
                           "INSERT OR REPLACE INTO payees(merchant_key, display, upi_id, alt_upis) VALUES(?,?,?,?)",
-                          arrayOf(survivorKey, survivorName, db.one("SELECT upi_id FROM payees WHERE merchant_key=?", survivorKey),
-                              alt.distinct().joinToString(","))
+                          arrayOf(survivorKey, survivorName, survivorUpi ?: "", allAlt)
                       )
-                      // Delete old payees except survivor
                       w.delete("payees", "merchant_key IN ($marks) AND merchant_key != ?", (keys + survivorKey).toTypedArray())
                       w.setTransactionSuccessful()
                   } finally {
@@ -1659,7 +1581,6 @@ jobs:
                   }
               }
 
-              /** Apply one "review fix" to every txn sharing reviewHash. */
               fun applyGroupFix(ctx: Context, hash: String, merchant: String, category: String, debit: Boolean, newStatus: String = "USER") {
                   val db = Db.get(ctx)
                   val w = db.writableDatabase
@@ -1686,9 +1607,6 @@ jobs:
           }
           EOF_17
 
-          # =========================================================
-          # MainActivity.kt   (adds CSV picker + month picker helper)
-          # =========================================================
           cat > app/src/main/java/com/example/fintrack/MainActivity.kt <<'EOF_18'
           package com.example.fintrack
 
@@ -1932,9 +1850,9 @@ jobs:
                               .setMessage("Detected columns:\n\n" + labels.joinToString("\n") + "\n\nImport karna hai?")
                               .setPositiveButton("Import") { _, _ ->
                                   Thread {
-                                      val (ok, dup, fail) = CsvImporter.import(applicationContext, uri, mapping, 0)
+                                      val res = CsvImporter.import(applicationContext, uri, mapping, 0)
                                       runOnUiThread {
-                                          toast("Imported $ok • Duplicate $dup • Failed $fail")
+                                          toast("Imported ${res.first} • Duplicate ${res.second} • Failed ${res.third}")
                                           refreshAll()
                                       }
                                   }.start()
@@ -1947,13 +1865,9 @@ jobs:
           }
           EOF_18
 
-          # =========================================================
-          # Screens1.kt   (Home + Ledger with review groups + month picker + filters)
-          # =========================================================
           cat > app/src/main/java/com/example/fintrack/Screens1.kt <<'EOF_19'
           package com.example.fintrack
 
-          import android.graphics.Color
           import android.view.Gravity
           import android.view.View
           import android.view.ViewGroup
@@ -1962,7 +1876,6 @@ jobs:
           import android.widget.LinearLayout
           import android.widget.ListView
           import android.widget.ScrollView
-          import android.widget.TextView
           import androidx.appcompat.app.AlertDialog
           import java.text.SimpleDateFormat
           import java.util.Calendar
@@ -2104,7 +2017,7 @@ jobs:
 
           class LedgerScreen(act: MainActivity) : Screen(act) {
               data class Filter(
-                  val mode: String = "all",      // all | review | debit | credit | cat
+                  val mode: String = "all",
                   val category: String? = null,
                   val year: Int? = null,
                   val month: Int? = null
@@ -2115,7 +2028,15 @@ jobs:
               private val summary = act.tv("", 12f, C.MUTED).apply { setPadding(act.dp(14), act.dp(4), act.dp(14), act.dp(4)) }
               private val chips = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; setPadding(act.dp(8), 0, act.dp(8), 0) }
 
-              /** Grouped review rows OR plain transaction rows are shown in one list. */
+              sealed class Row {
+                  data class TxnRow(val t: Txn) : Row()
+                  data class GroupRow(
+                      val hash: String, val count: Int, val total: Double,
+                      val sampleMerchant: String, val sampleCategory: String,
+                      val sampleDebit: Boolean
+                  ) : Row()
+              }
+
               private val adapter = RowAdapter<Row>(act, emptyList()) { item, r ->
                   when (item) {
                       is Row.GroupRow -> {
@@ -2140,15 +2061,6 @@ jobs:
                   }
               }
 
-              sealed class Row {
-                  data class TxnRow(val t: Txn) : Row()
-                  data class GroupRow(
-                      val hash: String, val count: Int, val total: Double,
-                      val sampleMerchant: String, val sampleCategory: String,
-                      val sampleDebit: Boolean
-                  ) : Row()
-              }
-
               private val list = ListView(act).apply {
                   divider = null
                   adapter = this@LedgerScreen.adapter
@@ -2162,7 +2074,7 @@ jobs:
               }
               override val root: View = act.vbox().apply {
                   val search = EditText(act).apply {
-                      hint = "Search: naam / dukaan / category / #tag / >500 / <2024-06"
+                      hint = "Search: naam / dukaan / category / ref / upi"
                       setHintTextColor(C.MUTED)
                       setTextColor(C.TEXT)
                       setSingleLine()
@@ -2225,7 +2137,6 @@ jobs:
                   val all = Db.get(act).queryTxns(where.toString(), args.toTypedArray(), 1000)
 
                   if (filter.mode == "review") {
-                      // Group by review_hash
                       val groups = LinkedHashMap<String, MutableList<Txn>>()
                       for (t in all) {
                           val h = t.reviewHash ?: Db.get(act).computeReviewHash(t)
@@ -2338,9 +2249,6 @@ jobs:
           }
           EOF_19
 
-          # =========================================================
-          # Screens2.kt   (Travel + Payees with sort + merge + full history)
-          # =========================================================
           cat > app/src/main/java/com/example/fintrack/Screens2.kt <<'EOF_20'
           package com.example.fintrack
 
@@ -2351,7 +2259,6 @@ jobs:
           import android.graphics.Paint
           import android.graphics.Path
           import android.net.Uri
-          import android.view.Gravity
           import android.view.MotionEvent
           import android.view.ScaleGestureDetector
           import android.view.View
@@ -2504,9 +2411,8 @@ jobs:
                   })
                   detail.removeAllViews()
 
-                  // Section 1: unmatched toll SMS (Travel category, no plaza match)
                   val unmatched = Db.get(act).rows(
-                      "SELECT id, ts, merchant, amount, body FROM txn WHERE category='Travel' AND debit=1 AND (SELECT COUNT(*) FROM toll_trips t WHERE t.txn_id=txn.id)=0 AND (LOWER(body) LIKE '%toll%' OR LOWER(body) LIKE '%fastag%' OR LOWER(body) LIKE '%plaza%') ORDER BY ts DESC LIMIT 30"
+                      "SELECT id, ts, merchant, amount FROM txn WHERE category='Travel' AND debit=1 AND (SELECT COUNT(*) FROM toll_trips t WHERE t.txn_id=txn.id)=0 AND (LOWER(body) LIKE '%toll%' OR LOWER(body) LIKE '%fastag%' OR LOWER(body) LIKE '%plaza%') ORDER BY ts DESC LIMIT 30"
                   )
                   if (unmatched.isNotEmpty()) {
                       detail.addView(act.tv("Toll SMS (plaza not matched)", 13f, C.AMBER, true))
@@ -2528,7 +2434,7 @@ jobs:
           }
 
           class PayeesScreen(act: MainActivity) : Screen(act) {
-              private var sortMode = "count"   // count | name | recent | total
+              private var sortMode = "count"
               private var selectMode = false
               private val selected = LinkedHashSet<String>()
 
@@ -2536,7 +2442,9 @@ jobs:
               private val summary = act.tv("", 12f, C.MUTED).apply { setPadding(act.dp(14), act.dp(8), act.dp(14), act.dp(4)) }
               private val adapter = RowAdapter<Map<String, String?>>(act, emptyList()) { p, r ->
                   r.icon.setImageResource(R.drawable.ic_contacts)
-                  r.icon.setColorFilter(if (selectMode && p["k"] in selected) C.ACCENT else C.MUTED)
+                  // FIX: avoid nullable String in non-null Set membership check
+                  val key = p["k"] ?: ""
+                  r.icon.setColorFilter(if (selectMode && key in selected) C.ACCENT else C.MUTED)
                   r.title.text = p["display"] ?: ""
                   val upi = p["upi_id"]
                   r.sub.text = "${p["n"]} txns • last ${fmtDate(p["last"]?.toLongOrNull() ?: 0L)}" +
@@ -2555,8 +2463,8 @@ jobs:
                           val k = p["k"] ?: return@setOnItemClickListener
                           if (!selected.add(k)) selected.remove(k)
                           this@PayeesScreen.adapter.notifyDataSetChanged()
-                          refresh()
-                      } else showPayee(p)
+                          this@PayeesScreen.refresh()
+                      } else this@PayeesScreen.showPayee(p)
                   }
                   setOnItemLongClickListener { _, _, pos, _ ->
                       val p = this@PayeesScreen.adapter.items.getOrNull(pos) ?: return@setOnItemLongClickListener false
@@ -2564,7 +2472,7 @@ jobs:
                       selectMode = true
                       selected.add(k)
                       this@PayeesScreen.adapter.notifyDataSetChanged()
-                      refresh()
+                      this@PayeesScreen.refresh()
                       true
                   }
               }
@@ -2634,7 +2542,7 @@ jobs:
                       act.runOnUiThread {
                           selectMode = false; selected.clear()
                           act.toast("Merged ${keys.size} payees into $survivorName")
-                          refresh()
+                          this.refresh()
                       }
                   }.start()
               }
@@ -2665,11 +2573,11 @@ jobs:
                   lv.adapter = hist
                   col.addView(lv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, act.dp(320)))
 
-                  val dlg = AlertDialog.Builder(act).setTitle(name).setView(ScrollView(act).apply { addView(col) })
+                  AlertDialog.Builder(act).setTitle(name).setView(ScrollView(act).apply { addView(col) })
                       .setPositiveButton("UPI se pay") { _, _ -> pay(key, name, p["upi_id"]) }
                       .setNeutralButton("UPI edit") { _, _ -> editUpi(key, name, p["upi_id"]) }
                       .setNegativeButton("Band karo", null)
-                  dlg.show()
+                      .show()
               }
 
               private fun editUpi(key: String, name: String, cur: String?) {
@@ -2696,9 +2604,6 @@ jobs:
           }
           EOF_20
 
-          # =========================================================
-          # Screens3.kt   (Money + budgets + subs + loan payoff + dup count)
-          # =========================================================
           cat > app/src/main/java/com/example/fintrack/Screens3.kt <<'EOF_21'
           package com.example.fintrack
 
@@ -2747,8 +2652,10 @@ jobs:
                   val bc = act.card()
                   bc.addView(act.tv("Budgets (monthly cap)", 15f, C.TEXT, true))
                   for (r in db.rows("SELECT * FROM budgets ORDER BY category")) {
-                      bc.put(act.tv("${r["category"]}   ${inr(r["monthly_cap"]?.toDoubleOrNull() ?: 0.0)}", 13f).apply {
-                          setOnClickListener { editBudget(r["category"] ?: "", r["monthly_cap"]?.toDoubleOrNull() ?: 0.0) }
+                      val cat = r["category"] ?: ""
+                      val capVal = r["monthly_cap"]?.toDoubleOrNull() ?: 0.0
+                      bc.put(act.tv("$cat   ${inr(capVal)}", 13f).apply {
+                          setOnClickListener { editBudget(cat, capVal) }
                       }, 6)
                   }
                   bc.put(act.actionBtn("+ Budget") { editBudget(null, 0.0) }, 10)
@@ -2770,12 +2677,12 @@ jobs:
                       emiTotal += e
                       val paid = LoanCalc.paidMonths(l["start_ts"]?.toLongOrNull() ?: System.currentTimeMillis(), tenure)
                       val out = LoanCalc.outstandingOf(l)
-                      val (planMonths, planInterest) = LoanCalc.payoffPlan(out, rate, e, 2000.0)
+                      val plan = LoanCalc.payoffPlan(out, rate, e, 2000.0)
                       val row = act.vbox().apply {
                           addView(act.tv("${l["name"]}  (${l["lender"] ?: ""})", 14f, C.TEXT, true))
                           addView(act.tv("EMI ${inr(e)}  •  ${paid}/${tenure} mahine  •  ${rate}%", 12f, C.MUTED))
                           addView(act.tv("Baaki: ${inr(out)}", 12f, C.AMBER))
-                          if (planMonths > 0) addView(act.tv("+₹2000/mo → debt-free in $planMonths months (interest ${inr(planInterest)})", 11f, C.MUTED))
+                          if (plan.first > 0) addView(act.tv("+₹2000/mo → debt-free in ${plan.first} months (interest ${inr(plan.second)})", 11f, C.MUTED))
                           setOnClickListener { editLoan(l) }
                       }
                       lc.put(row, 12)
@@ -2789,7 +2696,8 @@ jobs:
                       val sc = act.card()
                       sc.addView(act.tv("Detected subscriptions", 15f, C.TEXT, true))
                       for (s in subs) {
-                          val name = db.one("SELECT display FROM merchant_rules WHERE merchant_key=?", s["merchant_key"] ?: "") ?: (s["merchant_key"] ?: "")
+                          val mk = s["merchant_key"] ?: ""
+                          val name = db.one("SELECT display FROM merchant_rules WHERE merchant_key=?", mk) ?: mk
                           val avg = s["avg_amt"]?.toDoubleOrNull() ?: 0.0
                           val last = s["last_ts"]?.toLongOrNull() ?: 0L
                           val next = last + 30L * 86_400_000L
@@ -2829,7 +2737,10 @@ jobs:
                           Field("Category", category ?: "Grocery", options = Categories.ALL),
                           Field("Monthly cap", if (current > 0) current.toString() else "", true)
                       ),
-                      neutral = if (category == null) null else ("Delete" to { Db.get(act).exec("DELETE FROM budgets WHERE category=?", category); act.refreshAll() })
+                      neutral = if (category == null) null else ("Delete" to {
+                          if (category != null) Db.get(act).exec("DELETE FROM budgets WHERE category=?", category)
+                          act.refreshAll()
+                      })
                   ) { v ->
                       val cap = v[1].toDoubleOrNull()
                       if (cap == null || cap <= 0) { act.toast("Cap daalo"); return@showForm }
@@ -2923,9 +2834,6 @@ jobs:
           }
           EOF_21
 
-          # =========================================================
-          # Ui.kt   (unchanged, with month-pill support)
-          # =========================================================
           cat > app/src/main/java/com/example/fintrack/Ui.kt <<'EOF_22'
           package com.example.fintrack
 
@@ -3112,9 +3020,6 @@ jobs:
           }
           EOF_22
 
-          # =========================================================
-          # Vector Drawables
-          # =========================================================
           cat > app/src/main/res/drawable/ic_bank.xml <<'EOF_D0'
           <?xml version="1.0" encoding="utf-8"?>
           <vector xmlns:android="http://schemas.android.com/apk/res/android"
@@ -3241,8 +3146,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="v3.0.${{ github.run_number }}"
+          VERSION="v3.1.${{ github.run_number }}"
           gh release create "$VERSION" /tmp/proj/app/build/outputs/apk/debug/app-debug.apk \
             --repo "${{ github.repository }}" \
             --title "FinTrack Build ${{ github.run_number }}" \
-            --notes "v3: payee sort/merge, grouped review, toll→Travel, UPI cleanup, wallet parse, calendar month picker, CSV auto-detect import, budgets, subscription detector, loan payoff planner, duplicate-ref protection."
+            --notes "v3.1: compile fixes (nullable smsKey/ref smart-cast, payee merge key guard)."
