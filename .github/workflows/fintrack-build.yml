@@ -1,41 +1,62 @@
-name: Build FinTrack APK
+name: Build and Release FinTrack APK
+
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
+      - master
+
 jobs:
   build:
+    name: Build FinTrack APK
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
         with:
-          distribution: temurin
-          java-version: 17
-      - uses: gradle/actions/setup-gradle@v4
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.9
-      - name: Generate project files
+
+      - name: Generate complete project structure & files
         run: |
-          mkdir -p /tmp/proj/app /tmp/proj/app/src/main /tmp/proj/app/src/main/java/com/example/fintrack /tmp/proj/app/src/main/res/drawable
+          mkdir -p /tmp/proj/app /tmp/proj/app/src/main /tmp/proj/app/src/main/java/com/example/fintrack /tmp/proj/app/src/main/res/drawable /tmp/proj/app/src/main/res/values
           cd /tmp/proj
+          
+          # settings.gradle.kts
           cat > settings.gradle.kts <<'EOF_0'
           pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
           dependencyResolutionManagement { repositories { google(); mavenCentral() } }
           rootProject.name = "FinTrack"
           include(":app")
           EOF_0
+          
+          # build.gradle.kts
           cat > build.gradle.kts <<'EOF_1'
           plugins {
               id("com.android.application") version "8.5.2" apply false
               id("org.jetbrains.kotlin.android") version "1.9.24" apply false
           }
           EOF_1
+          
+          # gradle.properties
           cat > gradle.properties <<'EOF_2'
           android.useAndroidX=true
           org.gradle.jvmargs=-Xmx3g
           EOF_2
+          
+          # app/build.gradle.kts
           cat > app/build.gradle.kts <<'EOF_3'
           plugins {
               id("com.android.application")
@@ -63,12 +84,15 @@ jobs:
               implementation("androidx.biometric:biometric:1.1.0")
           }
           EOF_3
+          
+          # AndroidManifest.xml
           cat > app/src/main/AndroidManifest.xml <<'EOF_4'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <uses-permission android:name="android.permission.READ_SMS"/>
               <uses-permission android:name="android.permission.RECEIVE_SMS"/>
               <uses-permission android:name="android.permission.USE_BIOMETRIC"/>
+              <uses-permission android:name="android.permission.INTERNET"/>
               <application
                   android:label="FinTrack"
                   android:allowBackup="false"
@@ -90,6 +114,8 @@ jobs:
               </application>
           </manifest>
           EOF_4
+
+          # Backup.kt
           cat > app/src/main/java/com/example/fintrack/Backup.kt <<'EOF_5'
           package com.example.fintrack
 
@@ -97,13 +123,13 @@ jobs:
           import android.content.Context
           import android.database.sqlite.SQLiteDatabase
 
-          /** Sectioned CSV ("## table" blocks) - opens in Excel/Sheets, restorable in this app. */
           object Backup {
               private val tables = listOf(
-                  "txn", "payees", "net_items", "loans", "senders", "merchant_rules", "parse_patterns", "nb_words", "toll_trips"
+                  "txn", "payees", "net_items", "loans", "senders", "merchant_rules", "parse_patterns", "nb_words", "toll_trips", "toll_plazas"
               )
 
-              private fun q(s: String) = "\"" + s.replace("\n", " ").replace("\"", "\"\"") + "\""
+              private fun q(s: String) = """ + s.replace("
+", " ").replace(""", """") + """
 
               fun export(ctx: Context): String {
                   val db = Db.get(ctx).readableDatabase
@@ -111,12 +137,15 @@ jobs:
                   for (t in tables) {
                       val cols = ArrayList<String>()
                       db.rawQuery("PRAGMA table_info($t)", null).use { c -> while (c.moveToNext()) cols.add(c.getString(1)) }
-                      sb.append("## ").append(t).append('\n').append(cols.joinToString(",")).append('\n')
+                      sb.append("## ").append(t).append('
+').append(cols.joinToString(",")).append('
+')
                       db.rawQuery("SELECT * FROM $t", null).use { c ->
                           while (c.moveToNext()) {
                               val parts = ArrayList<String>()
                               for (i in 0 until c.columnCount) parts.add(if (c.isNull(i)) "" else q(c.getString(i)))
-                              sb.append(parts.joinToString(",")).append('\n')
+                              sb.append(parts.joinToString(",")).append('
+')
                           }
                       }
                   }
@@ -178,6 +207,8 @@ jobs:
               }
           }
           EOF_5
+
+          # Db.kt
           cat > app/src/main/java/com/example/fintrack/Db.kt <<'EOF_6'
           package com.example.fintrack
 
@@ -203,13 +234,13 @@ jobs:
               var vpa: String? = null,
               var sender: String = "",
               var body: String = "",
-              var source: String = "SMS",      // SMS | CASH | MANUAL
-              var status: String = "REGEX",    // REGEX | LEARNED | HEURISTIC | FAILED | USER
+              var source: String = "SMS",
+              var status: String = "REGEX",
               var tpl: String = "",
               var review: Boolean = false
           )
 
-          class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "fintrack.db", null, 1) {
+          class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "fintrack.db", null, 2) {
 
               companion object {
                   @Volatile private var inst: Db? = null
@@ -228,14 +259,18 @@ jobs:
                   db.execSQL("CREATE TABLE parse_patterns (id INTEGER PRIMARY KEY AUTOINCREMENT, sender_core TEXT, tpl TEXT, field TEXT, left_ctx TEXT, right_ctx TEXT, weight REAL DEFAULT 1, UNIQUE(sender_core, tpl, field, left_ctx, right_ctx))")
                   db.execSQL("CREATE TABLE nb_words (word TEXT PRIMARY KEY, d REAL DEFAULT 0, c REAL DEFAULT 0)")
                   db.execSQL("CREATE TABLE toll_trips (id INTEGER PRIMARY KEY AUTOINCREMENT, txn_id INTEGER UNIQUE, plaza_id INTEGER, plaza TEXT, state TEXT, lat REAL, lon REAL, ts INTEGER, amount REAL, vehicle TEXT)")
+                  db.execSQL("CREATE TABLE toll_plazas (plaza_id INTEGER PRIMARY KEY, name TEXT, state TEXT, nh TEXT, lat REAL, lon REAL, car_fare REAL)")
                   db.execSQL("CREATE TABLE payees (merchant_key TEXT PRIMARY KEY, display TEXT, upi_id TEXT, note TEXT)")
                   db.execSQL("CREATE TABLE net_items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, amount REAL, kind TEXT)")
                   db.execSQL("CREATE TABLE loans (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, lender TEXT, principal REAL, rate REAL, emi REAL, tenure INTEGER, start_ts INTEGER)")
               }
 
-              override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {}
+              override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+                  if (oldVersion < 2) {
+                      db.execSQL("CREATE TABLE IF NOT EXISTS toll_plazas (plaza_id INTEGER PRIMARY KEY, name TEXT, state TEXT, nh TEXT, lat REAL, lon REAL, car_fare REAL)")
+                  }
+              }
 
-              // ---- generic helpers -------------------------------------------------
               fun rows(sql: String, vararg args: String): List<Map<String, String?>> {
                   val out = ArrayList<Map<String, String?>>()
                   readableDatabase.rawQuery(sql, arrayOf(*args)).use { c ->
@@ -257,7 +292,6 @@ jobs:
                   writableDatabase.execSQL(sql, arrayOf(*args))
               }
 
-              // ---- transactions ----------------------------------------------------
               private fun values(t: Txn) = ContentValues().apply {
                   put("sms_key", t.smsKey)
                   put("ts", t.ts)
@@ -328,7 +362,6 @@ jobs:
           }
 
           object Repo {
-              /** Insert a parsed transaction and run all side effects (payees, tolls, learning). */
               fun save(ctx: Context, t: Txn): Long {
                   val db = Db.get(ctx)
                   val id = db.insertTxn(t)
@@ -380,18 +413,18 @@ jobs:
               }
           }
           EOF_6
+
+          # Learner.kt
           cat > app/src/main/java/com/example/fintrack/Learner.kt <<'EOF_7'
           package com.example.fintrack
 
           import android.content.Context
 
-          /** On-device learning: merchant->category rules, learned extraction patterns, naive-Bayes debit/credit classifier. */
           object Learner {
 
               fun norm(s: String): String =
-                  s.lowercase().replace(Regex("[^a-z0-9@. ]"), " ").replace(Regex("\\s+"), " ").trim()
+                  s.lowercase().replace(Regex("[^a-z0-9@. ]"), " ").replace(Regex("\s+"), " ").trim()
 
-              // ---------- merchant -> category ----------
               fun category(db: Db, key: String): String? {
                   if (key.isBlank()) return null
                   val exact = db.rows("SELECT category FROM merchant_rules WHERE merchant_key=?", key).firstOrNull()?.get("category")
@@ -421,12 +454,11 @@ jobs:
                   db.exec("UPDATE txn SET category=? WHERE merchant_key=?", cat, key)
               }
 
-              // ---------- learned extraction patterns (per sender + SMS template) ----------
               private fun alpha(s: String) = s.length >= 2 && s.all { it.isLetter() || it == '/' }
               private val structural = setOf("on", "ref", "via", "upi", "avl", "bal", "using", "not", "if", "dated", "vide", "txn", "a/c", "account", "to", "from", "for", "info")
 
-              private fun ctxNorm(t: String) = t.lowercase().replace(Regex("\\d+"), "#")
-              private fun ctxRegex(s: String) = s.split("#").joinToString("\\d+") { Regex.escape(it) }
+              private fun ctxNorm(t: String) = t.lowercase().replace(Regex("\d+"), "#")
+              private fun ctxRegex(s: String) = s.split("#").joinToString("\d+") { Regex.escape(it) }
 
               fun learnMerchantPattern(db: Db, core: String, tpl: String, body: String, merchant: String) {
                   val idx = body.indexOf(merchant, ignoreCase = true)
@@ -458,15 +490,14 @@ jobs:
                   for (p in pats) {
                       val l = p["left_ctx"] ?: ""
                       val r = p["right_ctx"] ?: ""
-                      val head = if (l.isEmpty()) "^" else ctxRegex(l) + "\\s+"
-                      val tail = if (r.isEmpty()) "(?=\\s+\\d|\\s*[.,;]|\\s*\$)" else "\\s+" + ctxRegex(r)
+                      val head = if (l.isEmpty()) "^" else ctxRegex(l) + "\s+"
+                      val tail = if (r.isEmpty()) "(?=\s+\d|\s*[.,;]|\s*\$)" else "\s+" + ctxRegex(r)
                       val m = Regex("(?i)$head(.{2,40}?)$tail").find(body)
                       if (m != null) return m.groupValues[1].trim()
                   }
                   return null
               }
 
-              // ---------- naive Bayes: debit vs credit ----------
               private fun words(body: String): Set<String> =
                   Regex("[a-z]{3,15}").findAll(body.lowercase()).map { it.value }.toSet()
 
@@ -496,7 +527,6 @@ jobs:
                   return if (score > 1.0) true else if (score < -1.0) false else null
               }
 
-              // ---------- user correction loop ----------
               fun learnFromCorrection(ctx: Context, old: Txn, new: Txn) {
                   val db = Db.get(ctx)
                   if (new.source == "SMS") {
@@ -514,7 +544,6 @@ jobs:
                   }
               }
 
-              /** Re-run the parser for other un-reviewed rows of the same SMS template, so one fix repairs many. */
               private fun reapply(ctx: Context, tpl: String, exceptId: Long) {
                   if (tpl.isBlank()) return
                   val db = Db.get(ctx)
@@ -528,6 +557,8 @@ jobs:
               }
           }
           EOF_7
+
+          # LoanCalc.kt
           cat > app/src/main/java/com/example/fintrack/LoanCalc.kt <<'EOF_8'
           package com.example.fintrack
 
@@ -568,14 +599,155 @@ jobs:
               }
           }
           EOF_8
-          cat > app/src/main/java/com/example/fintrack/MainActivity.kt <<'EOF_9'
+
+          # AiParser.kt
+          cat > app/src/main/java/com/example/fintrack/AiParser.kt <<'EOF_9'
+          package com.example.fintrack
+
+          import org.json.JSONObject
+          import java.io.OutputStreamWriter
+          import java.net.HttpURLConnection
+          import java.net.URL
+
+          object AiParser {
+              private const val GEMINI_API_KEY = ""
+
+              fun redactSensitiveData(body: String): String {
+                  var clean = body
+                  clean = clean.replace(Regex("(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b"), "[REDACTED_VPA]")
+                  clean = clean.replace(Regex("(?i)(?:upi\s*ref|ref|rrn|utr)\s*[:.\-]?\s*[A-Za-z0-9]{6,22}"), "REF: [REDACTED_REF]")
+                  clean = clean.replace(Regex("(?i)\b(?:a/c|acct?|account|card)\.?\s*(?:no\.?|number)?\s*(?:ending)?\s*(?:x+|\*+|#)?\s*\d{3,4}\b"), "ACCOUNT: [REDACTED_ACC]")
+                  return clean
+              }
+
+              fun parseUnknownSms(rawBody: String): Fields? {
+                  if (GEMINI_API_KEY.isBlank()) return null
+                  val redacted = redactSensitiveData(rawBody)
+                  val prompt = "Analyze this Indian SMS financial notice and return JSON ONLY: " + redacted
+
+                  return try {
+                      val url = URL("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$GEMINI_API_KEY")
+                      val conn = url.openConnection() as HttpURLConnection
+                      conn.requestMethod = "POST"
+                      conn.setRequestProperty("Content-Type", "application/json")
+                      conn.doOutput = true
+
+                      val jsonPayload = JSONObject().apply {
+                          put("contents", listOf(
+                              JSONObject().apply {
+                                  put("parts", listOf(JSONObject().apply { put("text", prompt) }))
+                              }
+                          ))
+                      }
+
+                      OutputStreamWriter(conn.outputStream).use { it.write(jsonPayload.toString()) }
+                      if (conn.responseCode == 200) {
+                          val respText = conn.inputStream.bufferedReader().use { it.readText() }
+                          val textResponse = JSONObject(respText)
+                              .getJSONArray("candidates")
+                              .getJSONObject(0)
+                              .getJSONObject("content")
+                              .getJSONArray("parts")
+                              .getJSONObject(0)
+                              .getString("text")
+                          
+                          val parsed = JSONObject(textResponse.substring(textResponse.indexOf("{"), textResponse.lastIndexOf("}") + 1))
+                          Fields(
+                              amount = parsed.optDouble("amount"),
+                              debit = parsed.optBoolean("debit"),
+                              merchant = parsed.optString("merchant"),
+                              balance = if (parsed.isNull("balance")) null else parsed.optDouble("balance"),
+                              account = if (parsed.isNull("account_ending")) null else parsed.optString("account_ending"),
+                              channel = parsed.optString("account_type", "OTHER")
+                          )
+                      } else null
+                  } catch (e: Exception) {
+                      null
+                  }
+              }
+          }
+          EOF_9
+
+          # Importer.kt & StatementReconciler.kt
+          cat > app/src/main/java/com/example/fintrack/Importer.kt <<'EOF_10'
+          package com.example.fintrack
+
+          import android.content.Context
+          import android.net.Uri
+          import org.json.JSONArray
+
+          object Importer {
+              fun importTollJson(ctx: Context, uri: Uri): Int {
+                  val db = Db.get(ctx).writableDatabase
+                  var count = 0
+                  try {
+                      val text = ctx.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: return 0
+                      val arr = JSONArray(text)
+                      db.beginTransaction()
+                      for (i in 0 until arr.length()) {
+                          val o = arr.getJSONObject(i)
+                          val lat = o.optDouble("latitude", 0.0)
+                          val lon = o.optDouble("longitude", 0.0)
+                          if (lat == 0.0 || lon == 0.0) continue
+
+                          db.execSQL(
+                              "INSERT OR REPLACE INTO toll_plazas(plaza_id, name, state, nh, lat, lon, car_fare) VALUES(?,?,?,?,?,?,?)",
+                              arrayOf(
+                                  o.optInt("tollplaza_id"),
+                                  o.optString("tollplaza_name"),
+                                  o.optString("state_name"),
+                                  o.optString("nh_no"),
+                                  lat,
+                                  lon,
+                                  o.optDouble("car_single", 0.0)
+                              )
+                          )
+                          count++
+                      }
+                      db.setTransactionSuccessful()
+                  } finally {
+                      db.endTransaction()
+                  }
+                  return count
+              }
+          }
+
+          object StatementReconciler {
+              fun processCsv(ctx: Context, uri: Uri): Int {
+                  val db = Db.get(ctx)
+                  val text = ctx.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: return 0
+                  val lines = text.lines()
+                  var linkedCount = 0
+
+                  for (line in lines) {
+                      val parts = line.split(",")
+                      if (parts.size < 2) continue
+
+                      val refMatch = Regex("(?i)(?:UPI|UTR|RRN|NEFT|IMPS)[/-]?(\d{6,22})").find(line)
+                      val refNo = refMatch?.groupValues?.get(1) ?: ""
+
+                      if (refNo.isNotBlank()) {
+                          val matchingTxn = db.rows("SELECT id FROM txn WHERE ref = ? OR body LIKE ?", refNo, "%$refNo%").firstOrNull()
+                          if (matchingTxn != null) {
+                              val id = matchingTxn["id"]
+                              db.exec("UPDATE txn SET status = 'RECONCILED' WHERE id = ?", id)
+                              linkedCount++
+                          }
+                      }
+                  }
+                  return linkedCount
+              }
+          }
+          EOF_10
+
+          # MainActivity.kt
+          cat > app/src/main/java/com/example/fintrack/MainActivity.kt <<'EOF_11'
           package com.example.fintrack
 
           import android.Manifest
           import android.content.ContentValues
           import android.content.pm.PackageManager
           import android.net.Uri
-          import android.os.Build
           import android.os.Bundle
           import android.os.Environment
           import android.provider.MediaStore
@@ -616,9 +788,16 @@ jobs:
                   if (uri != null) doRestore(uri)
               }
 
+              private val openTollJson = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+                  if (uri != null) doImportTolls(uri)
+              }
+
+              private val openCsvStmt = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+                  if (uri != null) doReconcileCsv(uri)
+              }
+
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
-                  // keep financial data out of screenshots / recents
                   window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
 
                   home = HomeScreen(this)
@@ -716,7 +895,6 @@ jobs:
                   )
               }
 
-              // ---------------- navigation ----------------
               fun show(i: Int) {
                   cur = i
                   content.removeAllViews()
@@ -727,7 +905,7 @@ jobs:
                       (item.getChildAt(0) as android.widget.ImageView).setColorFilter(col)
                       (item.getChildAt(1) as TextView).setTextColor(col)
                   }
-                  if (unlocked) screens[i].refresh()
+                  if (unlocked) screens[cur].refresh()
               }
 
               fun openLedger(filter: String) {
@@ -741,7 +919,6 @@ jobs:
 
               fun toast(m: String) = Toast.makeText(this, m, Toast.LENGTH_LONG).show()
 
-              // ---------------- SMS import ----------------
               private fun hasSms() =
                   ContextCompat.checkSelfPermission(this, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED
 
@@ -753,7 +930,7 @@ jobs:
               override fun onRequestPermissionsResult(code: Int, p: Array<out String>, r: IntArray) {
                   super.onRequestPermissionsResult(code, p, r)
                   if (hasSms()) rescan()
-                  else toast("SMS permission zaroori hai. Settings -> Apps -> FinTrack -> Permissions (Android 13+: pehle app info me ⋮ -> Allow restricted settings)")
+                  else toast("SMS permission zaroori hai. Settings -> Apps -> FinTrack -> Permissions")
               }
 
               fun rescan() {
@@ -770,7 +947,6 @@ jobs:
                   }.start()
               }
 
-              // ---------------- backup / restore ----------------
               fun backup() {
                   try {
                       val name = "fintrack_backup_" + SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date()) + ".csv"
@@ -804,9 +980,33 @@ jobs:
                       runOnUiThread { toast(msg); refreshAll() }
                   }.start()
               }
+
+              fun pickTollJson() {
+                  openTollJson.launch(arrayOf("application/json", "*/*"))
+              }
+
+              private fun doImportTolls(uri: Uri) {
+                  Thread {
+                      val count = Importer.importTollJson(applicationContext, uri)
+                      runOnUiThread { toast("$count toll plazas database me import hue"); refreshAll() }
+                  }.start()
+              }
+
+              fun pickCsvStatement() {
+                  openCsvStmt.launch(arrayOf("text/*", "application/csv", "application/vnd.ms-excel", "*/*"))
+              }
+
+              private fun doReconcileCsv(uri: Uri) {
+                  Thread {
+                      val linked = StatementReconciler.processCsv(applicationContext, uri)
+                      runOnUiThread { toast("$linked transactions statement se match & link ho gaye"); refreshAll() }
+                  }.start()
+              }
           }
-          EOF_9
-          cat > app/src/main/java/com/example/fintrack/Screens1.kt <<'EOF_10'
+          EOF_11
+
+          # Screens1.kt
+          cat > app/src/main/java/com/example/fintrack/Screens1.kt <<'EOF_12'
           package com.example.fintrack
 
           import android.graphics.Color
@@ -830,7 +1030,6 @@ jobs:
               abstract fun refresh()
           }
 
-          // =============================== HOME ===============================
           class HomeScreen(act: MainActivity) : Screen(act) {
               private val body = act.vbox(14)
               override val root: View = ScrollView(act).apply { addView(body) }
@@ -885,7 +1084,11 @@ jobs:
                   for (r in cats) {
                       val cat = r["category"] ?: "Other"
                       val v = r["s"]?.toDoubleOrNull() ?: 0.0
-                      val line = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+                      val line = LinearLayout(act).apply { 
+                          orientation = LinearLayout.HORIZONTAL
+                          gravity = Gravity.CENTER_VERTICAL 
+                          setOnClickListener { act.openLedger("cat:$cat") }
+                      }
                       line.addView(act.icon(iconFor(cat), C.ACCENT, 20))
                       line.put(act.tv(cat, 14f), 10, 1f)
                       line.put(act.tv(inr(v), 14f, C.TEXT, true), 8)
@@ -895,6 +1098,7 @@ jobs:
                           orientation = LinearLayout.HORIZONTAL
                           weightSum = 1000f
                           addView(View(act).apply { background = act.shape(C.ACCENT, 3) }, LinearLayout.LayoutParams(0, act.dp(6), (frac * 1000).toFloat()))
+                          setOnClickListener { act.openLedger("cat:$cat") }
                       }
                       cc.put(bar, 4)
                   }
@@ -920,7 +1124,6 @@ jobs:
               }
           }
 
-          // =============================== LEDGER ===============================
           class LedgerScreen(act: MainActivity) : Screen(act) {
               private var filter = "all"
               private var query = ""
@@ -929,7 +1132,7 @@ jobs:
               private val adapter = RowAdapter<Txn>(act, emptyList()) { t, r ->
                   r.icon.setImageResource(iconFor(t.category))
                   r.title.text = t.merchant
-                  r.sub.text = fmtDate(t.ts) + " • " + t.institution + " • " + t.category + (if (t.review) " • ⚠ review" else "")
+                  r.sub.text = fmtDate(t.ts) + " • " + t.institution + " • " + t.category + (if (t.review) " • ⚠ review" else "") + (if (t.status == "RECONCILED") " • ✓ Reconciled" else "")
                   r.amt.text = (if (t.debit) "-" else "+") + inr(t.amount, true)
                   r.amt.setTextColor(if (t.debit) C.RED else C.GREEN)
               }
@@ -959,7 +1162,7 @@ jobs:
                   put(act.actionBtn("+ Cash entry") { addCash() }, 6)
               }
 
-              fun setFilter(f: String) { filter = f }
+              fun setFilter(f: String) { filter = f; refresh() }
 
               override fun refresh() {
                   chips.removeAllViews()
@@ -968,10 +1171,15 @@ jobs:
                   }
                   val w = StringBuilder("1=1")
                   val a = ArrayList<String>()
-                  when (filter) {
-                      "review" -> w.append(" AND review=1")
-                      "debit" -> w.append(" AND debit=1")
-                      "credit" -> w.append(" AND debit=0")
+                  if (filter.startsWith("cat:")) {
+                      w.append(" AND category=?")
+                      a.add(filter.substring(4))
+                  } else {
+                      when (filter) {
+                          "review" -> w.append(" AND review=1")
+                          "debit" -> w.append(" AND debit=1")
+                          "credit" -> w.append(" AND debit=0")
+                      }
                   }
                   if (query.isNotEmpty()) {
                       w.append(" AND (merchant LIKE ? OR category LIKE ? OR body LIKE ?)")
@@ -986,11 +1194,17 @@ jobs:
               }
 
               private fun showTxn(t: Txn) {
-                  val msg = fmtDateTime(t.ts) + "  •  " + t.institution + "\n" +
+                  val msg = fmtDateTime(t.ts) + "  •  " + t.institution + "
+" +
                       (if (t.debit) "Kharch " else "Mila ") + inr(t.amount, true) + "  •  " + t.category +
-                      (if (t.balance != null) "\nBalance: " + inr(t.balance ?: 0.0, true) else "") +
-                      "\nParse: ${t.status}" + (if (t.vpa != null) "  •  UPI: ${t.vpa}" else "") +
-                      (if (t.body.isNotEmpty()) "\n\n" + t.body else "")
+                      (if (t.balance != null) "
+Balance: " + inr(t.balance ?: 0.0, true) else "") +
+                      "
+Parse: ${t.status}" + (if (t.vpa != null) "  •  UPI: ${t.vpa}" else "") +
+                      (if (t.ref != null) "  •  Ref: ${t.ref}" else "") +
+                      (if (t.body.isNotEmpty()) "
+
+" + t.body else "")
                   AlertDialog.Builder(act).setTitle(t.merchant).setMessage(msg)
                       .setPositiveButton("Edit / Sahi karo") { _, _ -> editTxn(t) }
                       .setNegativeButton("Band karo", null)
@@ -1053,8 +1267,10 @@ jobs:
                   }
               }
           }
-          EOF_10
-          cat > app/src/main/java/com/example/fintrack/Screens2.kt <<'EOF_11'
+          EOF_12
+
+          # Screens2.kt
+          cat > app/src/main/java/com/example/fintrack/Screens2.kt <<'EOF_13'
           package com.example.fintrack
 
           import android.content.Context
@@ -1075,7 +1291,6 @@ jobs:
           import android.widget.ScrollView
           import androidx.appcompat.app.AlertDialog
 
-          // =============================== MAP (offline schematic, pinch + drag) ===============================
           class RouteMapView(ctx: Context) : View(ctx) {
               class Pt(val lat: Double, val lon: Double, val label: String)
 
@@ -1176,9 +1391,8 @@ jobs:
               }
           }
 
-          // =============================== TRAVEL ===============================
           class TravelScreen(act: MainActivity) : Screen(act) {
-              private var sel = -1   // -1 = all trips
+              private var sel = -1
               private val summary = act.tv("", 13f, C.MUTED).apply { setPadding(act.dp(14), act.dp(8), act.dp(14), act.dp(2)) }
               private val chips = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; setPadding(act.dp(8), 0, act.dp(8), 0) }
               private val map = RouteMapView(act)
@@ -1203,7 +1417,8 @@ jobs:
                   }
                   val total = rows.sumOf { it["amount"]?.toDoubleOrNull() ?: 0.0 }
                   summary.text = "${trips.size} trips  •  ${rows.size} toll plazas  •  Total toll ${inr(total)}" +
-                      (if (Tolls.count(act) == 0) "\n(Toll database load nahi hui - JSON repo me upload karo)" else "")
+                      (if (Tolls.count(act) == 0) "
+(Toll database load nahi hui - Money screen se JSON upload karo)" else "")
 
                   if (sel >= trips.size) sel = -1
                   chips.removeAllViews()
@@ -1230,7 +1445,6 @@ jobs:
               }
           }
 
-          // =============================== PAYEES ===============================
           class PayeesScreen(act: MainActivity) : Screen(act) {
               private val summary = act.tv("", 12f, C.MUTED).apply { setPadding(act.dp(14), act.dp(8), act.dp(14), act.dp(4)) }
               private val adapter = RowAdapter<Map<String, String?>>(act, emptyList()) { p, r ->
@@ -1265,8 +1479,11 @@ jobs:
                   val key = p["k"] ?: return
                   val name = p["display"] ?: key
                   val hist = Db.get(act).queryTxns("merchant_key=? AND debit=1", arrayOf(key), 8)
-                  val msg = (if (p["upi_id"].isNullOrBlank()) "UPI ID: (nahi mila)" else "UPI ID: ${p["upi_id"]}") + "\n\n" +
-                      hist.joinToString("\n") { fmtDate(it.ts) + "   " + inr(it.amount, true) + "   " + it.category }
+                  val msg = (if (p["upi_id"].isNullOrBlank()) "UPI ID: (nahi mila)" else "UPI ID: ${p["upi_id"]}") + "
+
+" +
+                      hist.joinToString("
+") { fmtDate(it.ts) + "   " + inr(it.amount, true) + "   " + it.category }
                   AlertDialog.Builder(act).setTitle(name).setMessage(msg)
                       .setPositiveButton("UPI se pay") { _, _ -> pay(key, name, p["upi_id"]) }
                       .setNeutralButton("UPI ID edit") { _, _ -> editUpi(key, name, p["upi_id"]) }
@@ -1296,8 +1513,10 @@ jobs:
                   }
               }
           }
-          EOF_11
-          cat > app/src/main/java/com/example/fintrack/Screens3.kt <<'EOF_12'
+          EOF_13
+
+          # Screens3.kt
+          cat > app/src/main/java/com/example/fintrack/Screens3.kt <<'EOF_14'
           package com.example.fintrack
 
           import android.view.View
@@ -1308,7 +1527,6 @@ jobs:
           import java.util.Date
           import java.util.Locale
 
-          // =============================== MONEY: net worth, loans, cash, data ===============================
           class MoneyScreen(act: MainActivity) : Screen(act) {
               private val body = act.vbox(14)
               override val root: View = ScrollView(act).apply { addView(body) }
@@ -1318,7 +1536,6 @@ jobs:
                   body.removeAllViews()
                   val db = Db.get(act)
 
-                  // ---- net worth ----
                   val nw = NetWorth.compute(act)
                   val c = act.card()
                   c.addView(act.icon(R.drawable.ic_networth, C.GREEN, 26))
@@ -1344,7 +1561,6 @@ jobs:
                   liab.put(act.actionBtn("+ Liability") { addItem("LIABILITY") }, 10)
                   body.put(liab)
 
-                  // ---- loans ----
                   val lc = act.card()
                   val lh = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL }
                   lh.addView(act.icon(R.drawable.ic_loan, C.AMBER, 22))
@@ -1373,29 +1589,29 @@ jobs:
                   lc.put(act.actionBtn("+ Loan") { addLoan() }, 12)
                   body.put(lc)
 
-                  // ---- cash ----
                   val cash = act.card()
                   cash.addView(act.tv("Manual cash entry", 15f, C.TEXT, true))
                   cash.put(act.tv("Cash kharch / mila yahan likho, wo ledger me judega.", 12f, C.MUTED), 4)
                   cash.put(act.actionBtn("+ Cash entry") { act.ledger.addCash() }, 10)
                   body.put(cash)
 
-                  // ---- data & learning ----
                   val d = act.card()
-                  d.addView(act.tv("Data, backup & learning", 15f, C.TEXT, true))
+                  d.addView(act.tv("Data, backup & imports", 15f, C.TEXT, true))
                   val rules = db.num("SELECT COUNT(*) FROM merchant_rules").toInt()
                   val pats = db.num("SELECT COUNT(*) FROM parse_patterns").toInt()
                   val txn = db.num("SELECT COUNT(*) FROM txn").toInt()
                   val review = db.num("SELECT COUNT(*) FROM txn WHERE review=1").toInt()
-                  d.put(act.tv("$txn transactions  •  $review review baaki  •  $rules merchant rules  •  $pats learned SMS patterns  •  ${Tolls.count(act)} toll plazas", 12f, C.MUTED), 6)
-                  d.put(act.actionBtn("SMS dobara scan karo") { act.rescan() }, 10)
+                  val plazas = db.num("SELECT COUNT(*) FROM toll_plazas").toInt()
+                  d.put(act.tv("$txn transactions  •  $review review  •  $rules merchant rules  •  $pats learned patterns  •  $plazas toll plazas", 12f, C.MUTED), 6)
+                  d.put(act.actionBtn("Upload Toll Data JSON") { act.pickTollJson() }, 10)
+                  d.put(act.actionBtn("Upload Bank Statement (CSV)") { act.pickCsvStatement() }, 8)
+                  d.put(act.actionBtn("SMS dobara scan karo") { act.rescan() }, 8)
                   d.put(act.actionBtn("Backup CSV (Downloads)") { act.backup() }, 8)
                   d.put(act.actionBtn("Restore CSV") { act.pickRestore() }, 8)
                   d.put(act.actionBtn("Bank / sender names") { senders() }, 8)
                   body.put(d)
               }
 
-              // ---- net items ----
               private fun addItem(kind: String) {
                   act.showForm(if (kind == "ASSET") "Asset add" else "Liability add", listOf(Field("Naam (jaise Gold, FD, Credit card)"), Field("Amount", "", true))) { v ->
                       val a = v[1].toDoubleOrNull()
@@ -1414,7 +1630,6 @@ jobs:
                   }
               }
 
-              // ---- loans ----
               private fun addLoan() = loanForm(null)
               private fun editLoan(l: Map<String, String?>) = loanForm(l)
 
@@ -1449,7 +1664,6 @@ jobs:
                   }
               }
 
-              // ---- sender names (unknown bank headers) ----
               private fun senders() {
                   val db = Db.get(act)
                   val seen = LinkedHashMap<String, Pair<String, Int>>()
@@ -1481,13 +1695,16 @@ jobs:
                   }
               }
           }
-          EOF_12
-          cat > app/src/main/java/com/example/fintrack/SenderMap.kt <<'EOF_13'
+          EOF_14
+
+          # SenderMap.kt
+          cat > app/src/main/java/com/example/fintrack/SenderMap.kt <<'EOF_15'
           package com.example.fintrack
 
           object SenderMap {
               private fun b(n: String) = n to "BANK"
               private fun w(n: String) = n to "WALLET"
+              private fun l(n: String) = n to "LOAN"
 
               private val known: Map<String, Pair<String, String>> = mapOf(
                   "HDFCBK" to b("HDFC Bank"), "HDFCBN" to b("HDFC Bank"), "HDFCCC" to ("HDFC Credit Card" to "CARD"),
@@ -1507,17 +1724,18 @@ jobs:
                   "PAYTMB" to w("Paytm Payments Bank"), "PAYTM" to w("Paytm"),
                   "AIRBNK" to w("Airtel Payments Bank"), "AIRTEL" to ("Airtel (Payments Bank / Telecom)" to "TELECOM"),
                   "JIOPAY" to w("Jio Payments Bank"), "PHONPE" to w("PhonePe"), "PHONEPE" to w("PhonePe"),
-                  "AMAZON" to w("Amazon Pay"), "AMZNPY" to w("Amazon Pay"), "GPAY" to w("Google Pay"),
+                  "AMAZON" to w("Amazon Pay"), "AMZNPY" to w("Amazon Pay"), "GPAY" to w("Google Pay"), "MBKWIK" to w("Mobikwik"),
+                  "BAJAJF" to l("Bajaj Finance"), "BAJAJ" to l("Bajaj Finance"),
                   "FASTAG" to ("FASTag" to "FASTAG"), "NETCFT" to ("FASTag (NETC)" to "FASTAG"), "IHMCLT" to ("IHMCL FASTag" to "FASTAG")
               )
 
               private val fuzzy: List<Pair<String, Pair<String, String>>> = listOf(
                   "HDFC" to b("HDFC Bank"), "SBI" to b("State Bank of India"), "ICICI" to b("ICICI Bank"),
                   "AXIS" to b("Axis Bank"), "KOTAK" to b("Kotak Mahindra Bank"), "PAYTM" to w("Paytm"),
-                  "PHONE" to w("PhonePe"), "FASTAG" to ("FASTag" to "FASTAG"), "NETC" to ("FASTag (NETC)" to "FASTAG")
+                  "PHONE" to w("PhonePe"), "MOBIKWIK" to w("Mobikwik"), "BAJAJ" to l("Bajaj Finance"),
+                  "FEDERAL" to b("Federal Bank"), "FASTAG" to ("FASTag" to "FASTAG"), "NETC" to ("FASTag (NETC)" to "FASTAG")
               )
 
-              /** "VM-HDFCBK-S" -> "HDFCBK" (operator prefix and category suffix removed) */
               fun core(header: String): String {
                   var p = header.uppercase().trim().split("-").filter { it.isNotEmpty() }
                   if (p.size >= 2 && p[0].length == 2) p = p.drop(1)
@@ -1525,7 +1743,6 @@ jobs:
                   return p.joinToString("-")
               }
 
-              /** institution + kind. User-defined names (senders table) win, then the built-in map, then fuzzy, then Unknown. */
               fun identify(db: Db, header: String): Pair<String, String> {
                   val c = core(header)
                   val user = db.rows("SELECT institution, kind FROM senders WHERE core=?", c).firstOrNull()
@@ -1535,8 +1752,10 @@ jobs:
                   return ("Unknown ($c)") to "UNKNOWN"
               }
           }
-          EOF_13
-          cat > app/src/main/java/com/example/fintrack/SmsEngine.kt <<'EOF_14'
+          EOF_15
+
+          # SmsEngine.kt
+          cat > app/src/main/java/com/example/fintrack/SmsEngine.kt <<'EOF_16'
           package com.example.fintrack
 
           import android.content.Context
@@ -1554,7 +1773,7 @@ jobs:
                   "Health", "Cash", "EMI/Loan", "Transfer", "Salary/Income", "Received", "Other"
               )
 
-              private fun rule(name: String, words: String) = name to Regex("(?i)\\b(?:$words)\\b")
+              private fun rule(name: String, words: String) = name to Regex("(?i)\b(?:$words)\b")
 
               private val rules = listOf(
                   rule("FASTag", "fastag|netc|toll|plaza|nhai|ihmcl"),
@@ -1570,12 +1789,12 @@ jobs:
 
               private val bodyRules = listOf(
                   rule("Cash", "atm|cash withdrawal|cash wdl|atm wdl"),
-                  rule("EMI/Loan", "emi|loan"),
+                  rule("EMI/Loan", "emi|loan|outstanding|presented|lan"),
                   rule("Salary/Income", "salary"),
                   rule("Bills & Recharge", "recharge|insurance|bbps|electricity|bill payment|dth")
               )
 
-              private val upiWord = Regex("(?i)\\b(upi|imps|neft|rtgs|vpa)\\b")
+              private val upiWord = Regex("(?i)\b(upi|imps|neft|rtgs|vpa)\b")
 
               fun classify(merchant: String, body: String, debit: Boolean): String {
                   for ((name, re) in rules) if (re.containsMatchIn(merchant)) return name
@@ -1586,14 +1805,13 @@ jobs:
               }
           }
 
-          /** Template signature of an SMS: keeps only structural words, hides names/numbers. Same bank format => same hash. */
           object Skeleton {
               private val vocab = setOf(
                   "sent", "debited", "credited", "spent", "paid", "received", "to", "from", "at", "by", "on", "for", "via", "upi", "vpa",
                   "ref", "a/c", "ac", "acct", "account", "card", "bank", "avl", "bal", "balance", "txn", "neft", "imps", "rtgs", "atm",
                   "fastag", "toll", "plaza", "wallet", "info", "trf", "transfer", "withdrawn", "purchase", "deposited", "refund",
                   "towards", "using", "with", "not", "you", "if", "call", "dear", "customer", "your", "is", "has", "been", "of", "in", "no",
-                  "deducted", "charged", "vehicle", "linked"
+                  "deducted", "charged", "vehicle", "linked", "emi", "outstanding", "lan"
               )
 
               fun hash(body: String): String {
@@ -1610,7 +1828,6 @@ jobs:
               }
           }
 
-          /** Fallback extractor used when regex finds no merchant (pluggable: an on-device LLM could replace this). */
           object Heuristic {
               private val stop = setOf(
                   "rs", "inr", "upi", "imps", "neft", "rtgs", "bank", "ltd", "not", "you", "call", "avl", "bal", "balance", "ref", "dear",
@@ -1619,8 +1836,8 @@ jobs:
                   "for", "by", "of", "a/c", "no", "msg", "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
                   "fastag", "toll", "plaza", "wallet", "thank", "thanks", "please", "dial", "visit", "ac", "atm", "pos", "using", "via", "total"
               )
-              private val ctxWords = setOf("to", "at", "from", "by", "for", "towards", "paid", "info", "trf")
-              private val tokRe = Regex("[A-Za-z][A-Za-z0-9&.'\\-]*")
+              private val ctxWords = setOf("to", "at", "from", "by", "for", "towards", "paid", "info", "trf", "against")
+              private val tokRe = Regex("[A-Za-z][A-Za-z0-9&.'\-]*")
 
               private class Tok(val v: String, val s: Int, val e: Int)
 
@@ -1656,24 +1873,24 @@ jobs:
           }
 
           object SmsEngine {
-              private val amountRe = Regex("(?i)(?:\\b(?:rs\\.?|inr)|₹)\\s*([0-9][0-9,]*(?:\\.[0-9]{1,2})?)")
-              private val amountAfterRe = Regex("(?i)\\b(?:debited|credited|spent|paid|withdrawn|sent|received|deposited|deducted)\\s+(?:by|for|of|with)?\\s*(?:rs\\.?|inr|₹)?\\s*([0-9][0-9,]*(?:\\.[0-9]{1,2})?)")
-              private val noiseRe = Regex("(?i)\\b(otp|one[- ]time|verification|requested|request|will be|due|pre-?approved|eligible|reminder|statement|failed|declined|unsuccessful|offer|apply)\\b")
-              private val accountRe = Regex("(?i)(a/c|\\bac\\b|acct|account|card|upi|bank|wallet|neft|imps|rtgs|atm|fastag|netc|x{2,}\\d{2,}|\\*{2,}\\d{2,})")
-              private val debitRe = Regex("(?i)\\b(debited|spent|paid|withdrawn|withdrawal|purchase|sent|transferred|deducted|charged|debit of)\\b")
-              private val creditRe = Regex("(?i)\\b(credited|received|deposited|refund(?:ed)?|added to)\\b")
-              private val balanceRe = Regex("(?i)(?:avl\\.?\\s*bal(?:ance)?|available\\s*bal(?:ance)?|bal(?:ance)?)\\s*(?:is|:|-)?\\s*(?:rs\\.?|inr|₹)?\\s*([0-9][0-9,]*(?:\\.[0-9]{1,2})?)")
-              private val acctRe = Regex("(?i)(?:a/c|acct?|account|card)\\.?\\s*(?:no\\.?|number)?\\s*(?:ending(?:\\s+(?:with|in))?)?\\s*(?:x+|\\*+|#)?\\s*(\\d{3,4})\\b")
-              private val refRe = Regex("(?i)(?:upi\\s*ref(?:\\s*no)?|ref(?:erence)?\\s*(?:no|number|id)?|rrn|utr)\\s*[:.\\-]?\\s*([A-Za-z0-9]{6,22})")
-              private val vpaRe = Regex("(?i)\\b([a-z0-9][\\w.\\-]+@[a-z][a-z0-9]+)\\b(?!\\.[a-z]{2,3}\\b)")
-              private val tollRe = Regex("(?i)\\b(fastag|netc|toll|plaza|nhai|ihmcl)\\b")
+              private val amountRe = Regex("(?i)(?:rs\.?|inr|₹|emi\s*outstanding\s*of\s*rs\.?)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)")
+              private val amountAfterRe = Regex("(?i)\b(?:debited|credited|spent|paid|withdrawn|sent|received|deposited|deducted|withdrawn:?\s*inr)\s+(?:by|for|of|with)?\s*(?:rs\.?|inr|₹)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)")
+              private val noiseRe = Regex("(?i)\b(otp|one[- ]time|verification|requested|request|will be|pre-?approved|eligible|reminder|statement|failed|declined|unsuccessful|offer|apply)\b")
+              private val accountRe = Regex("(?i)(a/c|\bac\b|acct|account|card|upi|bank|wallet|neft|imps|rtgs|atm|fastag|netc|lan|mobikwik|x{2,}\d{2,}|\*{2,}\d{2,})")
+              private val debitRe = Regex("(?i)\b(debited|spent|paid|withdrawn|withdrawal|purchase|sent|transferred|deducted|charged|debit of|emi outstanding)\b")
+              private val creditRe = Regex("(?i)\b(credited|received|deposited|refund(?:ed)?|added to)\b")
+              private val balanceRe = Regex("(?i)(?:avl\.?\s*bal(?:ance)?|available\s*bal(?:ance)?|bal(?:ance)?|remaining balance:?\s*rs\.?)\s*(?:is|:|-)?\s*(?:rs\.?|inr|₹)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)")
+              private val acctRe = Regex("(?i)(?:a/c|acct?|account|card|lan)\.?\s*(?:no\.?|number)?\s*(?:ending(?:\s+(?:with|in))?)?\s*(?:x+|\*+|#)?\s*([A-Za-z0-9]{3,20})\b")
+              private val refRe = Regex("(?i)(?:upi\s*ref(?:\s*no)?|ref(?:erence)?\s*(?:no|number|id)?|rrn|utr)\s*[:.\-]?\s*([A-Za-z0-9]{6,22})")
+              private val vpaRe = Regex("(?i)\b([a-z0-9][\w.\-]+@[a-z][a-z0-9]+)\b(?!\.[a-z]{2,3}\b)")
+              private val tollRe = Regex("(?i)\b(fastag|netc|toll|plaza|nhai|ihmcl)\b")
 
-              private val toRe = Regex("(?i)\\b(?:to|at)\\s+([A-Za-z][A-Za-z0-9 &.\\-']{2,30}?)(?=\\s+(?:on|ref\\w*|via|upi|using|avl|bal|a/c|account|txn|not|if|vide|dated|date)\\b|[.,;(]|$)")
-              private val fromRe = Regex("(?i)\\b(?:from|by)\\s+([A-Za-z][A-Za-z0-9 &.\\-']{2,30}?)(?=\\s+(?:on|ref\\w*|via|upi|using|avl|bal|a/c|account|txn|not|if|vide|dated|date)\\b|[.,;(]|$)")
-              private val vpaWordRe = Regex("(?i)\\bvpa\\s+([\\w.\\-]+@[\\w.\\-]+)")
-              private val upiSlashRe = Regex("(?i)upi/\\w+/\\d+/([A-Za-z][A-Za-z0-9 .\\-]{2,30}?)(?:/|$)")
-              private val semiRe = Regex("(?i)[;,]\\s*([A-Za-z][A-Za-z0-9 &.\\-']{2,30}?)\\s+credited")
-              private val infoRe = Regex("(?i)info[:\\-\\s]+([A-Za-z0-9 &.\\-/@']{3,30})")
+              private val toRe = Regex("(?i)\b(?:to|at|against)\s+([A-Za-z][A-Za-z0-9 &.\-']{2,30}?)(?=\s+(?:on|ref\w*|via|upi|using|avl|bal|a/c|account|txn|not|if|vide|dated|date|may)\b|[.,;(]|$)")
+              private val fromRe = Regex("(?i)\b(?:from|by)\s+([A-Za-z][A-Za-z0-9 &.\-']{2,30}?)(?=\s+(?:on|ref\w*|via|upi|using|avl|bal|a/c|account|txn|not|if|vide|dated|date)\b|[.,;(]|$)")
+              private val vpaWordRe = Regex("(?i)\bvpa\s+([\w.\-]+@[\w.\-]+)")
+              private val upiSlashRe = Regex("(?i)upi/\w+/\d+/([A-Za-z][A-Za-z0-9 .\-]{2,30}?)(?:/|$)")
+              private val semiRe = Regex("(?i)[;,]\s*([A-Za-z][A-Za-z0-9 &.\-']{2,30}?)\s+credited")
+              private val infoRe = Regex("(?i)info[:\-\s]+([A-Za-z0-9 &.\-/@']{3,30})")
 
               private val stopExact = setOf("upi", "neft", "imps", "rtgs", "a/c", "ac", "acct", "account", "you", "bank", "card", "self")
               private val stopStarts = listOf("your", "a/c", "ac ", "acct", "account", "upi ", "bank", "card", "you ")
@@ -1685,8 +1902,8 @@ jobs:
                   return true
               }
 
-              private val trailDateRe = Regex("(?i)\\s+(?:on\\s+)?\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4}.*$")
-              private val atmRe = Regex("(?i)\\batm\\b")
+              private val trailDateRe = Regex("(?i)\s+(?:on\s+)?\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}.*$")
+              private val atmRe = Regex("(?i)\b(atm|withdrawn)\b")
 
               fun pretty(s: String): String {
                   var t = s.trim().replace(trailDateRe, "").trimEnd('.', '-', ',', ' ')
@@ -1723,12 +1940,13 @@ jobs:
               private fun channelOf(b: String): String {
                   val l = b.lowercase()
                   return when {
+                      "mobikwik" in l -> "WALLET"
                       "fastag" in l || "netc" in l -> "FASTAG"
                       "upi" in l || "vpa" in l -> "UPI"
                       "imps" in l -> "IMPS"
                       "neft" in l -> "NEFT"
                       "rtgs" in l -> "RTGS"
-                      "atm" in l -> "ATM"
+                      "atm" in l || "withdrawn" in l -> "ATM"
                       "card" in l -> "CARD"
                       "wallet" in l -> "WALLET"
                       else -> "OTHER"
@@ -1750,10 +1968,10 @@ jobs:
                   return f
               }
 
-              /** Full pipeline: noise filter -> sender identify -> regex -> learned patterns -> NB type -> heuristic -> category. */
               fun build(ctx: Context, db: Db, sender: String, rawBody: String, ts: Long, noiseCheck: Boolean = true): Txn? {
                   if (sender.none { it.isLetter() }) return null
-                  val body = rawBody.replace("\n", " ").replace(Regex("\\s+"), " ").trim()
+                  val body = rawBody.replace("
+", " ").replace(Regex("\s+"), " ").trim()
                   if (noiseCheck && noiseRe.containsMatchIn(body)) return null
                   if (!amountRe.containsMatchIn(body) && !amountAfterRe.containsMatchIn(body)) return null
                   if (!accountRe.containsMatchIn(body)) return null
@@ -1761,7 +1979,7 @@ jobs:
                   val inst = SenderMap.identify(db, sender).first
                   val core = SenderMap.core(sender)
                   val tpl = Skeleton.hash(body)
-                  val f = extract(body)
+                  var f = extract(body)
                   var status = "REGEX"
 
                   val learned = Learner.applyPatterns(db, core, tpl, body)
@@ -1776,6 +1994,19 @@ jobs:
                       if (h != null) { f.merchant = h; if (status == "REGEX") status = "HEURISTIC" }
                   }
                   if (f.merchant == null && atmRe.containsMatchIn(body)) f.merchant = "ATM Withdrawal"
+
+                  if (f.merchant == null || f.amount == null) {
+                      val aiFields = AiParser.parseUnknownSms(body)
+                      if (aiFields != null) {
+                          if (f.amount == null) f.amount = aiFields.amount
+                          if (f.debit == null) f.debit = aiFields.debit
+                          if (f.merchant == null) f.merchant = aiFields.merchant
+                          if (f.balance == null) f.balance = aiFields.balance
+                          if (f.account == null) f.account = aiFields.account
+                          status = "AI_PARSED"
+                      }
+                  }
+
                   val amount = f.amount ?: return null
                   if (f.debit == null) { f.debit = true; status = "FAILED" }
                   val debit = f.debit == true
@@ -1834,8 +2065,10 @@ jobs:
                   return count
               }
           }
-          EOF_14
-          cat > app/src/main/java/com/example/fintrack/SmsReceiver.kt <<'EOF_15'
+          EOF_16
+
+          # SmsReceiver.kt
+          cat > app/src/main/java/com/example/fintrack/SmsReceiver.kt <<'EOF_17'
           package com.example.fintrack
 
           import android.content.BroadcastReceiver
@@ -1864,8 +2097,10 @@ jobs:
                   }.start()
               }
           }
-          EOF_15
-          cat > app/src/main/java/com/example/fintrack/Tolls.kt <<'EOF_16'
+          EOF_17
+
+          # Tolls.kt
+          cat > app/src/main/java/com/example/fintrack/Tolls.kt <<'EOF_18'
           package com.example.fintrack
 
           import android.content.Context
@@ -1889,15 +2124,17 @@ jobs:
                   if (loaded) return
                   val idx = HashMap<String, MutableList<Plaza>>()
                   try {
-                      val text = ctx.assets.open("tolls.json").bufferedReader().use { it.readText() }
-                      val arr = JSONArray(text)
-                      for (k in 0 until arr.length()) {
-                          val o = arr.getJSONObject(k)
-                          val name = o.optString("n")
+                      val db = Db.get(ctx)
+                      val rows = db.rows("SELECT * FROM toll_plazas")
+                      for (r in rows) {
+                          val name = r["name"] ?: continue
                           val tk = toks(name)
                           if (tk.isEmpty()) continue
-                          val car = if (o.isNull("c")) null else o.optDouble("c")
-                          val p = Plaza(o.optInt("i"), name, o.optString("s"), o.optString("h"), o.getDouble("la"), o.getDouble("lo"), car, tk)
+                          val car = r["car_fare"]?.toDoubleOrNull()
+                          val p = Plaza(
+                              r["plaza_id"]?.toIntOrNull() ?: 0, name, r["state"] ?: "", r["nh"] ?: "",
+                              r["lat"]?.toDoubleOrNull() ?: 0.0, r["lon"]?.toDoubleOrNull() ?: 0.0, car, tk
+                          )
                           for (t in tk) idx.getOrPut(t) { ArrayList() }.add(p)
                       }
                   } catch (e: Exception) {
@@ -1911,7 +2148,6 @@ jobs:
                   return index.values.flatten().toSet().size
               }
 
-              /** Match a toll SMS to a plaza: every distinctive name token must appear; ties broken by fare vs. amount. */
               fun match(ctx: Context, text: String, amount: Double): Plaza? {
                   load(ctx)
                   val bt = toks(text)
@@ -1930,7 +2166,7 @@ jobs:
                   return best
               }
 
-              private val vehicleRe = Regex("\\b[A-Z]{2}\\s?\\d{1,2}\\s?[A-Z]{1,3}\\s?\\d{4}\\b")
+              private val vehicleRe = Regex("\b[A-Z]{2}\s?\d{1,2}\s?[A-Z]{1,3}\s?\d{4}\b")
 
               fun record(ctx: Context, t: Txn) {
                   val db = Db.get(ctx)
@@ -1944,8 +2180,10 @@ jobs:
                   )
               }
           }
-          EOF_16
-          cat > app/src/main/java/com/example/fintrack/Ui.kt <<'EOF_17'
+          EOF_18
+
+          # Ui.kt
+          cat > app/src/main/java/com/example/fintrack/Ui.kt <<'EOF_19'
           package com.example.fintrack
 
           import android.content.Context
@@ -2061,7 +2299,6 @@ jobs:
           fun fmtDate(ts: Long): String = SimpleDateFormat("dd MMM yy", Locale.getDefault()).format(Date(ts))
           fun fmtDateTime(ts: Long): String = SimpleDateFormat("dd MMM, HH:mm", Locale.getDefault()).format(Date(ts))
 
-          /** Generic row list adapter: icon + title/subtitle + amount. */
           class RowAdapter<T>(private val ctx: Context, var items: List<T>, private val bind: (T, Row) -> Unit) : BaseAdapter() {
               class Row(ctx: Context) {
                   val icon = ctx.icon(R.drawable.ic_bank, C.ACCENT, 26)
@@ -2093,7 +2330,6 @@ jobs:
               }
           }
 
-          // ---------------- simple form dialog ----------------
           class Field(val label: String, val default: String = "", val number: Boolean = false, val options: List<String>? = null)
 
           fun MainActivity.showForm(
@@ -2131,8 +2367,10 @@ jobs:
               if (neutral != null) b.setNeutralButton(neutral.first) { _, _ -> neutral.second() }
               b.show()
           }
-          EOF_17
-          cat > app/src/main/res/drawable/ic_bank.xml <<'EOF_18'
+          EOF_19
+
+          # Vector Drawables
+          cat > app/src/main/res/drawable/ic_bank.xml <<'EOF_20'
           <?xml version="1.0" encoding="utf-8"?>
           <vector xmlns:android="http://schemas.android.com/apk/res/android"
               android:width="24dp"
@@ -2154,8 +2392,9 @@ jobs:
                   android:strokeLineCap="round"
                   android:strokeLineJoin="round"/>
           </vector>
-          EOF_18
-          cat > app/src/main/res/drawable/ic_contacts.xml <<'EOF_19'
+          EOF_20
+
+          cat > app/src/main/res/drawable/ic_contacts.xml <<'EOF_21'
           <?xml version="1.0" encoding="utf-8"?>
           <vector xmlns:android="http://schemas.android.com/apk/res/android"
               android:width="24dp"
@@ -2191,8 +2430,9 @@ jobs:
                   android:strokeLineCap="round"
                   android:strokeLineJoin="round"/>
           </vector>
-          EOF_19
-          cat > app/src/main/res/drawable/ic_fastag.xml <<'EOF_20'
+          EOF_21
+
+          cat > app/src/main/res/drawable/ic_fastag.xml <<'EOF_22'
           <?xml version="1.0" encoding="utf-8"?>
           <vector xmlns:android="http://schemas.android.com/apk/res/android"
               android:width="24dp"
@@ -2228,8 +2468,9 @@ jobs:
                   android:strokeLineCap="round"
                   android:strokeLineJoin="round"/>
           </vector>
-          EOF_20
-          cat > app/src/main/res/drawable/ic_fuel.xml <<'EOF_21'
+          EOF_22
+
+          cat > app/src/main/res/drawable/ic_fuel.xml <<'EOF_23'
           <?xml version="1.0" encoding="utf-8"?>
           <vector xmlns:android="http://schemas.android.com/apk/res/android"
               android:width="24dp"
@@ -2265,8 +2506,9 @@ jobs:
                   android:strokeLineCap="round"
                   android:strokeLineJoin="round"/>
           </vector>
-          EOF_21
-          cat > app/src/main/res/drawable/ic_grocery.xml <<'EOF_22'
+          EOF_23
+
+          cat > app/src/main/res/drawable/ic_grocery.xml <<'EOF_24'
           <?xml version="1.0" encoding="utf-8"?>
           <vector xmlns:android="http://schemas.android.com/apk/res/android"
               android:width="24dp"
@@ -2302,8 +2544,9 @@ jobs:
                   android:strokeLineCap="round"
                   android:strokeLineJoin="round"/>
           </vector>
-          EOF_22
-          cat > app/src/main/res/drawable/ic_loan.xml <<'EOF_23'
+          EOF_24
+
+          cat > app/src/main/res/drawable/ic_loan.xml <<'EOF_25'
           <?xml version="1.0" encoding="utf-8"?>
           <vector xmlns:android="http://schemas.android.com/apk/res/android"
               android:width="24dp"
@@ -2332,8 +2575,9 @@ jobs:
                   android:strokeLineCap="round"
                   android:strokeLineJoin="round"/>
           </vector>
-          EOF_23
-          cat > app/src/main/res/drawable/ic_networth.xml <<'EOF_24'
+          EOF_25
+
+          cat > app/src/main/res/drawable/ic_networth.xml <<'EOF_26'
           <?xml version="1.0" encoding="utf-8"?>
           <vector xmlns:android="http://schemas.android.com/apk/res/android"
               android:width="24dp"
@@ -2355,8 +2599,9 @@ jobs:
                   android:strokeLineCap="round"
                   android:strokeLineJoin="round"/>
           </vector>
-          EOF_24
-          cat > app/src/main/res/drawable/ic_transfer.xml <<'EOF_25'
+          EOF_26
+
+          cat > app/src/main/res/drawable/ic_transfer.xml <<'EOF_27'
           <?xml version="1.0" encoding="utf-8"?>
           <vector xmlns:android="http://schemas.android.com/apk/res/android"
               android:width="24dp"
@@ -2392,38 +2637,15 @@ jobs:
                   android:strokeLineCap="round"
                   android:strokeLineJoin="round"/>
           </vector>
-          EOF_25
-      - name: Prepare toll data
-        run: |
-          python3 - <<'EOF_PY'
-          import json, os
-          src = os.path.join(os.environ.get("GITHUB_WORKSPACE", "."), "india_toll_plazas_master_nhai.json")
-          out = []
-          def num(x):
-              try:
-                  return float(x)
-              except Exception:
-                  return None
-          if os.path.exists(src):
-              for r in json.load(open(src, encoding="utf-8")):
-                  la = num(r.get("latitude"))
-                  lo = num(r.get("longitude"))
-                  if la is None or lo is None or not (6 < la < 38 and 67 < lo < 98):
-                      continue
-                  nh = r.get("nh_no")
-                  out.append({"i": r.get("tollplaza_id"), "n": (r.get("tollplaza_name") or "").strip(),
-                              "s": (r.get("state_name") or "").strip(), "h": nh.strip() if isinstance(nh, str) else "",
-                              "la": round(la, 6), "lo": round(lo, 6), "c": num(r.get("car_single"))})
-          else:
-              print("WARNING: india_toll_plazas_master_nhai.json not found in repo root - travel map will be empty")
-          os.makedirs("/tmp/proj/app/src/main/assets", exist_ok=True)
-          json.dump(out, open("/tmp/proj/app/src/main/assets/tolls.json", "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
-          print("toll plazas:", len(out))
-          EOF_PY
-      - name: Build
+          EOF_27
+
+      - name: Build Debug APK
         working-directory: /tmp/proj
         run: gradle assembleDebug --no-daemon
-      - name: Publish release
+
+      - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "v${{ github.run_number }}" /tmp/proj/app/build/outputs/apk/debug/app-debug.apk --repo "${{ github.repository }}" --title "FinTrack build ${{ github.run_number }}" --notes "Debug APK"
+        run: |
+          VERSION="v1.0.${{ github.run_number }}"
+          gh release create "$VERSION" /tmp/proj/app/build/outputs/apk/debug/app-debug.apk             --repo "${{ github.repository }}"             --title "FinTrack Build ${{ github.run_number }}"             --notes "Automated complete build including AI parsing, wallet support, CSV reconciliation, and dynamic toll JSON import."
