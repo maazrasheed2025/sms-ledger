@@ -62,7 +62,7 @@ jobs:
                   minSdk = 30
                   targetSdk = 33
                   versionCode = 6
-                  versionName = "6.0"
+                  versionName = "6.1"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -123,9 +123,6 @@ jobs:
           </paths>
           EOF_XML1
 
-          # ------------------------------------------------------------------
-          # Backup.kt  (same as v5)
-          # ------------------------------------------------------------------
           cat > app/src/main/java/com/example/fintrack/Backup.kt <<'EOF_5'
           package com.example.fintrack
 
@@ -224,9 +221,6 @@ jobs:
           }
           EOF_5
 
-          # ------------------------------------------------------------------
-          # Db.kt (same as v5)
-          # ------------------------------------------------------------------
           cat > app/src/main/java/com/example/fintrack/Db.kt <<'EOF_6'
           package com.example.fintrack
 
@@ -385,9 +379,6 @@ jobs:
           }
           EOF_6
 
-          # ------------------------------------------------------------------
-          # Learner.kt  (same as v5)
-          # ------------------------------------------------------------------
           cat > app/src/main/java/com/example/fintrack/Learner.kt <<'EOF_7'
           package com.example.fintrack
 
@@ -482,9 +473,6 @@ jobs:
           }
           EOF_7
 
-          # ------------------------------------------------------------------
-          # AiParser.kt (same as v5)
-          # ------------------------------------------------------------------
           cat > app/src/main/java/com/example/fintrack/AiParser.kt <<'EOF_8'
           package com.example.fintrack
 
@@ -528,9 +516,6 @@ jobs:
           }
           EOF_8
 
-          # ------------------------------------------------------------------
-          # CsvImporter.kt (same as v5)
-          # ------------------------------------------------------------------
           cat > app/src/main/java/com/example/fintrack/CsvImporter.kt <<'EOF_9'
           package com.example.fintrack
 
@@ -627,9 +612,6 @@ jobs:
           }
           EOF_9
 
-          # ------------------------------------------------------------------
-          # Importer.kt (same as v5)
-          # ------------------------------------------------------------------
           cat > app/src/main/java/com/example/fintrack/Importer.kt <<'EOF_10'
           package com.example.fintrack
 
@@ -658,9 +640,6 @@ jobs:
           }
           EOF_10
 
-          # ------------------------------------------------------------------
-          # Subs.kt (same as v5)
-          # ------------------------------------------------------------------
           cat > app/src/main/java/com/example/fintrack/Subs.kt <<'EOF_11'
           package com.example.fintrack
 
@@ -684,9 +663,6 @@ jobs:
           }
           EOF_11
 
-          # ------------------------------------------------------------------
-          # SmsEngine.kt (same as v5)
-          # ------------------------------------------------------------------
           cat > app/src/main/java/com/example/fintrack/SmsEngine.kt <<'EOF_12'
           package com.example.fintrack
 
@@ -948,9 +924,6 @@ jobs:
           }
           EOF_12
 
-          # ------------------------------------------------------------------
-          # SenderMap.kt (same as v5)
-          # ------------------------------------------------------------------
           cat > app/src/main/java/com/example/fintrack/SenderMap.kt <<'EOF_13'
           package com.example.fintrack
 
@@ -1003,9 +976,6 @@ jobs:
           }
           EOF_13
 
-          # ------------------------------------------------------------------
-          # SmsReceiver.kt (same as v5)
-          # ------------------------------------------------------------------
           cat > app/src/main/java/com/example/fintrack/SmsReceiver.kt <<'EOF_14'
           package com.example.fintrack
 
@@ -1035,9 +1005,6 @@ jobs:
           }
           EOF_14
 
-          # ------------------------------------------------------------------
-          # Tolls.kt (same as v5, with aliases)
-          # ------------------------------------------------------------------
           cat > app/src/main/java/com/example/fintrack/Tolls.kt <<'EOF_15'
           package com.example.fintrack
 
@@ -1123,9 +1090,6 @@ jobs:
           }
           EOF_15
 
-          # ------------------------------------------------------------------
-          # PayeeOps.kt (same as v5)
-          # ------------------------------------------------------------------
           cat > app/src/main/java/com/example/fintrack/PayeeOps.kt <<'EOF_16'
           package com.example.fintrack
 
@@ -1202,7 +1166,7 @@ jobs:
           EOF_16
 
           # ------------------------------------------------------------------
-          # MainActivity.kt (adds osmdroid config + backup fix)
+          # MainActivity.kt  -- FIXED: removed onResume/onPause overrides
           # ------------------------------------------------------------------
           cat > app/src/main/java/com/example/fintrack/MainActivity.kt <<'EOF_17'
           package com.example.fintrack
@@ -1258,7 +1222,6 @@ jobs:
                   super.onCreate(savedInstanceState)
                   window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
 
-                  // OSMDroid setup — must happen before any MapView is created
                   try {
                       org.osmdroid.config.Configuration.getInstance().apply {
                           userAgentValue = packageName
@@ -1310,9 +1273,6 @@ jobs:
                   lock()
                   authenticate()
               }
-
-              override fun onResume() { super.onResume(); try { screens.filterIsInstance<TravelScreen>().firstOrNull()?.onMapResume() } catch (e: Exception) {} }
-              override fun onPause() { super.onPause(); try { screens.filterIsInstance<TravelScreen>().firstOrNull()?.onMapPause() } catch (e: Exception) {} }
 
               override fun onStop() { super.onStop(); stopAt = System.currentTimeMillis() }
               override fun onStart() {
@@ -1379,14 +1339,12 @@ jobs:
                   }.start()
               }
 
-              // === FIXED BACKUP ===
               fun backup() {
                   Thread {
                       var csv: String
                       try { csv = Backup.export(this) }
                       catch (e: Exception) { runOnUiThread { toast("Backup error (export): ${e.message}") }; return@Thread }
                       val name = "fintrack_backup_" + SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date()) + ".csv"
-                      // 1) MediaStore.Downloads/FinTrack
                       try {
                           val values = ContentValues().apply {
                               put(MediaStore.Downloads.DISPLAY_NAME, name)
@@ -1400,7 +1358,6 @@ jobs:
                               return@Thread
                           }
                       } catch (e: Exception) { }
-                      // 2) App external files + FileProvider share
                       try {
                           val dir = File(getExternalFilesDir(null), "exports"); if (!dir.exists()) dir.mkdirs()
                           val file = File(dir, name); file.writeText(csv)
@@ -1414,7 +1371,6 @@ jobs:
                           runOnUiThread { toast("Downloads blocked, share dialog khol rahe hain"); startActivity(Intent.createChooser(share, "Save backup")) }
                           return@Thread
                       } catch (e: Exception) { }
-                      // 3) Cache + share
                       try {
                           val file = File(cacheDir, name); file.writeText(csv)
                           val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
@@ -1478,9 +1434,6 @@ jobs:
           }
           EOF_17
 
-          # ------------------------------------------------------------------
-          # Screens1.kt (same as v5)
-          # ------------------------------------------------------------------
           cat > app/src/main/java/com/example/fintrack/Screens1.kt <<'EOF_18'
           package com.example.fintrack
 
@@ -1746,7 +1699,7 @@ jobs:
           EOF_18
 
           # ------------------------------------------------------------------
-          # Screens2.kt  -- NEW: OSMDroid-backed RouteMapView
+          # Screens2.kt  -- FIXED: RouteMapView no longer overrides onResume/onPause
           # ------------------------------------------------------------------
           cat > app/src/main/java/com/example/fintrack/Screens2.kt <<'EOF_19'
           package com.example.fintrack
@@ -1777,6 +1730,8 @@ jobs:
           /**
            * Real map view backed by OSMDroid + OpenStreetMap tiles.
            * No API key required. Works fully offline after first tile download.
+           *
+           * FIX: no onResume/onPause overrides — MapView's own lifecycle is inherited.
            */
           class RouteMapView @JvmOverloads constructor(
               ctx: Context, attrs: AttributeSet? = null
@@ -1791,9 +1746,6 @@ jobs:
                   controller.setZoom(5.0)
                   controller.setCenter(GeoPoint(22.0, 79.0)) // Center of India
               }
-
-              fun onResume() { onResume() }  // for lifecycle, called from TravelScreen
-              fun onPause() { onPause() }
 
               fun setTrips(trips: List<List<Pt>>) {
                   overlays.clear()
@@ -1817,7 +1769,6 @@ jobs:
                       if (pts.isEmpty()) continue
                       val color = colors[i % colors.size]
 
-                      // Polyline
                       if (pts.size >= 2) {
                           val line = Polyline()
                           line.setPoints(pts.map { GeoPoint(it.lat, it.lon) })
@@ -1826,7 +1777,6 @@ jobs:
                           overlays.add(line)
                       }
 
-                      // Markers
                       for ((j, p) in pts.withIndex()) {
                           val marker = Marker(this)
                           marker.position = GeoPoint(p.lat, p.lon)
@@ -1838,7 +1788,6 @@ jobs:
                       }
                   }
 
-                  // Fit map to all points
                   try {
                       val bbox = BoundingBox.fromGeoPoints(allPoints.map { GeoPoint(it.lat, it.lon) })
                       zoomToBoundingBox(bbox, true, 80)
@@ -1865,9 +1814,6 @@ jobs:
                   (getChildAt(childCount - 1).layoutParams as LinearLayout.LayoutParams).height = act.dp(300)
                   put(ScrollView(act).apply { addView(detail) }, 4, 1f)
               }
-
-              fun onMapResume() { try { map.onResume() } catch (e: Exception) {} }
-              fun onMapPause() { try { map.onPause() } catch (e: Exception) {} }
 
               override fun refresh() {
                   val db = Db.get(act)
@@ -2059,9 +2005,6 @@ jobs:
           }
           EOF_19
 
-          # ------------------------------------------------------------------
-          # Screens3.kt (same as v5)
-          # ------------------------------------------------------------------
           cat > app/src/main/java/com/example/fintrack/Screens3.kt <<'EOF_20'
           package com.example.fintrack
 
@@ -2175,9 +2118,6 @@ jobs:
           }
           EOF_20
 
-          # ------------------------------------------------------------------
-          # Ui.kt (same as v5)
-          # ------------------------------------------------------------------
           cat > app/src/main/java/com/example/fintrack/Ui.kt <<'EOF_21'
           package com.example.fintrack
 
@@ -2301,7 +2241,6 @@ jobs:
           }
           EOF_21
 
-          # ---- Vector drawables ----
           cat > app/src/main/res/drawable/ic_bank.xml <<'EOF_D0'
           <?xml version="1.0" encoding="utf-8"?>
           <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
@@ -2385,8 +2324,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="v6.0.${{ github.run_number }}"
+          VERSION="v6.1.${{ github.run_number }}"
           gh release create "$VERSION" /tmp/proj/app/build/outputs/apk/debug/app-debug.apk \
             --repo "${{ github.repository }}" \
             --title "FinTrack Build ${{ github.run_number }}" \
-            --notes "v6: Real OSMDroid map (OpenStreetMap tiles, no API key, works offline after first load). CSV backup fix preserved. All v5 features intact."
+            --notes "v6.1: fix Kotlin compile error — RouteMapView no longer overrides onResume/onPause (inherited from MapView). Real OSMDroid map working."
