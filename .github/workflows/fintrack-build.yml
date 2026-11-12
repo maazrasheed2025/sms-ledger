@@ -1,4 +1,4 @@
-      - name: Apply compile fixes
+        name: Apply compile fixes
         run: |
           python3 - <<'PY'
           import pathlib, re
