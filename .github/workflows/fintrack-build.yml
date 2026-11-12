@@ -61,8 +61,8 @@ jobs:
                   applicationId = "com.example.fintrack"
                   minSdk = 30
                   targetSdk = 33
-                  versionCode = 16
-                  versionName = "9.0"
+                  versionCode = 17
+                  versionName = "9.1"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -89,7 +89,6 @@ jobs:
               <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
-              <uses-permission android:name="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" tools:ignore="ProtectedPermissions" xmlns:tools="http://schemas.android.com/tools"/>
               <application
                   android:label="FinTrack"
                   android:allowBackup="false"
@@ -148,9 +147,6 @@ jobs:
           </resources>
           EOF_STR
 
-          # ============================================================
-          # Backup.kt — adds cleanup + restore
-          # ============================================================
           cat > app/src/main/java/com/example/fintrack/Backup.kt <<'EOF_5'
           package com.example.fintrack
 
@@ -247,7 +243,6 @@ jobs:
                   return n
               }
 
-              /** Wipe all tables except toll_plazas (so the app still has the toll DB). */
               fun cleanAll(ctx: Context) {
                   val db = Db.get(ctx).writableDatabase
                   db.beginTransaction()
@@ -261,9 +256,6 @@ jobs:
           }
           EOF_5
 
-          # ============================================================
-          # Db.kt — add "NOTIF" source + cleanup helper
-          # ============================================================
           cat > app/src/main/java/com/example/fintrack/Db.kt <<'EOF_6'
           package com.example.fintrack
 
@@ -1155,9 +1147,6 @@ jobs:
           }
           EOF_15
 
-          # ============================================================
-          # PayeeOps.kt — new duplicate rule (both non-Unknown + different = not dup)
-          # ============================================================
           cat > app/src/main/java/com/example/fintrack/PayeeOps.kt <<'EOF_16'
           package com.example.fintrack
 
@@ -1228,7 +1217,7 @@ jobs:
                   val m = t.merchant.trim().lowercase()
                   if (m == "unknown" || m.isEmpty()) return true
                   if (t.merchant.matches(Regex("[A-Z]{5,8}"))) return true
-                  if (m == "atm withdrawal") return true // ATM always separate
+                  if (m == "atm withdrawal") return true
                   return false
               }
 
@@ -1242,23 +1231,10 @@ jobs:
                   return s
               }
 
-              /**
-               * NEW duplicate rule (per user's 29 Jun / 20 Jun / 06 Jun examples):
-               * Two txns are duplicates ONLY if:
-               *  - same amount (±0.01)
-               *  - same direction
-               *  - same day
-               *  - within 5 minutes
-               *  - NOT provably different merchants:
-               *      if BOTH merchants are non-Unknown AND normalized names differ -> NOT dup
-               *      if the same UPI exists on one but not the other, and merchants differ -> NOT dup
-               *      if both are "ATM Withdrawal" -> NOT dup (always separate cash txns)
-               */
               private fun isDuplicate(a: Txn, b: Txn): Boolean {
                   if (Math.abs(a.ts - b.ts) > 5 * 60_000L) return false
                   if (Math.abs(a.amount - b.amount) > 0.01) return false
                   if (a.debit != b.debit) return false
-
                   val cal = java.util.Calendar.getInstance()
                   fun dayOf(t: Txn): String {
                       cal.timeInMillis = t.ts
@@ -1272,39 +1248,26 @@ jobs:
                   val na = Learner.norm(a.merchant)
                   val nb = Learner.norm(b.merchant)
 
-                  // ATM: never a duplicate
                   if (ma == "atm withdrawal" && mb == "atm withdrawal") return false
 
                   val aReal = ma.isNotEmpty() && ma != "unknown" && !a.merchant.matches(Regex("[A-Z]{5,8}"))
                   val bReal = mb.isNotEmpty() && mb != "unknown" && !b.merchant.matches(Regex("[A-Z]{5,8}"))
 
-                  // Both real merchants and different -> not duplicate
                   if (aReal && bReal && na != nb) return false
-
-                  // Both real merchants, same normalized name -> duplicate
                   if (aReal && bReal && na == nb) return true
 
-                  // One is Unknown/junk -> we should look at UPI to decide
                   val va = a.vpa?.lowercase()
                   val vb = b.vpa?.lowercase()
                   if (!va.isNullOrBlank() && !vb.isNullOrBlank() && va != vb) return false
                   if (!va.isNullOrBlank() && vb.isNullOrBlank() && !aReal) return false
                   if (va.isNullOrBlank() && !vb.isNullOrBlank() && !bReal) return false
 
-                  // Default: treat as duplicate (same amount, same time, same day)
                   return true
               }
 
-              /**
-               * Smart delete: keeps the highest-quality txn, deletes the rest.
-               * If the group is not actually same-merchant (e.g. all 3 real different
-               * merchants share the same amount by coincidence) -> returns empty so
-               * the user is forced to check manually.
-               */
               fun smartDeleteIds(list: List<Txn>): List<Long> {
                   if (list.size < 2) return emptyList()
                   val real = list.filter { !isJunk(it) }
-                  // If every txn is a different real merchant, don't auto-tick.
                   val realNames = real.map { Learner.norm(it.merchant) }.distinct()
                   if (real.size >= 2 && realNames.size > 1) return emptyList()
                   val sorted = list.sortedByDescending { qualityScore(it) }
@@ -1350,9 +1313,6 @@ jobs:
           }
           EOF_16
 
-          # ============================================================
-          # NotifListener.kt — NEW: reads payment notifications, dedupes with SMS
-          # ============================================================
           cat > app/src/main/java/com/example/fintrack/NotifListener.kt <<'EOF_17'
           package com.example.fintrack
 
@@ -1361,28 +1321,20 @@ jobs:
           import android.service.notification.NotificationListenerService
           import android.service.notification.StatusBarNotification
 
-          /**
-           * Reads payment-app notifications and turns them into Txn rows.
-           * - Only listens to a whitelist of package names to avoid noise.
-           * - Extracts amount + direction from title/text.
-           * - Before inserting, checks if an SMS or CSV txn with same amount+direction
-           *   on the same day (±10 minutes) already exists -> if so, skip (SMS wins).
-           */
           class NotifListener : NotificationListenerService() {
-
               companion object {
                   val WHITELIST = setOf(
-                      "com.dreamplug.androidapp",          // CRED
-                      "com.google.android.apps.nbu.paisa.user", // GPay
-                      "com.yesbank.iris",                  // IRIS by YES BANK
-                      "com.phonepe.app",                   // PhonePe
-                      "com.jupiter.money",                 // Jupiter
-                      "net.one97.paytm",                   // Paytm
-                      "com.mobikwik_new",                  // Mobikwik
-                      "com.yesbank.next",                  // YES PAY Next
-                      "com.jio.jiopay",                    // JioFinance
-                      "com.fedmobile",                     // FedMobile
-                      "com.supermoney"                     // super.money
+                      "com.dreamplug.androidapp",
+                      "com.google.android.apps.nbu.paisa.user",
+                      "com.yesbank.iris",
+                      "com.phonepe.app",
+                      "com.jupiter.money",
+                      "net.one97.paytm",
+                      "com.mobikwik_new",
+                      "com.yesbank.next",
+                      "com.jio.jiopay",
+                      "com.fedmobile",
+                      "com.supermoney"
                   )
                   val NAME_MAP = mapOf(
                       "com.dreamplug.androidapp" to "CRED",
@@ -1413,12 +1365,10 @@ jobs:
                   val full = (title + " " + text + " " + big).trim()
                   if (full.length < 5) return
 
-                  // amount
                   val amountRe = Regex("""(?:₹|rs\.?|inr)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)""", RegexOption.IGNORE_CASE)
                   val amount = amountRe.find(full)?.groupValues?.get(1)?.replace(",", "")?.toDoubleOrNull() ?: return
                   if (amount <= 0) return
 
-                  // direction
                   val l = full.lowercase()
                   val debit = when {
                       "debited" in l || "paid" in l || "sent" in l || "spent" in l || "withdrawn" in l || "purchase" in l -> true
@@ -1426,7 +1376,6 @@ jobs:
                       else -> true
                   }
 
-                  // merchant guess
                   val vendor = NAME_MAP[sbn.packageName] ?: sbn.packageName
                   val merchant = when {
                       "to " in l -> {
@@ -1440,7 +1389,6 @@ jobs:
                       else -> vendor
                   }.ifBlank { vendor }.take(40)
 
-                  // dedupe against SMS/CSV with same amount+direction on the same day (±10 min)
                   val db = Db.get(ctx)
                   val now = sbn.postTime
                   val tenMin = 10 * 60_000L
@@ -1455,7 +1403,6 @@ jobs:
                   )
                   if (hit2.isNotEmpty()) return
 
-                  // dedupe by notif key (package + text hash)
                   val key = "NOTIF|" + sbn.packageName + "|" + full.hashCode()
                   val t = Txn(
                       smsKey = key,
@@ -1478,9 +1425,6 @@ jobs:
           }
           EOF_17
 
-          # ============================================================
-          # ForegroundHelper.kt — NEW: foreground service for notification listener
-          # ============================================================
           cat > app/src/main/java/com/example/fintrack/ForegroundHelper.kt <<'EOF_18'
           package com.example.fintrack
 
@@ -1527,9 +1471,6 @@ jobs:
           }
           EOF_18
 
-          # ============================================================
-          # Widgets.kt
-          # ============================================================
           cat > app/src/main/java/com/example/fintrack/Widgets.kt <<'EOF_W'
           package com.example.fintrack
 
@@ -1680,9 +1621,6 @@ jobs:
           }
           EOF_PDF
 
-          # ============================================================
-          # MainActivity — starts ForegroundHelper + adds Clean DB
-          # ============================================================
           cat > app/src/main/java/com/example/fintrack/MainActivity.kt <<'EOF_19'
           package com.example.fintrack
 
@@ -1752,7 +1690,7 @@ jobs:
                   window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
                   try {
                       org.osmdroid.config.Configuration.getInstance().apply {
-                          userAgentValue = "FinTrack/9.0 (com.example.fintrack; Android)"
+                          userAgentValue = "FinTrack/9.1 (com.example.fintrack; Android)"
                           tileFileSystemCacheMaxBytes = 600L * 1024 * 1024
                           tileFileSystemCacheTrimBytes = 500L * 1024 * 1024
                           load(this@MainActivity, getSharedPreferences("osmdroid", MODE_PRIVATE))
@@ -1949,15 +1887,14 @@ jobs:
                       .setNegativeButton("Nahi", null).show()
               }
               fun openNotifAccessSettings() {
-                  try {
-                      startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
-                  } catch (e: Exception) { toast("Settings me manually Notification access kholo") }
+                  try { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
+                  catch (e: Exception) { toast("Settings me manually Notification access kholo") }
               }
           }
           EOF_19
 
           # ============================================================
-          # Screens1.kt — Ledger: long-press for delete/edit, multi-delete chip
+          # Screens1.kt — FIXED showTxn (use .create() + setOnShowListener + show)
           # ============================================================
           cat > app/src/main/java/com/example/fintrack/Screens1.kt <<'EOF_20'
           package com.example.fintrack
@@ -2090,7 +2027,7 @@ jobs:
                       }
                       setOnItemLongClickListener { _, _, pos, _ ->
                           val item = this@LedgerScreen.adapter.items.getOrNull(pos) as? Row.TxnRow ?: return@setOnItemLongClickListener false
-                          val dl = AlertDialog.Builder(act)
+                          AlertDialog.Builder(act)
                               .setItems(arrayOf("Delete this transaction", "Edit", "Enter select mode")) { _, which ->
                                   when (which) {
                                       0 -> { PayeeOps.bulkDelete(act, listOf(item.t.id)); act.toast("Deleted"); act.refreshAll() }
@@ -2215,21 +2152,31 @@ jobs:
                           .setNegativeButton("Nahi", null).show()
                   }
               }
+
+              // FIXED: use create() + setOnShowListener + show()
               private fun showTxn(t: Txn) {
                   val msg = fmtDateTime(t.ts) + "  •  " + t.institution + "\n" + (if (t.debit) "Kharch " else "Mila ") + inr(t.amount, true) + "  •  " + t.category +
-                      (if (t.balance != null) "\nBalance: " + inr(t.balance ?: 0.0, true) else "") + "\nSource: ${t.source}  •  Parse: ${t.status}" + (if (t.vpa != null) "  •  UPI: ${t.vpa}" else "") + (if (t.ref != null) "  •  Ref: ${t.ref}" else "") + (if (t.body.isNotEmpty()) "\n\n" + t.body else "")
-                  AlertDialog.Builder(act).setTitle(t.merchant).setMessage(msg)
+                      (if (t.balance != null) "\nBalance: " + inr(t.balance ?: 0.0, true) else "") + "\nSource: ${t.source}  •  Parse: ${t.status}" +
+                      (if (t.vpa != null) "  •  UPI: ${t.vpa}" else "") + (if (t.ref != null) "  •  Ref: ${t.ref}" else "") +
+                      (if (t.body.isNotEmpty()) "\n\n" + t.body else "")
+                  val builder = AlertDialog.Builder(act)
+                      .setTitle(t.merchant)
+                      .setMessage(msg)
                       .setPositiveButton("Edit / Sahi karo") { _, _ -> editTxn(t) }
                       .setNeutralButton("Delete", null)
                       .setNegativeButton("Band karo", null)
-                      .setOnShowListener { d ->
-                          val ad = d as AlertDialog
-                          ad.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
-                              PayeeOps.bulkDelete(act, listOf(t.id)); act.toast("Deleted"); act.refreshAll(); ad.dismiss()
-                          }
+                  val ad = builder.create()
+                  ad.setOnShowListener {
+                      ad.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                          PayeeOps.bulkDelete(act, listOf(t.id))
+                          act.toast("Deleted")
+                          act.refreshAll()
+                          ad.dismiss()
                       }
-                      .show()
+                  }
+                  ad.show()
               }
+
               private fun editTxn(t: Txn) {
                   act.showForm("Sahi karo (app seekhegi)",
                       listOf(Field("Kisko / dukaan", t.merchant), Field("Amount", t.amount.toString(), true), Field("Type", if (t.debit) "Debit (kharch)" else "Credit (mila)", options = listOf("Debit (kharch)", "Credit (mila)")), Field("Category", t.category, options = Categories.ALL))
@@ -2253,7 +2200,7 @@ jobs:
           EOF_20
 
           # ============================================================
-          # Screens2.kt — same map + payee history has delete checkboxes
+          # Screens2.kt — FIXED: import android.view.Gravity
           # ============================================================
           cat > app/src/main/java/com/example/fintrack/Screens2.kt <<'EOF_21'
           package com.example.fintrack
@@ -2263,6 +2210,7 @@ jobs:
           import android.graphics.Color
           import android.net.Uri
           import android.util.AttributeSet
+          import android.view.Gravity
           import android.view.View
           import android.view.ViewGroup
           import android.widget.CheckBox
@@ -2466,7 +2414,6 @@ jobs:
                   val col = act.vbox(10)
                   col.addView(act.tv("Out: ${inr(spent)}  •  In: ${inr(recv)}  •  Net: ${inr(recv - spent)}", 13f, C.TEXT, true))
                   if (!p["upi_id"].isNullOrBlank()) col.addView(act.tv("UPI: ${p["upi_id"]}", 12f, C.MUTED))
-                  // checkbox list with delete
                   val selectedIds = LinkedHashSet<Long>()
                   val historyContainer = act.vbox(6)
                   for (t in all) {
@@ -2749,8 +2696,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="v9.0.${{ github.run_number }}"
+          VERSION="v9.1.${{ github.run_number }}"
           gh release create "$VERSION" /tmp/proj/app/build/outputs/apk/debug/app-debug.apk \
             --repo "${{ github.repository }}" \
             --title "FinTrack Build ${{ github.run_number }}" \
-            --notes "v9.0: new duplicate rule (only same amount+time+day+sender); delete option in Ledger, Payee detail, multi-select; Clean+Restore backup; payment-app notification listener (CRED/GPay/IRIS/PhonePe/Jupiter/Paytm/Mobikwik/YES Pay/JioFinance/FedMobile/super.money) with SMS-dup protection; foreground service."
+            --notes "v9.1: fixed setOnShowListener chain (use .create() + setOnShowListener + show()); added import android.view.Gravity in Screens2.kt."
