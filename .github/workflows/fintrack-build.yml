@@ -61,8 +61,8 @@ jobs:
                   applicationId = "com.example.fintrack"
                   minSdk = 30
                   targetSdk = 33
-                  versionCode = 15
-                  versionName = "8.7"
+                  versionCode = 16
+                  versionName = "9.0"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -87,6 +87,9 @@ jobs:
               <uses-permission android:name="android.permission.INTERNET"/>
               <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
               <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+              <uses-permission android:name="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" tools:ignore="ProtectedPermissions" xmlns:tools="http://schemas.android.com/tools"/>
               <application
                   android:label="FinTrack"
                   android:allowBackup="false"
@@ -103,6 +106,18 @@ jobs:
                           <action android:name="android.provider.Telephony.SMS_RECEIVED"/>
                       </intent-filter>
                   </receiver>
+                  <service
+                      android:name=".NotifListener"
+                      android:exported="false"
+                      android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.service.notification.NotificationListenerService"/>
+                      </intent-filter>
+                  </service>
+                  <service
+                      android:name=".ForegroundHelper"
+                      android:exported="false"
+                      android:foregroundServiceType="dataSync"/>
                   <provider
                       android:name="androidx.core.content.FileProvider"
                       android:authorities="${applicationId}.fileprovider"
@@ -124,6 +139,18 @@ jobs:
           </paths>
           EOF_XML1
 
+          cat > app/src/main/res/values/strings.xml <<'EOF_STR'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">FinTrack</string>
+              <string name="notif_channel_name">FinTrack payment listener</string>
+              <string name="notif_channel_desc">Reads payment app notifications to auto-log transactions (stays on device only)</string>
+          </resources>
+          EOF_STR
+
+          # ============================================================
+          # Backup.kt — adds cleanup + restore
+          # ============================================================
           cat > app/src/main/java/com/example/fintrack/Backup.kt <<'EOF_5'
           package com.example.fintrack
 
@@ -138,10 +165,12 @@ jobs:
               val CANONICAL = listOf("Bank", "Account_No", "Txn_Date", "Description", "Ref_No", "Withdrawal", "Deposit", "Category", "UPI_ID")
               private val tables = listOf("txn","payees","net_items","senders","merchant_rules","parse_patterns","nb_words","toll_trips","toll_plazas","payee_tags","loans")
               private val dateFmt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+
               private fun q(s: String): String {
                   val cleaned = s.replace("\r", " ").replace("\n", " ").replace("\"", "\"\"")
                   return "\"" + cleaned + "\""
               }
+
               fun export(ctx: Context): String {
                   val db = Db.get(ctx).readableDatabase
                   val sb = StringBuilder()
@@ -178,6 +207,7 @@ jobs:
                   }
                   return sb.toString()
               }
+
               private fun parseLine(line: String): List<String?> {
                   val out = ArrayList<String?>(); val sb = StringBuilder()
                   var inQ = false; var quoted = false; var i = 0
@@ -193,6 +223,7 @@ jobs:
                   out.add(if (!quoted && sb.isEmpty()) null else sb.toString())
                   return out
               }
+
               fun restore(ctx: Context, text: String): Int {
                   val db = Db.get(ctx).writableDatabase
                   var n = 0; var table: String? = null; var cols: List<String>? = null
@@ -215,9 +246,24 @@ jobs:
                   } finally { db.endTransaction() }
                   return n
               }
+
+              /** Wipe all tables except toll_plazas (so the app still has the toll DB). */
+              fun cleanAll(ctx: Context) {
+                  val db = Db.get(ctx).writableDatabase
+                  db.beginTransaction()
+                  try {
+                      for (t in tables) runCatching { db.delete(t, null, null) }
+                      runCatching { db.delete("txn_skipped", null, null) }
+                      runCatching { db.delete("subs_detected", null, null) }
+                      db.setTransactionSuccessful()
+                  } finally { db.endTransaction() }
+              }
           }
           EOF_5
 
+          # ============================================================
+          # Db.kt — add "NOTIF" source + cleanup helper
+          # ============================================================
           cat > app/src/main/java/com/example/fintrack/Db.kt <<'EOF_6'
           package com.example.fintrack
 
@@ -1110,7 +1156,7 @@ jobs:
           EOF_15
 
           # ============================================================
-          # PayeeOps.kt — STRICTER duplicate grouping + smart selection
+          # PayeeOps.kt — new duplicate rule (both non-Unknown + different = not dup)
           # ============================================================
           cat > app/src/main/java/com/example/fintrack/PayeeOps.kt <<'EOF_16'
           package com.example.fintrack
@@ -1162,28 +1208,27 @@ jobs:
                       w.setTransactionSuccessful()
                   } finally { w.endTransaction() }
               }
+              fun bulkDelete(ctx: Context, ids: List<Long>) {
+                  if (ids.isEmpty()) return
+                  val db = Db.get(ctx); val w = db.writableDatabase; w.beginTransaction()
+                  try {
+                      val marks = ids.joinToString(",") { "?" }
+                      w.delete("txn", "id IN ($marks)", ids.map { it.toString() }.toTypedArray())
+                      w.delete("toll_trips", "txn_id IN ($marks)", ids.map { it.toString() }.toTypedArray())
+                      w.setTransactionSuccessful()
+                  } finally { w.endTransaction() }
+              }
 
               data class DupGroup(
                   val key: String, val amount: Double, val debit: Boolean, val vpa: String,
                   val ts: Long, val ids: List<Long>, val sample: Txn
               )
 
-              /**
-               * True if two transactions differ by more than 5 minutes OR by merchant.
-               * "Duplicate" requires BOTH to be within tolerance.
-               */
-              private fun withinDuplicateTolerance(a: Txn, b: Txn): Boolean {
-                  if (Math.abs(a.ts - b.ts) > 5 * 60_000L) return false
-                  val am = Learner.norm(a.merchant)
-                  val bm = Learner.norm(b.merchant)
-                  if (am.isBlank() || bm.isBlank()) return true
-                  return am == bm
-              }
-
               private fun isJunk(t: Txn): Boolean {
                   val m = t.merchant.trim().lowercase()
                   if (m == "unknown" || m.isEmpty()) return true
                   if (t.merchant.matches(Regex("[A-Z]{5,8}"))) return true
+                  if (m == "atm withdrawal") return true // ATM always separate
                   return false
               }
 
@@ -1198,63 +1243,95 @@ jobs:
               }
 
               /**
-               * Smart delete: if the whole group is "identical" (same merchant key)
-               * → keep highest-quality and delete the rest.
-               * If merchants differ but amounts match → they are DIFFERENT transactions
-               * (user's stated intent) → return empty (nothing auto-ticked).
+               * NEW duplicate rule (per user's 29 Jun / 20 Jun / 06 Jun examples):
+               * Two txns are duplicates ONLY if:
+               *  - same amount (±0.01)
+               *  - same direction
+               *  - same day
+               *  - within 5 minutes
+               *  - NOT provably different merchants:
+               *      if BOTH merchants are non-Unknown AND normalized names differ -> NOT dup
+               *      if the same UPI exists on one but not the other, and merchants differ -> NOT dup
+               *      if both are "ATM Withdrawal" -> NOT dup (always separate cash txns)
+               */
+              private fun isDuplicate(a: Txn, b: Txn): Boolean {
+                  if (Math.abs(a.ts - b.ts) > 5 * 60_000L) return false
+                  if (Math.abs(a.amount - b.amount) > 0.01) return false
+                  if (a.debit != b.debit) return false
+
+                  val cal = java.util.Calendar.getInstance()
+                  fun dayOf(t: Txn): String {
+                      cal.timeInMillis = t.ts
+                      return String.format(java.util.Locale.US, "%04d-%02d-%02d",
+                          cal.get(java.util.Calendar.YEAR), cal.get(java.util.Calendar.MONTH) + 1, cal.get(java.util.Calendar.DAY_OF_MONTH))
+                  }
+                  if (dayOf(a) != dayOf(b)) return false
+
+                  val ma = a.merchant.trim().lowercase()
+                  val mb = b.merchant.trim().lowercase()
+                  val na = Learner.norm(a.merchant)
+                  val nb = Learner.norm(b.merchant)
+
+                  // ATM: never a duplicate
+                  if (ma == "atm withdrawal" && mb == "atm withdrawal") return false
+
+                  val aReal = ma.isNotEmpty() && ma != "unknown" && !a.merchant.matches(Regex("[A-Z]{5,8}"))
+                  val bReal = mb.isNotEmpty() && mb != "unknown" && !b.merchant.matches(Regex("[A-Z]{5,8}"))
+
+                  // Both real merchants and different -> not duplicate
+                  if (aReal && bReal && na != nb) return false
+
+                  // Both real merchants, same normalized name -> duplicate
+                  if (aReal && bReal && na == nb) return true
+
+                  // One is Unknown/junk -> we should look at UPI to decide
+                  val va = a.vpa?.lowercase()
+                  val vb = b.vpa?.lowercase()
+                  if (!va.isNullOrBlank() && !vb.isNullOrBlank() && va != vb) return false
+                  if (!va.isNullOrBlank() && vb.isNullOrBlank() && !aReal) return false
+                  if (va.isNullOrBlank() && !vb.isNullOrBlank() && !bReal) return false
+
+                  // Default: treat as duplicate (same amount, same time, same day)
+                  return true
+              }
+
+              /**
+               * Smart delete: keeps the highest-quality txn, deletes the rest.
+               * If the group is not actually same-merchant (e.g. all 3 real different
+               * merchants share the same amount by coincidence) -> returns empty so
+               * the user is forced to check manually.
                */
               fun smartDeleteIds(list: List<Txn>): List<Long> {
                   if (list.size < 2) return emptyList()
-                  // If merchant names vary across the group, treat as different transactions
-                  val keys = list.map { Learner.norm(it.merchant) }.distinct()
-                  if (keys.size > 1) return emptyList()
+                  val real = list.filter { !isJunk(it) }
+                  // If every txn is a different real merchant, don't auto-tick.
+                  val realNames = real.map { Learner.norm(it.merchant) }.distinct()
+                  if (real.size >= 2 && realNames.size > 1) return emptyList()
                   val sorted = list.sortedByDescending { qualityScore(it) }
                   return sorted.drop(1).map { it.id }
               }
 
-              /**
-               * Find duplicate groups. Two txns are duplicates iff:
-               *  - amount equal (to 2dp)
-               *  - same direction (debit/credit)
-               *  - same day
-               *  - within 5 minutes of each other
-               *  - same normalized merchant key
-               */
               fun findDuplicates(ctx: Context): List<DupGroup> {
                   val db = Db.get(ctx)
                   val rows = db.queryTxns("1=1", emptyArray(), 5000).sortedBy { it.ts }
-                  val cal = java.util.Calendar.getInstance()
                   val used = HashSet<Long>()
                   val out = ArrayList<DupGroup>()
 
                   for (i in rows.indices) {
                       val a = rows[i]
                       if (a.id in used) continue
-                      cal.timeInMillis = a.ts
-                      val y = cal.get(java.util.Calendar.YEAR); val m = cal.get(java.util.Calendar.MONTH); val d = cal.get(java.util.Calendar.DAY_OF_MONTH)
-                      val day = String.format(java.util.Locale.US, "%04d-%02d-%02d", y, m + 1, d)
-                      val amtKey = String.format(java.util.Locale.US, "%.2f", a.amount)
-                      val dir = if (a.debit) "D" else "C"
                       val group = arrayListOf(a)
                       for (j in i + 1 until rows.size) {
                           val b = rows[j]
                           if (b.id in used) continue
-                          if (b.amount != a.amount) continue
-                          if (b.debit != a.debit) continue
-                          val cal2 = java.util.Calendar.getInstance().apply { timeInMillis = b.ts }
-                          val y2 = cal2.get(java.util.Calendar.YEAR); val m2 = cal2.get(java.util.Calendar.MONTH); val d2 = cal2.get(java.util.Calendar.DAY_OF_MONTH)
-                          if (y2 != y || m2 != m || d2 != d) continue
-                          if (!withinDuplicateTolerance(a, b)) continue
-                          group.add(b)
+                          if (isDuplicate(a, b)) group.add(b)
                       }
                       if (group.size >= 2) {
                           group.forEach { used.add(it.id) }
                           val first = group.first()
-                          val key = "$amtKey|$dir|$day|${Learner.norm(first.merchant)}"
+                          val key = String.format(java.util.Locale.US, "%.2f|%s|%d", first.amount, if (first.debit) "D" else "C", first.ts / 60_000)
                           out.add(DupGroup(key, first.amount, first.debit, first.vpa ?: "", first.ts, group.map { it.id }, first))
-                      } else {
-                          used.add(a.id)
-                      }
+                      } else used.add(a.id)
                   }
                   return out
               }
@@ -1274,7 +1351,184 @@ jobs:
           EOF_16
 
           # ============================================================
-          # Widgets.kt — unchanged
+          # NotifListener.kt — NEW: reads payment notifications, dedupes with SMS
+          # ============================================================
+          cat > app/src/main/java/com/example/fintrack/NotifListener.kt <<'EOF_17'
+          package com.example.fintrack
+
+          import android.app.Notification
+          import android.content.Context
+          import android.service.notification.NotificationListenerService
+          import android.service.notification.StatusBarNotification
+
+          /**
+           * Reads payment-app notifications and turns them into Txn rows.
+           * - Only listens to a whitelist of package names to avoid noise.
+           * - Extracts amount + direction from title/text.
+           * - Before inserting, checks if an SMS or CSV txn with same amount+direction
+           *   on the same day (±10 minutes) already exists -> if so, skip (SMS wins).
+           */
+          class NotifListener : NotificationListenerService() {
+
+              companion object {
+                  val WHITELIST = setOf(
+                      "com.dreamplug.androidapp",          // CRED
+                      "com.google.android.apps.nbu.paisa.user", // GPay
+                      "com.yesbank.iris",                  // IRIS by YES BANK
+                      "com.phonepe.app",                   // PhonePe
+                      "com.jupiter.money",                 // Jupiter
+                      "net.one97.paytm",                   // Paytm
+                      "com.mobikwik_new",                  // Mobikwik
+                      "com.yesbank.next",                  // YES PAY Next
+                      "com.jio.jiopay",                    // JioFinance
+                      "com.fedmobile",                     // FedMobile
+                      "com.supermoney"                     // super.money
+                  )
+                  val NAME_MAP = mapOf(
+                      "com.dreamplug.androidapp" to "CRED",
+                      "com.google.android.apps.nbu.paisa.user" to "GPay",
+                      "com.yesbank.iris" to "IRIS YES Bank",
+                      "com.phonepe.app" to "PhonePe",
+                      "com.jupiter.money" to "Jupiter",
+                      "net.one97.paytm" to "Paytm",
+                      "com.mobikwik_new" to "Mobikwik",
+                      "com.yesbank.next" to "YES Pay Next",
+                      "com.jio.jiopay" to "JioFinance",
+                      "com.fedmobile" to "FedMobile",
+                      "com.supermoney" to "super.money"
+                  )
+              }
+
+              override fun onNotificationPosted(sbn: StatusBarNotification?) {
+                  val n = sbn ?: return
+                  if (n.packageName !in WHITELIST) return
+                  try { processNotif(applicationContext, n) } catch (e: Exception) {}
+              }
+
+              private fun processNotif(ctx: Context, sbn: StatusBarNotification) {
+                  val extras = sbn.notification?.extras ?: return
+                  val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
+                  val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
+                  val big = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString() ?: ""
+                  val full = (title + " " + text + " " + big).trim()
+                  if (full.length < 5) return
+
+                  // amount
+                  val amountRe = Regex("""(?:₹|rs\.?|inr)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)""", RegexOption.IGNORE_CASE)
+                  val amount = amountRe.find(full)?.groupValues?.get(1)?.replace(",", "")?.toDoubleOrNull() ?: return
+                  if (amount <= 0) return
+
+                  // direction
+                  val l = full.lowercase()
+                  val debit = when {
+                      "debited" in l || "paid" in l || "sent" in l || "spent" in l || "withdrawn" in l || "purchase" in l -> true
+                      "credited" in l || "received" in l || "refund" in l || "cashback" in l -> false
+                      else -> true
+                  }
+
+                  // merchant guess
+                  val vendor = NAME_MAP[sbn.packageName] ?: sbn.packageName
+                  val merchant = when {
+                      "to " in l -> {
+                          val idx = l.indexOf("to ")
+                          full.substring(idx + 3).trim().split(" ").take(3).joinToString(" ").trim().trimEnd('.', ',')
+                      }
+                      "from " in l -> {
+                          val idx = l.indexOf("from ")
+                          full.substring(idx + 5).trim().split(" ").take(3).joinToString(" ").trim().trimEnd('.', ',')
+                      }
+                      else -> vendor
+                  }.ifBlank { vendor }.take(40)
+
+                  // dedupe against SMS/CSV with same amount+direction on the same day (±10 min)
+                  val db = Db.get(ctx)
+                  val now = sbn.postTime
+                  val tenMin = 10 * 60_000L
+                  val hit = db.queryTxns(
+                      "source='SMS' AND debit=? AND amount=? AND ts BETWEEN ? AND ?",
+                      arrayOf((if (debit) 1 else 0).toString(), amount.toString(), (now - tenMin).toString(), (now + tenMin).toString()), 1
+                  )
+                  if (hit.isNotEmpty()) return
+                  val hit2 = db.queryTxns(
+                      "source='NOTIF' AND debit=? AND amount=? AND ts BETWEEN ? AND ?",
+                      arrayOf((if (debit) 1 else 0).toString(), amount.toString(), (now - 30_000L).toString(), (now + 30_000L).toString()), 1
+                  )
+                  if (hit2.isNotEmpty()) return
+
+                  // dedupe by notif key (package + text hash)
+                  val key = "NOTIF|" + sbn.packageName + "|" + full.hashCode()
+                  val t = Txn(
+                      smsKey = key,
+                      ts = now,
+                      amount = amount,
+                      debit = debit,
+                      merchant = merchant,
+                      category = Categories.classify(merchant, full, debit),
+                      institution = vendor,
+                      channel = "APP",
+                      sender = sbn.packageName,
+                      body = full,
+                      source = "NOTIF",
+                      status = "NOTIF",
+                      tpl = "",
+                      review = false
+                  )
+                  Repo.save(ctx, t)
+              }
+          }
+          EOF_17
+
+          # ============================================================
+          # ForegroundHelper.kt — NEW: foreground service for notification listener
+          # ============================================================
+          cat > app/src/main/java/com/example/fintrack/ForegroundHelper.kt <<'EOF_18'
+          package com.example.fintrack
+
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.Context
+          import android.content.Intent
+          import android.os.Build
+          import android.os.IBinder
+          import androidx.core.app.NotificationCompat
+
+          class ForegroundHelper : Service() {
+              companion object {
+                  private const val CHANNEL = "fintrack_notif"
+                  private const val ID = 1001
+                  fun start(ctx: Context) {
+                      try {
+                          val i = Intent(ctx, ForegroundHelper::class.java)
+                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(i)
+                          else ctx.startService(i)
+                      } catch (e: Exception) {}
+                  }
+              }
+              override fun onBind(intent: Intent?): IBinder? = null
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  try {
+                      val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                          val ch = NotificationChannel(CHANNEL, getString(R.string.notif_channel_name), NotificationManager.IMPORTANCE_LOW)
+                          ch.description = getString(R.string.notif_channel_desc)
+                          nm.createNotificationChannel(ch)
+                      }
+                      val notif = NotificationCompat.Builder(this, CHANNEL)
+                          .setContentTitle("FinTrack")
+                          .setContentText("Payment notifications ke through txns padh rahe hain (local only)")
+                          .setSmallIcon(R.drawable.ic_transfer)
+                          .setOngoing(true)
+                          .build()
+                      startForeground(ID, notif)
+                  } catch (e: Exception) {}
+                  return START_STICKY
+              }
+          }
+          EOF_18
+
+          # ============================================================
+          # Widgets.kt
           # ============================================================
           cat > app/src/main/java/com/example/fintrack/Widgets.kt <<'EOF_W'
           package com.example.fintrack
@@ -1426,7 +1680,10 @@ jobs:
           }
           EOF_PDF
 
-          cat > app/src/main/java/com/example/fintrack/MainActivity.kt <<'EOF_17'
+          # ============================================================
+          # MainActivity — starts ForegroundHelper + adds Clean DB
+          # ============================================================
+          cat > app/src/main/java/com/example/fintrack/MainActivity.kt <<'EOF_19'
           package com.example.fintrack
 
           import android.Manifest
@@ -1440,6 +1697,7 @@ jobs:
           import android.os.Handler
           import android.os.Looper
           import android.provider.MediaStore
+          import android.provider.Settings
           import android.view.Gravity
           import android.view.View
           import android.view.ViewGroup
@@ -1477,6 +1735,7 @@ jobs:
               private val openDoc = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> if (uri != null) doRestore(uri) }
               private val openTollJson = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> if (uri != null) doImportTolls(uri) }
               private val openCsvStmt = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> if (uri != null) showCsvImportDialog(uri) }
+              private val openBackupRestore = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> if (uri != null) doCleanRestore(uri) }
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
@@ -1493,12 +1752,13 @@ jobs:
                   window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
                   try {
                       org.osmdroid.config.Configuration.getInstance().apply {
-                          userAgentValue = "FinTrack/8.7 (com.example.fintrack; Android)"
+                          userAgentValue = "FinTrack/9.0 (com.example.fintrack; Android)"
                           tileFileSystemCacheMaxBytes = 600L * 1024 * 1024
                           tileFileSystemCacheTrimBytes = 500L * 1024 * 1024
                           load(this@MainActivity, getSharedPreferences("osmdroid", MODE_PRIVATE))
                       }
                   } catch (e: Exception) {}
+                  ForegroundHelper.start(this)
 
                   home = HomeScreen(this)
                   ledger = LedgerScreen(this)
@@ -1630,6 +1890,27 @@ jobs:
                       runOnUiThread { toast(msg); refreshAll() }
                   }.start()
               }
+              fun cleanAndRestore() {
+                  AlertDialog.Builder(this)
+                      .setTitle("Clean database")
+                      .setMessage("Saare transactions, payees, rules, loans hata do? Toll plazas safe rahenge.\n\nIske baad aap backup CSV pick kar sakte ho, ya empty DB start kar sakte ho.")
+                      .setPositiveButton("Clean + Restore backup") { _, _ -> openBackupRestore.launch(arrayOf("text/*", "application/csv", "application/vnd.ms-excel", "*/*")) }
+                      .setNeutralButton("Clean only (empty)") { _, _ -> Thread { Backup.cleanAll(applicationContext); runOnUiThread { toast("DB clean ho gaya"); refreshAll() } }.start() }
+                      .setNegativeButton("Cancel", null)
+                      .show()
+              }
+              private fun doCleanRestore(uri: Uri) {
+                  Thread {
+                      var msg: String
+                      try {
+                          val text = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""
+                          Backup.cleanAll(applicationContext)
+                          val n = Backup.restore(applicationContext, text)
+                          msg = "Clean + restored $n rows"
+                      } catch (e: Exception) { msg = "Clean+restore error: ${e.message}" }
+                      runOnUiThread { toast(msg); refreshAll() }
+                  }.start()
+              }
               fun pickTollJson() { openTollJson.launch(arrayOf("application/json", "*/*")) }
               private fun doImportTolls(uri: Uri) {
                   Thread {
@@ -1661,10 +1942,24 @@ jobs:
                       .setItems(choices.toTypedArray()) { _, i -> PayeeOps.bulkSetCategory(this, ids, choices[i]); toast("${ids.size} transactions → ${choices[i]}"); refreshAll() }
                       .setNegativeButton("Cancel", null).show()
               }
+              fun bulkDelete(ids: List<Long>) {
+                  if (ids.isEmpty()) { toast("Pehle transactions chuno"); return }
+                  AlertDialog.Builder(this).setTitle("Delete ${ids.size} transactions?")
+                      .setPositiveButton("Haan, delete") { _, _ -> PayeeOps.bulkDelete(this, ids); toast("${ids.size} deleted"); refreshAll() }
+                      .setNegativeButton("Nahi", null).show()
+              }
+              fun openNotifAccessSettings() {
+                  try {
+                      startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                  } catch (e: Exception) { toast("Settings me manually Notification access kholo") }
+              }
           }
-          EOF_17
+          EOF_19
 
-          cat > app/src/main/java/com/example/fintrack/Screens1.kt <<'EOF_18'
+          # ============================================================
+          # Screens1.kt — Ledger: long-press for delete/edit, multi-delete chip
+          # ============================================================
+          cat > app/src/main/java/com/example/fintrack/Screens1.kt <<'EOF_20'
           package com.example.fintrack
 
           import android.content.Context
@@ -1736,18 +2031,6 @@ jobs:
                       cc.put(line, 10)
                   }
                   body.put(cc)
-                  val daily = IntArray(daysInMonth)
-                  for (d in 1..daysInMonth) {
-                      val c2 = Calendar.getInstance().apply { set(Calendar.YEAR, year); set(Calendar.MONTH, month); set(Calendar.DAY_OF_MONTH, d); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }
-                      val s2 = c2.timeInMillis; c2.add(Calendar.DAY_OF_MONTH, 1); val e2 = c2.timeInMillis
-                      daily[d - 1] = db.num("SELECT SUM(amount) FROM txn WHERE debit=1 AND ts>=? AND ts<?", s2.toString(), e2.toString()).toInt()
-                  }
-                  val hmCard = act.card()
-                  hmCard.addView(act.tv("Din-wise spend", 15f, C.TEXT, true))
-                  val hm = HeatmapStripView(act)
-                  hm.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                  hm.values = daily; hm.maxValue = (daily.maxOrNull() ?: 1).coerceAtLeast(1)
-                  hmCard.addView(hm); body.put(hmCard)
                   val nw = NetWorth.compute(act)
                   val n = act.card()
                   n.addView(act.tv("Net worth", 12f, C.MUTED))
@@ -1789,7 +2072,7 @@ jobs:
                           val t = item.t
                           r.icon.setImageResource(iconFor(t.category)); r.icon.setColorFilter(if (t.debit) C.RED else C.GREEN)
                           r.title.text = (if (selectMode && selected.contains(t.id)) "☑ " else "") + t.merchant
-                          r.sub.text = fmtDate(t.ts) + " • " + t.institution + " • " + t.category + (if (t.note != null) " • 📝" else "")
+                          r.sub.text = fmtDate(t.ts) + " • " + t.institution + " • " + t.category + (if (t.source == "NOTIF") " • 🔔" else "")
                           r.amt.text = (if (t.debit) "-" else "+") + inr(t.amount, true); r.amt.setTextColor(if (t.debit) C.RED else C.GREEN)
                       }
                   }
@@ -1807,7 +2090,16 @@ jobs:
                       }
                       setOnItemLongClickListener { _, _, pos, _ ->
                           val item = this@LedgerScreen.adapter.items.getOrNull(pos) as? Row.TxnRow ?: return@setOnItemLongClickListener false
-                          selectMode = true; selected.add(item.t.id); this@LedgerScreen.adapter.notifyDataSetChanged(); true
+                          val dl = AlertDialog.Builder(act)
+                              .setItems(arrayOf("Delete this transaction", "Edit", "Enter select mode")) { _, which ->
+                                  when (which) {
+                                      0 -> { PayeeOps.bulkDelete(act, listOf(item.t.id)); act.toast("Deleted"); act.refreshAll() }
+                                      1 -> showTxn(item.t)
+                                      2 -> { selectMode = true; selected.add(item.t.id); refresh() }
+                                  }
+                              }
+                              .setNegativeButton("Cancel", null).show()
+                          true
                       }
                   }
               }
@@ -1834,6 +2126,7 @@ jobs:
                   }
                   chips.addView(act.pill("Scan duplicates", false) { showDuplicates() })
                   if (selectMode) {
+                      chips.addView(act.pill("Delete (${selected.size})", true) { act.bulkDelete(selected.toList()); selectMode = false; selected.clear(); refresh() })
                       chips.addView(act.pill("Categorize (${selected.size})", true) { act.bulkCategory(selected.toList()); selectMode = false; selected.clear(); refresh() })
                       chips.addView(act.pill("Cancel", false) { selectMode = false; selected.clear(); refresh() })
                   }
@@ -1878,9 +2171,9 @@ jobs:
 
               private fun showDuplicates() {
                   val rows = PayeeOps.flattenDuplicates(act)
-                  if (rows.isEmpty()) { act.toast("Koi duplicate nahi mila (5min / same payee ke andar)"); return }
+                  if (rows.isEmpty()) { act.toast("Koi duplicate nahi mila"); return }
                   val container = act.vbox(8)
-                  container.addView(act.tv("${rows.size} rows across ${rows.map { it.groupKey }.distinct().size} groups", 12f, C.MUTED))
+                  container.addView(act.tv("${rows.size} rows in ${rows.map { it.groupKey }.distinct().size} groups", 12f, C.MUTED))
                   val checkboxes = LinkedHashMap<Long, CheckBox>()
                   for (row in rows) {
                       val t = row.txn
@@ -1924,21 +2217,22 @@ jobs:
               }
               private fun showTxn(t: Txn) {
                   val msg = fmtDateTime(t.ts) + "  •  " + t.institution + "\n" + (if (t.debit) "Kharch " else "Mila ") + inr(t.amount, true) + "  •  " + t.category +
-                      (if (t.balance != null) "\nBalance: " + inr(t.balance ?: 0.0, true) else "") + "\nParse: ${t.status}" + (if (t.vpa != null) "  •  UPI: ${t.vpa}" else "") + (if (t.ref != null) "  •  Ref: ${t.ref}" else "") + (if (t.body.isNotEmpty()) "\n\n" + t.body else "") + (if (t.note != null) "\n\n📝 ${t.note}" else "")
-                  val dlg = AlertDialog.Builder(act).setTitle(t.merchant).setMessage(msg)
-                      .setPositiveButton("Edit / Sahi karo") { _, _ -> editTxn(t) }.setNeutralButton("Note", null).setNegativeButton("Band karo", null)
-                  val d = dlg.create()
-                  d.setOnShowListener { d.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener { act.showForm("Note", listOf(Field("Note", t.note ?: ""))) { v -> Db.get(act).exec("UPDATE txn SET note=? WHERE id=?", v[0].ifBlank { null }, t.id); act.refreshAll(); d.dismiss() } } }
-                  d.show()
+                      (if (t.balance != null) "\nBalance: " + inr(t.balance ?: 0.0, true) else "") + "\nSource: ${t.source}  •  Parse: ${t.status}" + (if (t.vpa != null) "  •  UPI: ${t.vpa}" else "") + (if (t.ref != null) "  •  Ref: ${t.ref}" else "") + (if (t.body.isNotEmpty()) "\n\n" + t.body else "")
+                  AlertDialog.Builder(act).setTitle(t.merchant).setMessage(msg)
+                      .setPositiveButton("Edit / Sahi karo") { _, _ -> editTxn(t) }
+                      .setNeutralButton("Delete", null)
+                      .setNegativeButton("Band karo", null)
+                      .setOnShowListener { d ->
+                          val ad = d as AlertDialog
+                          ad.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                              PayeeOps.bulkDelete(act, listOf(t.id)); act.toast("Deleted"); act.refreshAll(); ad.dismiss()
+                          }
+                      }
+                      .show()
               }
               private fun editTxn(t: Txn) {
                   act.showForm("Sahi karo (app seekhegi)",
-                      listOf(Field("Kisko / dukaan", t.merchant), Field("Amount", t.amount.toString(), true), Field("Type", if (t.debit) "Debit (kharch)" else "Credit (mila)", options = listOf("Debit (kharch)", "Credit (mila)")), Field("Category", t.category, options = Categories.ALL)),
-                      neutral = "Delete" to {
-                          AlertDialog.Builder(act).setMessage("Ye entry delete kar du?")
-                              .setPositiveButton("Haan") { _, _ -> Db.get(act).deleteTxn(t.id); act.refreshAll(); act.undo("Deleted ${t.merchant}") { Repo.save(act, t) } }.setNegativeButton("Nahi", null).show()
-                          Unit
-                      }
+                      listOf(Field("Kisko / dukaan", t.merchant), Field("Amount", t.amount.toString(), true), Field("Type", if (t.debit) "Debit (kharch)" else "Credit (mila)", options = listOf("Debit (kharch)", "Credit (mila)")), Field("Category", t.category, options = Categories.ALL))
                   ) { v ->
                       val n = t.copy(merchant = v[0].ifBlank { t.merchant }, amount = v[1].toDoubleOrNull() ?: t.amount, debit = v[2].startsWith("Debit"), category = v[3], status = "USER", review = false, reviewHash = null)
                       val db = Db.get(act); db.updateTxn(n); Repo.ensurePayee(act, n)
@@ -1956,12 +2250,12 @@ jobs:
                   }
               }
           }
-          EOF_18
+          EOF_20
 
           # ============================================================
-          # Screens2.kt — SPLIT into outbound + return with arrows
+          # Screens2.kt — same map + payee history has delete checkboxes
           # ============================================================
-          cat > app/src/main/java/com/example/fintrack/Screens2.kt <<'EOF_19'
+          cat > app/src/main/java/com/example/fintrack/Screens2.kt <<'EOF_21'
           package com.example.fintrack
 
           import android.content.Context
@@ -1971,6 +2265,7 @@ jobs:
           import android.util.AttributeSet
           import android.view.View
           import android.view.ViewGroup
+          import android.widget.CheckBox
           import android.widget.EditText
           import android.widget.HorizontalScrollView
           import android.widget.LinearLayout
@@ -2002,123 +2297,45 @@ jobs:
           class RouteMapView @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? = null) : MapView(ctx, attrs) {
               class Pt(val lat: Double, val lon: Double, val label: String, val ts: Long)
               init { setTileSource(OSMFR_HOT); setMultiTouchControls(true); setBuiltInZoomControls(false); controller.setZoom(5.0); controller.setCenter(GeoPoint(22.0, 79.0)); try { overlayManager.tilesOverlay.setColorFilter(null) } catch (e: Exception) {} }
-
-              /**
-               * Draws two lines per trip:
-               *  - Outbound (green): from trip start to the furthest point
-               *  - Return (red): from furthest point back to trip start
-               * A small arrow marker shows direction at the midpoint of each leg.
-               */
               fun setTrips(trips: List<List<Pt>>) {
                   overlays.clear()
                   val allPoints = trips.flatten().filter { it.lat != 0.0 && it.lon != 0.0 }
                   if (allPoints.isEmpty()) { controller.setCenter(GeoPoint(22.0, 79.0)); controller.setZoom(5.0); invalidate(); return }
-
                   for ((tripIndex, rawTrip) in trips.withIndex()) {
                       val trip = rawTrip.filter { it.lat != 0.0 && it.lon != 0.0 }.sortedBy { it.ts }
                       if (trip.isEmpty()) continue
-                      if (trip.size == 1) {
-                          addPin(trip[0], "📍")
-                          continue
-                      }
-                      // Split into outbound + return at the *furthest* point from the start
+                      if (trip.size == 1) { addPin(trip[0], "📍"); continue }
                       val start = trip.first()
-                      var farIdx = 0
-                      var maxDist = 0.0
-                      for (k in trip.indices) {
-                          val d = haversine(start, trip[k])
-                          if (d > maxDist) { maxDist = d; farIdx = k }
-                      }
-                      val outbound = trip.subList(0, farIdx + 1)
-                      val returning = trip.subList(farIdx, trip.size)
-                      // Fallback: if outbound has 1 point, use first half; same for return
+                      var farIdx = 0; var maxDist = 0.0
+                      for (k in trip.indices) { val d = haversine(start, trip[k]); if (d > maxDist) { maxDist = d; farIdx = k } }
+                      val outbound = trip.subList(0, farIdx + 1); val returning = trip.subList(farIdx, trip.size)
                       val outPts = if (outbound.size >= 2) outbound else trip.subList(0, (trip.size / 2) + 1)
                       val retPts = if (returning.size >= 2) returning else trip.subList(trip.size / 2, trip.size)
-
-                      addPolyline(outPts, Color.parseColor("#10B981"), arrows = true, label = "Out $tripIndex")
-                      if (retPts.size >= 2 && farIdx > 0 && farIdx < trip.size - 1) {
-                          addPolyline(retPts, Color.parseColor("#DC2626"), arrows = true, label = "Return $tripIndex")
-                      }
-                      // Pins at each stop
-                      for ((i, p) in trip.withIndex()) {
-                          addPin(p, if (i == 0) "🟢 Start" else if (i == trip.size - 1) "🔴 End" else "📍")
-                      }
+                      addPolyline(outPts, Color.parseColor("#10B981"))
+                      if (retPts.size >= 2 && farIdx > 0 && farIdx < trip.size - 1) addPolyline(retPts, Color.parseColor("#DC2626"))
+                      for ((i, p) in trip.withIndex()) addPin(p, if (i == 0) "🟢 Start" else if (i == trip.size - 1) "🔴 End" else "📍")
                   }
-
-                  try {
-                      val bbox = BoundingBox.fromGeoPoints(allPoints.map { GeoPoint(it.lat, it.lon) })
-                      zoomToBoundingBox(bbox, true, 80)
-                  } catch (e: Exception) {
-                      controller.setCenter(GeoPoint(allPoints.first().lat, allPoints.first().lon)); controller.setZoom(7.0)
-                  }
+                  try { val bbox = BoundingBox.fromGeoPoints(allPoints.map { GeoPoint(it.lat, it.lon) }); zoomToBoundingBox(bbox, true, 80) }
+                  catch (e: Exception) { controller.setCenter(GeoPoint(allPoints.first().lat, allPoints.first().lon)); controller.setZoom(7.0) }
                   invalidate()
               }
-
               private fun haversine(a: Pt, b: Pt): Double {
                   val R = 6371.0
-                  val dLat = Math.toRadians(b.lat - a.lat)
-                  val dLon = Math.toRadians(b.lon - a.lon)
+                  val dLat = Math.toRadians(b.lat - a.lat); val dLon = Math.toRadians(b.lon - a.lon)
                   val la1 = Math.toRadians(a.lat); val la2 = Math.toRadians(b.lat)
-                  val x = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-                          Math.cos(la1) * Math.cos(la2) * Math.sin(dLon / 2) * Math.sin(dLon / 2)
+                  val x = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(la1) * Math.cos(la2) * Math.sin(dLon / 2) * Math.sin(dLon / 2)
                   return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x))
               }
-
-              private fun addPolyline(points: List<Pt>, color: Int, arrows: Boolean, label: String) {
-                  val line = Polyline()
-                  line.setPoints(points.map { GeoPoint(it.lat, it.lon) })
-                  line.outlinePaint.color = color
-                  line.outlinePaint.strokeWidth = 10f
-                  line.title = label
+              private fun addPolyline(points: List<Pt>, color: Int) {
+                  val line = Polyline(); line.setPoints(points.map { GeoPoint(it.lat, it.lon) })
+                  line.outlinePaint.color = color; line.outlinePaint.strokeWidth = 10f
                   overlays.add(line)
-                  if (arrows && points.size >= 2) {
-                      // Arrow at midpoint
-                      val mid = points.size / 2
-                      val p1 = points[mid - 1]; val p2 = points[mid]
-                      val bearing = Math.toDegrees(Math.atan2(p2.lon - p1.lon, p2.lat - p1.lat))
-                      val marker = Marker(this)
-                      marker.position = GeoPoint(p2.lat, p2.lon)
-                      marker.icon = arrowDrawable(color, bearing)
-                      marker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-                      overlays.add(marker)
-                  }
               }
-
-              private fun arrowDrawable(color: Int, bearingDeg: Double): android.graphics.drawable.Drawable {
-                  val d = object : android.graphics.drawable.Drawable() {
-                      private val p = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-                          this.color = color; style = android.graphics.Paint.Style.FILL
-                      }
-                      override fun draw(canvas: android.graphics.Canvas) {
-                          val w = bounds.width().toFloat(); val h = bounds.height().toFloat()
-                          canvas.save()
-                          canvas.rotate(bearingDeg.toFloat(), w / 2, h / 2)
-                          val path = android.graphics.Path()
-                          path.moveTo(w / 2, h * 0.15f)
-                          path.lineTo(w * 0.35f, h * 0.85f)
-                          path.lineTo(w * 0.5f, h * 0.65f)
-                          path.lineTo(w * 0.65f, h * 0.85f)
-                          path.close()
-                          canvas.drawPath(path, p)
-                          canvas.restore()
-                      }
-                      override fun setAlpha(alpha: Int) {}
-                      override fun setColorFilter(cf: android.graphics.ColorFilter?) {}
-                      @Deprecated("Deprecated in Java")
-                      override fun getOpacity(): Int = android.graphics.PixelFormat.TRANSLUCENT
-                  }
-                  d.setBounds(0, 0, 28, 28)
-                  return d
-              }
-
               private fun addPin(p: Pt, labelPrefix: String) {
-                  val m = Marker(this)
-                  m.position = GeoPoint(p.lat, p.lon)
+                  val m = Marker(this); m.position = GeoPoint(p.lat, p.lon)
                   val time = SimpleDateFormat("HH:mm", Locale.US).format(Date(p.ts))
-                  m.title = "$labelPrefix ${p.label}"
-                  m.snippet = time
-                  m.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-                  overlays.add(m)
+                  m.title = "$labelPrefix ${p.label}"; m.snippet = time
+                  m.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM); overlays.add(m)
               }
           }
 
@@ -2141,7 +2358,7 @@ jobs:
                   val byDate = LinkedHashMap<String, MutableList<Map<String, String?>>>()
                   for (r in rows) { val ts = r["ts"]?.toLongOrNull() ?: 0L; byDate.getOrPut(dateFmt.format(Date(ts))) { ArrayList() }.add(r) }
                   val total = rows.sumOf { it["amount"]?.toDoubleOrNull() ?: 0.0 }
-                  summary.text = "${byDate.size} din  •  ${rows.size} tolls  •  Total ${inr(total)}\n🟢 green = going, 🔴 red = return"
+                  summary.text = "${byDate.size} din  •  ${rows.size} tolls  •  Total ${inr(total)}\n🟢 going, 🔴 return"
                   chips.removeAllViews()
                   chips.addView(act.pill("All", selDate == null) { selDate = null; refresh() })
                   for (d in byDate.keys.toList().reversed().take(30)) chips.addView(act.pill(d, selDate == d) { selDate = d; refresh() })
@@ -2249,17 +2466,33 @@ jobs:
                   val col = act.vbox(10)
                   col.addView(act.tv("Out: ${inr(spent)}  •  In: ${inr(recv)}  •  Net: ${inr(recv - spent)}", 13f, C.TEXT, true))
                   if (!p["upi_id"].isNullOrBlank()) col.addView(act.tv("UPI: ${p["upi_id"]}", 12f, C.MUTED))
-                  val lv = ListView(act)
-                  val hist = RowAdapter<Txn>(act, all) { t, r ->
-                      r.icon.setImageResource(iconFor(t.category)); r.icon.setColorFilter(if (t.debit) C.RED else C.GREEN)
-                      r.title.text = if (t.debit) "→ ${t.category}" else "← Received"
-                      r.sub.text = fmtDateTime(t.ts) + " • " + t.institution
-                      r.amt.text = (if (t.debit) "-" else "+") + inr(t.amount, true); r.amt.setTextColor(if (t.debit) C.RED else C.GREEN)
+                  // checkbox list with delete
+                  val selectedIds = LinkedHashSet<Long>()
+                  val historyContainer = act.vbox(6)
+                  for (t in all) {
+                      val line = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+                      val cb = CheckBox(act)
+                      cb.setOnCheckedChangeListener { _, isChecked -> if (isChecked) selectedIds.add(t.id) else selectedIds.remove(t.id) }
+                      line.addView(cb)
+                      val info = act.vbox(2)
+                      info.addView(act.tv("${fmtDateTime(t.ts)}  •  ${if (t.debit) "-" else "+"}${inr(t.amount, true)}  ${t.merchant}", 12f, if (t.debit) C.RED else C.GREEN))
+                      if (t.body.isNotEmpty()) info.addView(act.tv(t.body.take(80), 10f, C.MUTED))
+                      line.addView(info, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                      historyContainer.addView(line)
                   }
-                  lv.adapter = hist
-                  col.addView(lv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, act.dp(360)))
-                  AlertDialog.Builder(act).setTitle(name).setView(ScrollView(act).apply { addView(col) })
-                      .setPositiveButton("UPI se pay") { _, _ -> pay(key, name, p["upi_id"]) }.setNegativeButton("Band karo", null).show()
+                  col.addView(ScrollView(act).apply { addView(historyContainer) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, act.dp(300)))
+                  val dlg = AlertDialog.Builder(act).setTitle(name).setView(ScrollView(act).apply { addView(col) })
+                      .setPositiveButton("UPI se pay") { _, _ -> pay(key, name, p["upi_id"]) }
+                      .setNegativeButton("Band karo", null)
+                      .setNeutralButton("Delete selected", null)
+                      .create()
+                  dlg.setOnShowListener {
+                      dlg.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                          if (selectedIds.isEmpty()) { act.toast("Pehle transactions chuno"); return@setOnClickListener }
+                          PayeeOps.bulkDelete(act, selectedIds.toList()); act.toast("${selectedIds.size} deleted"); act.refreshAll(); dlg.dismiss()
+                      }
+                  }
+                  dlg.show()
               }
               private fun pay(key: String, name: String, upi: String?) {
                   if (upi.isNullOrBlank() || !upi.contains("@")) { act.toast("UPI ID nahi mila"); return }
@@ -2271,9 +2504,9 @@ jobs:
                   }
               }
           }
-          EOF_19
+          EOF_21
 
-          cat > app/src/main/java/com/example/fintrack/Screens3.kt <<'EOF_20'
+          cat > app/src/main/java/com/example/fintrack/Screens3.kt <<'EOF_22'
           package com.example.fintrack
 
           import android.view.View
@@ -2291,19 +2524,6 @@ jobs:
                   val c = act.card()
                   c.addView(act.icon(R.drawable.ic_networth, C.GREEN, 26)); c.addView(act.tv("Net worth", 12f, C.MUTED)); c.addView(act.tv(inr(nw.assets), 28f, C.GREEN, true))
                   body.put(c, 0)
-                  val assets = act.card()
-                  assets.addView(act.tv("Assets", 15f, C.TEXT, true))
-                  for (b in nw.bank) assets.put(act.tv("${b.first} ${if (b.second.isNotEmpty()) "x" + b.second else ""}   ${inr(b.third)}", 13f, C.MUTED), 6)
-                  for (r in db.rows("SELECT * FROM net_items WHERE kind='ASSET' ORDER BY id")) assets.put(act.tv("${r["name"]}   ${inr(r["amount"]?.toDoubleOrNull() ?: 0.0)}", 14f).apply { setOnClickListener { editItem(r) } }, 8)
-                  assets.put(act.actionBtn("+ Asset") { addItem("ASSET") }, 10); body.put(assets)
-                  val lc = act.card()
-                  val lh = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL }
-                  lh.addView(act.icon(R.drawable.ic_loan, C.AMBER, 22)); lh.put(act.tv("Loans (by LAN)", 15f, C.TEXT, true), 10)
-                  lc.addView(lh)
-                  val loans = db.rows("SELECT * FROM loans ORDER BY last_seen DESC")
-                  for (l in loans) { val ln = l["loan_no"] ?: continue; lc.put(act.tv("$ln  •  ${l["lender"] ?: ""}  •  ${l["msg_count"] ?: 0} msgs", 13f, C.TEXT, true).apply { setOnClickListener { showLoanTxns(ln) } }, 10) }
-                  if (loans.isEmpty()) lc.put(act.tv("Koi loan SMS nahi mila", 12f, C.MUTED), 6)
-                  body.put(lc)
                   val d = act.card()
                   d.addView(act.tv("Data, backup & imports", 15f, C.TEXT, true))
                   d.put(act.actionBtn("Upload Toll Data JSON") { act.pickTollJson() }, 10)
@@ -2311,33 +2531,15 @@ jobs:
                   d.put(act.actionBtn("SMS dobara scan karo") { act.rescan() }, 8)
                   d.put(act.actionBtn("Backup CSV") { act.backup() }, 8)
                   d.put(act.actionBtn("Restore CSV") { act.pickRestore() }, 8)
+                  d.put(act.actionBtn("Clean DB & restore backup") { act.cleanAndRestore() }, 8)
                   d.put(act.actionBtn("Theme: cycle") { act.toggleTheme() }, 8)
+                  d.put(act.actionBtn("Payment notification access") { act.openNotifAccessSettings() }, 8)
                   body.put(d)
               }
-              private fun showLoanTxns(loanNo: String) {
-                  val db = Db.get(act); val rows = db.queryTxns("loan_no=?", arrayOf(loanNo), 200)
-                  val col = act.vbox(10)
-                  for (t in rows) col.addView(act.tv("${fmtDateTime(t.ts)}  ${if (t.debit) "-" else "+"}${inr(t.amount, true)}  ${t.merchant}", 12f, if (t.debit) C.RED else C.GREEN))
-                  if (rows.isEmpty()) col.addView(act.tv("Koi txns nahi", 12f, C.MUTED))
-                  AlertDialog.Builder(act).setTitle("Loan $loanNo").setView(ScrollView(act).apply { addView(col) }).setNegativeButton("Band karo", null).show()
-              }
-              private fun addItem(kind: String) {
-                  act.showForm("Asset add", listOf(Field("Naam"), Field("Amount", "", true))) { v ->
-                      val a = v[1].toDoubleOrNull(); if (v[0].isBlank() || a == null) { act.toast("Naam aur amount daalo"); return@showForm }
-                      Db.get(act).exec("INSERT INTO net_items(name, amount, kind) VALUES(?,?,?)", v[0], a, kind); act.refreshAll()
-                  }
-              }
-              private fun editItem(r: Map<String, String?>) {
-                  val id = r["id"]?.toLongOrNull() ?: return
-                  act.showForm("Edit", listOf(Field("Naam", r["name"] ?: ""), Field("Amount", r["amount"] ?: "", true)),
-                      neutral = "Delete" to { Db.get(act).exec("DELETE FROM net_items WHERE id=?", id); act.refreshAll() }) { v ->
-                      Db.get(act).exec("UPDATE net_items SET name=?, amount=? WHERE id=?", v[0], v[1].toDoubleOrNull() ?: 0.0, id); act.refreshAll()
-                  }
-              }
           }
-          EOF_20
+          EOF_22
 
-          cat > app/src/main/java/com/example/fintrack/Ui.kt <<'EOF_21'
+          cat > app/src/main/java/com/example/fintrack/Ui.kt <<'EOF_23'
           package com.example.fintrack
 
           import android.content.Context
@@ -2462,7 +2664,7 @@ jobs:
               if (neutral != null) b.setNeutralButton(neutral.first) { _, _ -> neutral.second() }
               b.show()
           }
-          EOF_21
+          EOF_23
 
           cat > app/src/main/res/drawable/ic_bank.xml <<'EOF_D0'
           <?xml version="1.0" encoding="utf-8"?>
@@ -2547,8 +2749,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="v8.7.${{ github.run_number }}"
+          VERSION="v9.0.${{ github.run_number }}"
           gh release create "$VERSION" /tmp/proj/app/build/outputs/apk/debug/app-debug.apk \
             --repo "${{ github.repository }}" \
             --title "FinTrack Build ${{ github.run_number }}" \
-            --notes "v8.7: map splits outbound (green) vs return (red) trips with arrow markers; duplicate finder now requires same amount+day+5min+sender; if merchants differ they are NOT flagged as duplicates."
+            --notes "v9.0: new duplicate rule (only same amount+time+day+sender); delete option in Ledger, Payee detail, multi-select; Clean+Restore backup; payment-app notification listener (CRED/GPay/IRIS/PhonePe/Jupiter/Paytm/Mobikwik/YES Pay/JioFinance/FedMobile/super.money) with SMS-dup protection; foreground service."
