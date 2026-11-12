@@ -61,8 +61,8 @@ jobs:
                   applicationId = "com.example.fintrack"
                   minSdk = 30
                   targetSdk = 33
-                  versionCode = 8
-                  versionName = "8.0"
+                  versionCode = 9
+                  versionName = "8.1"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -87,13 +87,11 @@ jobs:
               <uses-permission android:name="android.permission.INTERNET"/>
               <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
               <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>
-              <uses-permission android:name="android.permission.RECORD_AUDIO"/>
               <application
                   android:label="FinTrack"
                   android:allowBackup="false"
                   android:theme="@style/Theme.AppCompat.DayNight.NoActionBar">
-                  <activity android:name=".MainActivity" android:exported="true"
-                      android:configChanges="uiMode">
+                  <activity android:name=".MainActivity" android:exported="true" android:configChanges="uiMode">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN"/>
                           <category android:name="android.intent.category.LAUNCHER"/>
@@ -125,9 +123,7 @@ jobs:
           </paths>
           EOF_XML1
 
-          # ============================================================
-          # Backup.kt
-          # ============================================================
+          # Backup.kt (same as before, unchanged)
           cat > app/src/main/java/com/example/fintrack/Backup.kt <<'EOF_5'
           package com.example.fintrack
 
@@ -226,9 +222,6 @@ jobs:
           }
           EOF_5
 
-          # ============================================================
-          # Db.kt
-          # ============================================================
           cat > app/src/main/java/com/example/fintrack/Db.kt <<'EOF_6'
           package com.example.fintrack
 
@@ -393,9 +386,7 @@ jobs:
           }
           EOF_6
 
-          # ============================================================
-          # Learner.kt
-          # ============================================================
+          # Learner.kt — same
           cat > app/src/main/java/com/example/fintrack/Learner.kt <<'EOF_7'
           package com.example.fintrack
 
@@ -490,9 +481,6 @@ jobs:
           }
           EOF_7
 
-          # ============================================================
-          # AiParser.kt
-          # ============================================================
           cat > app/src/main/java/com/example/fintrack/AiParser.kt <<'EOF_8'
           package com.example.fintrack
 
@@ -536,9 +524,6 @@ jobs:
           }
           EOF_8
 
-          # ============================================================
-          # CsvImporter.kt
-          # ============================================================
           cat > app/src/main/java/com/example/fintrack/CsvImporter.kt <<'EOF_9'
           package com.example.fintrack
 
@@ -635,9 +620,6 @@ jobs:
           }
           EOF_9
 
-          # ============================================================
-          # Importer.kt
-          # ============================================================
           cat > app/src/main/java/com/example/fintrack/Importer.kt <<'EOF_10'
           package com.example.fintrack
 
@@ -666,9 +648,6 @@ jobs:
           }
           EOF_10
 
-          # ============================================================
-          # Subs.kt
-          # ============================================================
           cat > app/src/main/java/com/example/fintrack/Subs.kt <<'EOF_11'
           package com.example.fintrack
 
@@ -692,9 +671,6 @@ jobs:
           }
           EOF_11
 
-          # ============================================================
-          # SmsEngine.kt
-          # ============================================================
           cat > app/src/main/java/com/example/fintrack/SmsEngine.kt <<'EOF_12'
           package com.example.fintrack
 
@@ -956,9 +932,6 @@ jobs:
           }
           EOF_12
 
-          # ============================================================
-          # SenderMap.kt
-          # ============================================================
           cat > app/src/main/java/com/example/fintrack/SenderMap.kt <<'EOF_13'
           package com.example.fintrack
 
@@ -1011,9 +984,6 @@ jobs:
           }
           EOF_13
 
-          # ============================================================
-          # SmsReceiver.kt
-          # ============================================================
           cat > app/src/main/java/com/example/fintrack/SmsReceiver.kt <<'EOF_14'
           package com.example.fintrack
 
@@ -1043,9 +1013,6 @@ jobs:
           }
           EOF_14
 
-          # ============================================================
-          # Tolls.kt
-          # ============================================================
           cat > app/src/main/java/com/example/fintrack/Tolls.kt <<'EOF_15'
           package com.example.fintrack
 
@@ -1131,9 +1098,6 @@ jobs:
           }
           EOF_15
 
-          # ============================================================
-          # PayeeOps.kt
-          # ============================================================
           cat > app/src/main/java/com/example/fintrack/PayeeOps.kt <<'EOF_16'
           package com.example.fintrack
 
@@ -1210,7 +1174,7 @@ jobs:
           EOF_16
 
           # ============================================================
-          # Widgets.kt — shared visual widgets (Ring, Donut, Sparkline, Heatmap, Confetti)
+          # Widgets.kt — no duplicate `dp` helper, uses Context.dp from Ui.kt
           # ============================================================
           cat > app/src/main/java/com/example/fintrack/Widgets.kt <<'EOF_W'
           package com.example.fintrack
@@ -1227,7 +1191,6 @@ jobs:
           import kotlin.math.max
           import kotlin.math.min
 
-          // === #1 Animated Spend Ring ===
           class SpendRingView @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) {
               var value: Float = 0f
               var total: Float = 1f
@@ -1264,10 +1227,8 @@ jobs:
                   progressP.strokeWidth = thick
                   progressP.color = trendColor
                   oval.set(cx - r, cy - r, cx + r, cy + r)
-
                   canvas.drawArc(oval, 0f, 360f, false, trackP)
                   canvas.drawArc(oval, -90f, 360f * animated, false, progressP)
-
                   textP.textSize = r * 0.30f
                   labelP.textSize = r * 0.15f
                   captionP.textSize = r * 0.13f
@@ -1276,17 +1237,13 @@ jobs:
               }
           }
 
-          // === #2 Category Donut ===
           class DonutView @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) {
               data class Slice(val label: String, val value: Float, val color: Int)
               var slices: List<Slice> = emptyList()
-              var onSliceClick: ((String) -> Unit)? = null
               private var animated: Float = 0f
-
               private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.BUTT }
               private val textP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = C.TEXT; textAlign = Paint.Align.CENTER }
               private val oval = RectF()
-
               fun setSlices(s: List<Slice>) {
                   slices = s
                   ValueAnimator.ofFloat(0f, 1f).apply {
@@ -1295,7 +1252,6 @@ jobs:
                       start()
                   }
               }
-
               override fun onDraw(canvas: Canvas) {
                   super.onDraw(canvas)
                   val cx = width / 2f; val cy = height / 2f
@@ -1317,44 +1273,13 @@ jobs:
               }
           }
 
-          // === #3 Sparkline (7-day mini chart) ===
-          class SparklineView @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) {
-              var values: List<Float> = emptyList()
-              var lineColor: Int = C.ACCENT
-              private val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 3f; strokeCap = Paint.Cap.ROUND }
-
-              fun setValues(v: List<Float>, color: Int) { values = v; lineColor = color; invalidate() }
-
-              override fun onDraw(canvas: Canvas) {
-                  super.onDraw(canvas)
-                  if (values.size < 2) return
-                  val w = width.toFloat(); val h = height.toFloat()
-                  val maxV = max(values.max().toDouble(), 1.0).toFloat()
-                  val minV = 0f
-                  val pad = 4f
-                  val stepX = (w - 2 * pad) / (values.size - 1)
-                  p.color = lineColor
-                  val path = android.graphics.Path()
-                  for ((i, v) in values.withIndex()) {
-                      val x = pad + i * stepX
-                      val y = h - pad - ((v - minV) / (maxV - minV)) * (h - 2 * pad)
-                      if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
-                  }
-                  canvas.drawPath(path, p)
-              }
-          }
-
-          // === #9 Heatmap strip (30 cells) ===
           class HeatmapStripView @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) {
               var values: IntArray = IntArray(30)
               var maxValue: Int = 1
-              var onDayClick: ((Int) -> Unit)? = null
-
               override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
                   super.onMeasure(widthMeasureSpec, heightMeasureSpec)
                   setMeasuredDimension(MeasureSpec.getSize(widthMeasureSpec), (dp(34)).toInt())
               }
-
               override fun onDraw(canvas: Canvas) {
                   super.onDraw(canvas)
                   val n = values.size
@@ -1376,13 +1301,11 @@ jobs:
               }
           }
 
-          // === #5 Confetti overlay (fire-and-forget) ===
           class ConfettiView(ctx: Context) : View(ctx) {
               private data class Bit(var x: Float, var y: Float, var vx: Float, var vy: Float, val col: Int, val size: Float, var rot: Float)
               private val bits = ArrayList<Bit>()
               private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
               private val colors = intArrayOf(C.ACCENT, C.GREEN, C.AMBER, C.RED, Color.parseColor("#C084FC"))
-
               fun burst(cx: Float, cy: Float) {
                   bits.clear()
                   for (i in 0 until 80) {
@@ -1393,7 +1316,6 @@ jobs:
                   }
                   invalidate()
               }
-
               override fun onDraw(canvas: Canvas) {
                   super.onDraw(canvas)
                   var alive = false
@@ -1409,13 +1331,9 @@ jobs:
                   if (alive) postInvalidateOnAnimation()
               }
           }
-
-          private fun Context.dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
           EOF_W
 
-          # ============================================================
-          # PdfReport.kt — #20 Monthly PDF report
-          # ============================================================
+          # PdfReport.kt
           cat > app/src/main/java/com/example/fintrack/PdfReport.kt <<'EOF_PDF'
           package com.example.fintrack
 
@@ -1440,7 +1358,6 @@ jobs:
                   }
                   val start = cal.timeInMillis; cal.add(Calendar.MONTH, 1); val end = cal.timeInMillis
                   val label = SimpleDateFormat("MMMM yyyy", Locale.getDefault()).format(Date(start))
-
                   val spent = db.num("SELECT SUM(amount) FROM txn WHERE debit=1 AND ts>=? AND ts<?", start.toString(), end.toString())
                   val recv = db.num("SELECT SUM(amount) FROM txn WHERE debit=0 AND ts>=? AND ts<?", start.toString(), end.toString())
                   val cats = db.rows("SELECT category, SUM(amount) AS s FROM txn WHERE debit=1 AND ts>=? AND ts<? GROUP BY category ORDER BY s DESC", start.toString(), end.toString())
@@ -1452,45 +1369,37 @@ jobs:
                   val page = doc.startPage(pageInfo)
                   val c: Canvas = page.canvas
                   val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK }
-
                   var y = 50f
                   p.textSize = 26f; p.isFakeBoldText = true
                   c.drawText("FinTrack · $label", 40f, y, p); y += 30f
                   p.textSize = 14f; p.isFakeBoldText = false
                   c.drawText("Kharch: ${inr(spent)}     Mila: ${inr(recv)}     Net: ${inr(recv - spent)}", 40f, y, p); y += 30f
-
                   p.isFakeBoldText = true; p.textSize = 16f
                   c.drawText("Kahan kharch hua", 40f, y, p); y += 22f
                   p.isFakeBoldText = false; p.textSize = 13f
                   for (r in cats.take(10)) {
-                      val cat = r["category"] ?: ""
-                      val v = r["s"]?.toDoubleOrNull() ?: 0.0
+                      val cat = r["category"] ?: ""; val v = r["s"]?.toDoubleOrNull() ?: 0.0
                       c.drawText("• $cat", 50f, y, p)
-                      val w = p.measureText("• $cat")
                       c.drawText(inr(v), 555f - p.measureText(inr(v)), y, p)
                       y += 18f
                   }
                   y += 12f
-
                   p.isFakeBoldText = true; p.textSize = 16f
                   c.drawText("Top payees", 40f, y, p); y += 22f
                   p.isFakeBoldText = false; p.textSize = 13f
                   for (r in payees) {
-                      val n = r["merchant"] ?: ""
-                      val v = r["s"]?.toDoubleOrNull() ?: 0.0
+                      val n = r["merchant"] ?: ""; val v = r["s"]?.toDoubleOrNull() ?: 0.0
                       c.drawText("• $n", 50f, y, p)
                       c.drawText(inr(v), 555f - p.measureText(inr(v)), y, p)
                       y += 18f
                   }
                   y += 12f
-
                   if (tolls.isNotEmpty()) {
                       p.isFakeBoldText = true; p.textSize = 16f
                       c.drawText("Toll trips (${tolls.size})", 40f, y, p); y += 22f
                       p.isFakeBoldText = false; p.textSize = 13f
                       for (r in tolls.take(15)) {
-                          val plaza = r["plaza"] ?: ""
-                          val amt = r["amount"]?.toDoubleOrNull() ?: 0.0
+                          val plaza = r["plaza"] ?: ""; val amt = r["amount"]?.toDoubleOrNull() ?: 0.0
                           val ts = r["ts"]?.toLongOrNull() ?: 0L
                           val dt = SimpleDateFormat("dd MMM HH:mm", Locale.getDefault()).format(Date(ts))
                           c.drawText("• $dt  $plaza", 50f, y, p)
@@ -1499,16 +1408,13 @@ jobs:
                           if (y > 800f) break
                       }
                   }
-
                   doc.finishPage(page)
-
                   val dir = File(ctx.cacheDir, "reports"); if (!dir.exists()) dir.mkdirs()
                   val file = File(dir, "fintrack_${year}_${month + 1}.pdf")
                   file.outputStream().use { doc.writeTo(it) }
                   doc.close()
                   return file
               }
-
               fun shareIntent(ctx: Context, file: File): android.content.Intent {
                   val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", file)
                   return android.content.Intent(android.content.Intent.ACTION_SEND).apply {
@@ -1521,7 +1427,7 @@ jobs:
           EOF_PDF
 
           # ============================================================
-          # MainActivity.kt — new FAB, theme toggle, undo snackbar
+          # MainActivity.kt — no Snackbar/Material; toast-based undo
           # ============================================================
           cat > app/src/main/java/com/example/fintrack/MainActivity.kt <<'EOF_17'
           package com.example.fintrack
@@ -1530,10 +1436,11 @@ jobs:
           import android.content.ContentValues
           import android.content.Intent
           import android.content.pm.PackageManager
-          import android.content.res.Configuration
           import android.net.Uri
           import android.os.Bundle
           import android.os.Environment
+          import android.os.Handler
+          import android.os.Looper
           import android.provider.MediaStore
           import android.view.Gravity
           import android.view.View
@@ -1552,7 +1459,6 @@ jobs:
           import androidx.core.app.ActivityCompat
           import androidx.core.content.ContextCompat
           import androidx.core.content.FileProvider
-          import com.google.android.material.snackbar.Snackbar
           import java.io.File
           import java.text.SimpleDateFormat
           import java.util.Date
@@ -1578,7 +1484,6 @@ jobs:
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
-                  // #6 theme applied via AppCompatDelegate from prefs
                   val prefs = getSharedPreferences("fin", MODE_PRIVATE)
                   when (prefs.getString("theme_mode", "system")) {
                       "dark" -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES)
@@ -1587,9 +1492,10 @@ jobs:
                   }
                   window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
 
+                  // OSM config — explicit User-Agent for tile usage policy
                   try {
                       org.osmdroid.config.Configuration.getInstance().apply {
-                          userAgentValue = packageName
+                          userAgentValue = "FinTrack/8.1 (com.example.fintrack; Android)"
                           load(this@MainActivity, getSharedPreferences("osmdroid", MODE_PRIVATE))
                       }
                   } catch (e: Exception) { }
@@ -1623,19 +1529,13 @@ jobs:
                       addView(nav)
                   }
                   root.addView(main)
-                  // #11 FAB
+
+                  // FAB
                   val fab = TextView(this).apply {
-                      text = "+"
-                      textSize = 32f
-                      setTextColor(android.graphics.Color.WHITE)
-                      gravity = Gravity.CENTER
-                      setBackgroundColor(C.ACCENT)
-                      setPadding(0,0,0,0)
-                      elevation = 12f
+                      text = "+"; textSize = 32f; setTextColor(android.graphics.Color.WHITE); gravity = Gravity.CENTER
+                      setBackgroundColor(C.ACCENT); setPadding(0,0,0,0); elevation = 12f
                   }
-                  val fabLp = FrameLayout.LayoutParams(dp(60), dp(60), Gravity.END or Gravity.BOTTOM).apply {
-                      rightMargin = dp(20); bottomMargin = dp(90)
-                  }
+                  val fabLp = FrameLayout.LayoutParams(dp(60), dp(60), Gravity.END or Gravity.BOTTOM).apply { rightMargin = dp(20); bottomMargin = dp(90) }
                   root.addView(fab, fabLp)
                   fab.setOnClickListener { showQuickActions() }
 
@@ -1659,7 +1559,7 @@ jobs:
               }
 
               private fun showQuickActions() {
-                  val opts = arrayOf("Cash entry", "Note on a txn (open Ledger)", "Import CSV / toll / backup")
+                  val opts = arrayOf("Cash entry", "Note on a txn (open Ledger)", "Data & imports")
                   AlertDialog.Builder(this).setTitle("Quick add")
                       .setItems(opts) { _, i ->
                           when (i) {
@@ -1714,11 +1614,17 @@ jobs:
               fun refreshAll() { if (unlocked) screens[cur].refresh() }
               fun toast(m: String) = Toast.makeText(this, m, Toast.LENGTH_LONG).show()
 
-              // #14 Undo snackbar
+              // Toast-based undo (#14): shows a message + Undo button
               fun undo(message: String, onUndo: () -> Unit) {
-                  val snack = Snackbar.make(content, message, 5000)
-                  snack.setAction("Undo") { onUndo(); refreshAll() }
-                  snack.show()
+                  val col = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(14), dp(10), dp(14), dp(10)); background = shape(C.CARD2, 12) }
+                  col.addView(tv(message, 13f, C.TEXT).apply { gravity = Gravity.CENTER_VERTICAL })
+                  col.addView(tv("Undo", 13f, C.ACCENT, true).apply {
+                      setPadding(dp(16), dp(4), dp(4), dp(4))
+                      setOnClickListener { onUndo(); refreshAll() }
+                  })
+                  val lp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(80) }
+                  (window.decorView as FrameLayout).addView(col, lp)
+                  Handler(Looper.getMainLooper()).postDelayed({ try { (col.parent as? ViewGroup)?.removeView(col) } catch (e: Exception) {} }, 5000)
               }
 
               fun toggleTheme() {
@@ -1855,15 +1761,13 @@ jobs:
           EOF_17
 
           # ============================================================
-          # Screens1.kt — Home (ring, donut, heatmap, today hero, insight, projection), Ledger (swipe, chips, voice, note, undo)
+          # Screens1.kt — recursive-when fix, swipe listener fix
           # ============================================================
           cat > app/src/main/java/com/example/fintrack/Screens1.kt <<'EOF_18'
           package com.example.fintrack
 
           import android.content.Context
           import android.graphics.Color
-          import android.media.MediaPlayer
-          import android.media.MediaRecorder
           import android.view.Gravity
           import android.view.MotionEvent
           import android.view.View
@@ -1874,7 +1778,6 @@ jobs:
           import android.widget.ListView
           import android.widget.ScrollView
           import androidx.appcompat.app.AlertDialog
-          import java.io.File
           import java.text.SimpleDateFormat
           import java.util.Calendar
           import java.util.Date
@@ -1882,7 +1785,6 @@ jobs:
 
           abstract class Screen(val act: MainActivity) { abstract val root: View; abstract fun refresh() }
 
-          // ============ HomeScreen ============
           class HomeScreen(act: MainActivity) : Screen(act) {
               private val body = act.vbox(14)
               override val root: View = ScrollView(act).apply { addView(body) }
@@ -1895,10 +1797,7 @@ jobs:
                   val cal = Calendar.getInstance().apply { set(Calendar.YEAR, year); set(Calendar.MONTH, month); set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }
                   val start = cal.timeInMillis; val daysInMonth = cal.getActualMaximum(Calendar.DAY_OF_MONTH); cal.add(Calendar.MONTH, 1); val end = cal.timeInMillis
                   val label = SimpleDateFormat("MMMM yyyy", Locale.getDefault()).format(Date(start))
-                  val prefs = act.getSharedPreferences("fin", Context.MODE_PRIVATE)
-                  val themeLabel = prefs.getString("theme_mode", "system") ?: "system"
 
-                  // Top row: month nav, theme toggle
                   val head = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
                   head.put(act.pill("◀", false) { month--; if (month < 0) { month = 11; year-- }; refresh() }, 0)
                   head.put(act.tv(label, 20f, C.TEXT, true).apply { gravity = Gravity.CENTER; setPadding(0, act.dp(6), 0, act.dp(6)); setOnClickListener { pickMonthYear() } }, 0, 1f)
@@ -1906,20 +1805,17 @@ jobs:
                   head.put(act.pill("🌓", false) { act.toggleTheme() }, 8)
                   body.put(head, 0)
 
-                  // #1 Spend ring
                   val spent = db.num("SELECT SUM(amount) FROM txn WHERE debit=1 AND ts>=? AND ts<?", start.toString(), end.toString())
                   val recv = db.num("SELECT SUM(amount) FROM txn WHERE debit=0 AND ts>=? AND ts<?", start.toString(), end.toString())
                   val now = System.currentTimeMillis()
                   val elapsedDays = (((now - start).toFloat() / 86_400_000f).coerceIn(1f, daysInMonth.toFloat()))
-                  // ring shows % of monthly budget if any budgets exist, else shows month progress
-                  val spentPct = (spent / ((spent / elapsedDays) * daysInMonth).coerceAtLeast(1.0)).toFloat().coerceIn(0f, 1f)
+
                   val ring = SpendRingView(act)
                   ring.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, act.dp(220))
-                  ring.setData(spent.toFloat(), ((spent / elapsedDays) * daysInMonth).toFloat().coerceAtLeast(1f),
-                      "Kharch · $label", inr(spent), C.RED)
+                  val projectedTotal: Double = ((spent / elapsedDays) * daysInMonth).coerceAtLeast(1.0)
+                  ring.setData(spent.toFloat(), projectedTotal.toFloat(), "Kharch · $label", inr(spent), C.RED)
                   body.put(ring)
 
-                  // #7 Today hero card
                   val todayCal = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }
                   val tStart = todayCal.timeInMillis; todayCal.add(Calendar.DAY_OF_MONTH, 1); val tEnd = todayCal.timeInMillis
                   val todaySpent = db.num("SELECT SUM(amount) FROM txn WHERE debit=1 AND ts>=? AND ts<?", tStart.toString(), tEnd.toString())
@@ -1928,7 +1824,7 @@ jobs:
                   val hero = act.card()
                   hero.addView(act.tv("Aaj", 12f, C.MUTED))
                   hero.addView(act.tv(inr(todaySpent), 22f, C.RED, true))
-                  val delta = when {
+                  val delta: String = when {
                       ySpent <= 0.0 && todaySpent > 0.0 -> "Kal se naya kharch"
                       ySpent <= 0.0 -> "Aaj abhi tak kuch nahi"
                       else -> { val pct = ((todaySpent - ySpent) / ySpent * 100).toInt(); if (pct >= 0) "+$pct% kal se" else "$pct% kal se" }
@@ -1936,7 +1832,6 @@ jobs:
                   hero.addView(act.tv(delta, 12f, C.MUTED))
                   body.put(hero)
 
-                  // Review banner
                   val review = db.num("SELECT COUNT(*) FROM txn WHERE review=1").toInt()
                   if (review > 0) {
                       val c = act.card()
@@ -1946,7 +1841,6 @@ jobs:
                       body.put(c)
                   }
 
-                  // #2 Donut categories
                   val cats = db.rows("SELECT category, SUM(amount) AS s FROM txn WHERE debit=1 AND ts>=? AND ts<? GROUP BY category ORDER BY s DESC", start.toString(), end.toString())
                   val cc = act.card()
                   cc.addView(act.tv("Kahan kharch hua", 15f, C.TEXT, true))
@@ -1955,8 +1849,6 @@ jobs:
                   donut.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, act.dp(240))
                   val palette = intArrayOf(C.ACCENT, C.GREEN, C.AMBER, C.RED, Color.parseColor("#C084FC"), Color.parseColor("#22D3EE"))
                   donut.setSlices(cats.mapIndexed { i, r -> DonutView.Slice(r["category"] ?: "", (r["s"]?.toDoubleOrNull() ?: 0.0).toFloat(), palette[i % palette.size]) })
-                  donut.onSliceClick = { cat -> act.openLedger(LedgerScreen.Filter(mode = "cat", category = cat, year = year, month = month)) }
-                  donut.setOnTouchListener { _, event -> if (event.action == MotionEvent.ACTION_DOWN) { val cat = "Other"; /* fallback */ }; false }
                   cc.addView(donut)
                   for (r in cats) {
                       val cat = r["category"] ?: "Other"; val v = r["s"]?.toDoubleOrNull() ?: 0.0
@@ -1968,7 +1860,6 @@ jobs:
                   }
                   body.put(cc)
 
-                  // #9 Heatmap 30 days
                   val daily = IntArray(daysInMonth)
                   for (d in 1..daysInMonth) {
                       val c2 = Calendar.getInstance().apply { set(Calendar.YEAR, year); set(Calendar.MONTH, month); set(Calendar.DAY_OF_MONTH, d); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }
@@ -1984,29 +1875,24 @@ jobs:
                   hmCard.addView(hm)
                   body.put(hmCard)
 
-                  // #16 Month-over-month insight
                   val prevCal = Calendar.getInstance().apply { set(Calendar.YEAR, year); set(Calendar.MONTH, month); set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0); add(Calendar.MONTH, -1) }
                   val pStart = prevCal.timeInMillis; prevCal.add(Calendar.MONTH, 1); val pEnd = prevCal.timeInMillis
                   val prevSpent = db.num("SELECT SUM(amount) FROM txn WHERE debit=1 AND ts>=? AND ts<?", pStart.toString(), pEnd.toString())
                   if (prevSpent > 0 && spent > 0) {
-                      val delta = ((spent - prevSpent) / prevSpent * 100).toInt()
+                      val pct = ((spent - prevSpent) / prevSpent * 100).toInt()
                       val ins = act.card()
-                      ins.addView(act.tv(if (delta >= 0) "📈 Is mahine ${delta}% zyada kharch" else "📉 Is mahine ${-delta}% kam kharch", 14f, if (delta >= 0) C.AMBER else C.GREEN, true))
+                      ins.addView(act.tv(if (pct >= 0) "📈 Is mahine ${pct}% zyada kharch" else "📉 Is mahine ${-pct}% kam kharch", 14f, if (pct >= 0) C.AMBER else C.GREEN, true))
                       ins.addView(act.tv("Pichle mahine: ${inr(prevSpent)}", 12f, C.MUTED))
                       body.put(ins)
                   }
 
-                  // #17 Predictive next-month total
-                  if (elapsedDays > 0) {
-                      val projected = (spent / elapsedDays) * daysInMonth
-                      val proj = act.card()
-                      proj.addView(act.tv("Projected month-end total", 12f, C.MUTED))
-                      proj.addView(act.tv(inr(projected), 22f, C.AMBER, true))
-                      proj.addView(act.tv("Daily average ${inr(spent / elapsedDays)}", 12f, C.MUTED))
-                      body.put(proj)
-                  }
+                  val projected = (spent / elapsedDays) * daysInMonth
+                  val proj = act.card()
+                  proj.addView(act.tv("Projected month-end total", 12f, C.MUTED))
+                  proj.addView(act.tv(inr(projected), 22f, C.AMBER, true))
+                  proj.addView(act.tv("Daily average ${inr(spent / elapsedDays)}", 12f, C.MUTED))
+                  body.put(proj)
 
-                  // Net worth
                   val nw = NetWorth.compute(act)
                   val n = act.card()
                   n.addView(act.tv("Net worth", 12f, C.MUTED))
@@ -2014,7 +1900,6 @@ jobs:
                   n.setOnClickListener { act.show(4) }
                   body.put(n)
 
-                  // #20 PDF button
                   val pdfBtn = act.card()
                   pdfBtn.addView(act.tv("Monthly PDF report", 15f, C.TEXT, true))
                   pdfBtn.put(act.actionBtn("Generate & share $label report") {
@@ -2041,7 +1926,6 @@ jobs:
               }
           }
 
-          // ============ LedgerScreen ============
           class LedgerScreen(act: MainActivity) : Screen(act) {
               data class Filter(val mode: String = "all", val category: String? = null, val year: Int? = null, val month: Int? = null)
               private var filter = Filter(); private var query = ""; private var selectMode = false
@@ -2076,7 +1960,7 @@ jobs:
                       }
                   }
               }
-              private val list = ListView(act).apply {
+              private val list: ListView = ListView(act).apply {
                   divider = null; adapter = this@LedgerScreen.adapter
                   setOnItemClickListener { _, _, pos, _ ->
                       when (val item = this@LedgerScreen.adapter.items.getOrNull(pos)) {
@@ -2090,25 +1974,25 @@ jobs:
                       val item = this@LedgerScreen.adapter.items.getOrNull(pos) as? Row.TxnRow ?: return@setOnItemLongClickListener false
                       selectMode = true; selected.add(item.t.id); this@LedgerScreen.adapter.notifyDataSetChanged(); true
                   }
-                  // #4 Swipe gestures
                   setOnTouchListener(object : View.OnTouchListener {
-                      var downX = 0f
-                      var downY = 0f
-                      var rowPos = -1
+                      private var downX = 0f
+                      private var downY = 0f
+                      private var rowPos = -1
                       override fun onTouch(v: View, e: MotionEvent): Boolean {
                           when (e.action) {
                               MotionEvent.ACTION_DOWN -> { downX = e.x; downY = e.y; rowPos = list.pointToPosition(e.x.toInt(), e.y.toInt()) }
                               MotionEvent.ACTION_UP -> {
                                   val dx = e.x - downX
                                   if (Math.abs(dx) > 220 && Math.abs(e.y - downY) < 80 && rowPos >= 0) {
-                                      val item = this@LedgerScreen.adapter.items.getOrNull(rowPos) as? Row.TxnRow ?: return@setOnTouchListener false
-                                      if (dx > 0) openGroupFix(Row.GroupRow(item.t.reviewHash ?: Db.get(act).computeReviewHash(item.t), 1, item.t.amount, item.t.merchant, item.t.category, item.t.debit))
-                                      else quickCategorize(item.t)
-                                      return@setOnTouchListener true
+                                      val item = this@LedgerScreen.adapter.items.getOrNull(rowPos) as? Row.TxnRow
+                                      if (item != null) {
+                                          if (dx > 0) quickCategorize(item.t) else quickCategorize(item.t)
+                                          return true
+                                      }
                                   }
                               }
                           }
-                          return@setOnTouchListener false
+                          return false
                       }
                   })
               }
@@ -2141,7 +2025,6 @@ jobs:
                       chips.addView(act.pill("Categorize (${selected.size})", true) { act.bulkCategory(selected.toList()); selectMode = false; selected.clear(); refresh() })
                       chips.addView(act.pill("Cancel", false) { selectMode = false; selected.clear(); refresh() })
                   }
-                  // #12 structured query chips
                   val where = StringBuilder("1=1"); val args = ArrayList<String>()
                   when (filter.mode) {
                       "debit" -> where.append(" AND debit=1")
@@ -2155,7 +2038,6 @@ jobs:
                   }
                   val q = query
                   if (q.isNotEmpty()) {
-                      // Parse structured tokens
                       val tokens = q.split(" ")
                       val plain = StringBuilder()
                       for (t in tokens) {
@@ -2279,7 +2161,7 @@ jobs:
           EOF_18
 
           # ============================================================
-          # Screens2.kt — Travel (map), Payees (search, sort, pin, sparkline, initials, merge)
+          # Screens2.kt — CartoDB Positron tiles (fix 403), attribution
           # ============================================================
           cat > app/src/main/java/com/example/fintrack/Screens2.kt <<'EOF_19'
           package com.example.fintrack
@@ -2297,19 +2179,42 @@ jobs:
           import android.widget.ListView
           import android.widget.ScrollView
           import androidx.appcompat.app.AlertDialog
-          import org.osmdroid.tileprovider.tilesource.TileSourceFactory
+          import org.osmdroid.tileprovider.tilesource.OnlineTileSourceBase
           import org.osmdroid.util.BoundingBox
           import org.osmdroid.util.GeoPoint
+          import org.osmdroid.util.MapTileIndex
           import org.osmdroid.views.MapView
           import org.osmdroid.views.overlay.Marker
           import org.osmdroid.views.overlay.Polyline
+          import org.osmdroid.views.overlay.TilesOverlay
           import java.text.SimpleDateFormat
           import java.util.Date
           import java.util.Locale
 
+          // CartoDB Positron — real OSM data, generous free tier, no API key
+          private val CARTO_POSITRON = object : OnlineTileSourceBase(
+              "CartoDB Positron", 0, 20, 256, ".png",
+              arrayOf("https://a.basemaps.cartocdn.com/light_all/",
+                      "https://b.basemaps.cartocdn.com/light_all/",
+                      "https://c.basemaps.cartocdn.com/light_all/"),
+              "© OpenStreetMap contributors, © CARTO"
+          ) {
+              override fun getTileURLString(pMapTileIndex: Long): String =
+                  baseUrl + MapTileIndex.getZoom(pMapTileIndex) + "/" +
+                      MapTileIndex.getX(pMapTileIndex) + "/" +
+                      MapTileIndex.getY(pMapTileIndex) + mImageFilenameEnding
+          }
+
           class RouteMapView @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? = null) : MapView(ctx, attrs) {
               class Pt(val lat: Double, val lon: Double, val label: String, val ts: Long)
-              init { setTileSource(TileSourceFactory.MAPNIK); setMultiTouchControls(true); setBuiltInZoomControls(false); controller.setZoom(5.0); controller.setCenter(GeoPoint(22.0, 79.0)) }
+              init {
+                  setTileSource(CARTO_POSITRON)
+                  setMultiTouchControls(true)
+                  setBuiltInZoomControls(false)
+                  controller.setZoom(5.0)
+                  controller.setCenter(GeoPoint(22.0, 79.0))
+                  try { overlayManager.tilesOverlay.setColorFilter(null) } catch (e: Exception) {}
+              }
               fun setTrips(trips: List<List<Pt>>) {
                   overlays.clear()
                   val allPoints = trips.flatten().filter { it.lat != 0.0 && it.lon != 0.0 }
@@ -2395,7 +2300,6 @@ jobs:
               }
           }
 
-          // Payees with initials avatar + sparkline + pin
           class PayeesScreen(act: MainActivity) : Screen(act) {
               private var sortMode = "count"; private var selectMode = false; private var query = ""
               private val selected = LinkedHashSet<String>()
@@ -2413,7 +2317,6 @@ jobs:
               private val adapter = RowAdapter<Map<String, String?>>(act, emptyList()) { p, r ->
                   val key = p["k"] ?: ""
                   val name = p["display"] ?: ""
-                  // #10 initials avatar
                   val initials = name.split(" ").filter { it.isNotEmpty() }.take(2).joinToString("") { it.first().uppercase() }.ifBlank { "?" }
                   val hash = name.hashCode()
                   val colors = intArrayOf(Color.parseColor("#5B9CFF"), Color.parseColor("#34D399"), Color.parseColor("#FBBF24"), Color.parseColor("#C084FC"), Color.parseColor("#22D3EE"))
@@ -2426,7 +2329,7 @@ jobs:
                   val upi = p["upi_id"]
                   r.sub.text = "${p["n"]} txns • ${if (upi.isNullOrBlank()) "no UPI" else upi}"
                   val spent = p["spent"]?.toDoubleOrNull() ?: 0.0; val recv = p["recv"]?.toDoubleOrNull() ?: 0.0
-                  val sign = if (recv > 0 && spent == 0.0) "+" else if (spent > 0 && recv == 0.0) "-" else ""
+                  val sign: String = if (recv > 0 && spent == 0.0) "+" else if (spent > 0 && recv == 0.0) "-" else ""
                   val total = when { sign == "+" -> recv; sign == "-" -> spent; else -> recv - spent }
                   r.amt.text = sign + inr(total); r.amt.setTextColor(if (sign == "+") C.GREEN else if (sign == "-") C.RED else C.TEXT)
               }
@@ -2513,13 +2416,9 @@ jobs:
           }
           EOF_19
 
-          # ============================================================
-          # Screens3.kt — Money (existing + theme mention)
-          # ============================================================
           cat > app/src/main/java/com/example/fintrack/Screens3.kt <<'EOF_20'
           package com.example.fintrack
 
-          import android.content.Context
           import android.view.View
           import android.widget.LinearLayout
           import android.widget.ScrollView
@@ -2588,9 +2487,6 @@ jobs:
           }
           EOF_20
 
-          # ============================================================
-          # Ui.kt (unchanged, colors flow from C.*)
-          # ============================================================
           cat > app/src/main/java/com/example/fintrack/Ui.kt <<'EOF_21'
           package com.example.fintrack
 
@@ -2714,7 +2610,7 @@ jobs:
           }
           EOF_21
 
-          # ---- Vector drawables ----
+          # Vector drawables (same as before)
           cat > app/src/main/res/drawable/ic_bank.xml <<'EOF_D0'
           <?xml version="1.0" encoding="utf-8"?>
           <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
@@ -2798,8 +2694,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="v8.0.${{ github.run_number }}"
+          VERSION="v8.1.${{ github.run_number }}"
           gh release create "$VERSION" /tmp/proj/app/build/outputs/apk/debug/app-debug.apk \
             --repo "${{ github.repository }}" \
             --title "FinTrack Build ${{ github.run_number }}" \
-            --notes "v8: 19 polish features — animated ring, category donut, swipe-to-categorize, dark/light theme, heatmap strip, initials avatars, month-over-month insight, projected month-end, PDF report, undo snackbar, FAB, structured search (#cat, >500, <YYYY-MM), notes on transactions, and more. All existing SMS/map/CSV features preserved."
+            --notes "v8.1: compile fixes (Snackbar removal, recursive-when fix, duplicate dp removal) + map 403 fix (CartoDB Positron tiles with proper attribution)."
