@@ -61,8 +61,8 @@ jobs:
                   applicationId = "com.example.fintrack"
                   minSdk = 30
                   targetSdk = 33
-                  versionCode = 10
-                  versionName = "8.2"
+                  versionCode = 11
+                  versionName = "8.3"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -1168,7 +1168,7 @@ jobs:
           EOF_16
 
           # ============================================================
-          # Widgets.kt — FIXED: use context.dp() instead of dp()
+          # Widgets.kt — FIXED: DonutView uses `private var _slices` + public `updateSlices()` (no JVM clash)
           # ============================================================
           cat > app/src/main/java/com/example/fintrack/Widgets.kt <<'EOF_W'
           package com.example.fintrack
@@ -1230,21 +1230,28 @@ jobs:
               }
           }
 
+          /**
+           * FIX: The property is renamed to `_slices` (private backing) and the
+           * mutator is `updateSlices(...)` — no JVM signature collision with the
+           * auto-generated property setter.
+           */
           class DonutView @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) {
               data class Slice(val label: String, val value: Float, val color: Int)
-              var slices: List<Slice> = emptyList()
+              private var _slices: List<Slice> = emptyList()
               private var animated: Float = 0f
               private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.BUTT }
               private val textP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = C.TEXT; textAlign = Paint.Align.CENTER }
               private val oval = RectF()
-              fun setSlices(s: List<Slice>) {
-                  slices = s
+
+              fun updateSlices(s: List<Slice>) {
+                  _slices = s
                   ValueAnimator.ofFloat(0f, 1f).apply {
                       duration = 900
                       addUpdateListener { animated = it.animatedValue as Float; invalidate() }
                       start()
                   }
               }
+
               override fun onDraw(canvas: Canvas) {
                   super.onDraw(canvas)
                   val cx = width / 2f; val cy = height / 2f
@@ -1252,21 +1259,20 @@ jobs:
                   val thick = r * 0.35f
                   paint.strokeWidth = thick
                   oval.set(cx - r + thick / 2, cy - r + thick / 2, cx + r - thick / 2, cy + r - thick / 2)
-                  val total = slices.sumOf { it.value.toDouble() }.toFloat().coerceAtLeast(0.001f)
+                  val total = _slices.sumOf { it.value.toDouble() }.toFloat().coerceAtLeast(0.001f)
                   var start = -90f
-                  for (s in slices) {
+                  for (s in _slices) {
                       val sweep = 360f * (s.value / total) * animated
                       paint.color = s.color
                       canvas.drawArc(oval, start, sweep, false, paint)
                       start += sweep
                   }
                   textP.textSize = r * 0.24f
-                  val out = slices.sumOf { it.value.toDouble() }.toFloat()
+                  val out = _slices.sumOf { it.value.toDouble() }.toFloat()
                   canvas.drawText(inr(out.toDouble()), cx, cy + textP.textSize / 3, textP)
               }
           }
 
-          // FIX: uses context.dp() instead of dp() — dp is a Context extension
           class HeatmapStripView @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) {
               var values: IntArray = IntArray(30)
               var maxValue: Int = 1
@@ -1485,7 +1491,7 @@ jobs:
 
                   try {
                       org.osmdroid.config.Configuration.getInstance().apply {
-                          userAgentValue = "FinTrack/8.2 (com.example.fintrack; Android)"
+                          userAgentValue = "FinTrack/8.3 (com.example.fintrack; Android)"
                           load(this@MainActivity, getSharedPreferences("osmdroid", MODE_PRIVATE))
                       }
                   } catch (e: Exception) { }
@@ -1618,11 +1624,7 @@ jobs:
               fun toggleTheme() {
                   val prefs = getSharedPreferences("fin", MODE_PRIVATE)
                   val cur = prefs.getString("theme_mode", "system")
-                  val next = when (cur) {
-                      "system" -> "dark"
-                      "dark" -> "light"
-                      else -> "system"
-                  }
+                  val next = when (cur) { "system" -> "dark"; "dark" -> "light"; else -> "system" }
                   prefs.edit().putString("theme_mode", next).apply()
                   when (next) {
                       "dark" -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES)
@@ -1748,9 +1750,6 @@ jobs:
           }
           EOF_17
 
-          # ============================================================
-          # Screens1.kt — FIXED: lateinit list + init block
-          # ============================================================
           cat > app/src/main/java/com/example/fintrack/Screens1.kt <<'EOF_18'
           package com.example.fintrack
 
@@ -1836,7 +1835,7 @@ jobs:
                   val donut = DonutView(act)
                   donut.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, act.dp(240))
                   val palette = intArrayOf(C.ACCENT, C.GREEN, C.AMBER, C.RED, Color.parseColor("#C084FC"), Color.parseColor("#22D3EE"))
-                  donut.setSlices(cats.mapIndexed { i, r -> DonutView.Slice(r["category"] ?: "", (r["s"]?.toDoubleOrNull() ?: 0.0).toFloat(), palette[i % palette.size]) })
+                  donut.updateSlices(cats.mapIndexed { i, r -> DonutView.Slice(r["category"] ?: "", (r["s"]?.toDoubleOrNull() ?: 0.0).toFloat(), palette[i % palette.size]) })
                   cc.addView(donut)
                   for (r in cats) {
                       val cat = r["category"] ?: "Other"; val v = r["s"]?.toDoubleOrNull() ?: 0.0
@@ -1914,9 +1913,6 @@ jobs:
               }
           }
 
-          // ============================================================
-          // LedgerScreen with fixed init order (lateinit list + init block)
-          // ============================================================
           class LedgerScreen(act: MainActivity) : Screen(act) {
               data class Filter(val mode: String = "all", val category: String? = null, val year: Int? = null, val month: Int? = null)
               private var filter = Filter(); private var query = ""; private var selectMode = false
@@ -1951,10 +1947,7 @@ jobs:
                       }
                   }
               }
-
-              // FIX: lateinit + init block so `list` can reference itself
               private lateinit var list: ListView
-
               init {
                   list = ListView(act).apply {
                       divider = null
@@ -1972,17 +1965,13 @@ jobs:
                           selectMode = true; selected.add(item.t.id); this@LedgerScreen.adapter.notifyDataSetChanged(); true
                       }
                   }
-                  // Now `list` is assigned, set the touch listener in a separate statement
                   list.setOnTouchListener(object : View.OnTouchListener {
                       private var downX = 0f
                       private var downY = 0f
                       private var rowPos = -1
                       override fun onTouch(v: View, e: MotionEvent): Boolean {
                           when (e.action) {
-                              MotionEvent.ACTION_DOWN -> {
-                                  downX = e.x; downY = e.y
-                                  rowPos = list.pointToPosition(e.x.toInt(), e.y.toInt())
-                              }
+                              MotionEvent.ACTION_DOWN -> { downX = e.x; downY = e.y; rowPos = list.pointToPosition(e.x.toInt(), e.y.toInt()) }
                               MotionEvent.ACTION_UP -> {
                                   val dx = e.x - downX
                                   if (Math.abs(dx) > 220 && Math.abs(e.y - downY) < 80 && rowPos >= 0) {
@@ -1995,7 +1984,6 @@ jobs:
                       }
                   })
               }
-
               override val root: View = act.vbox().apply {
                   val search = EditText(act).apply {
                       hint = "Search · #cat · >500 · <2024-06"; setHintTextColor(C.MUTED); setTextColor(C.TEXT); setSingleLine()
@@ -2334,8 +2322,8 @@ jobs:
                       if (selectMode) { val k = p["k"] ?: return@setOnItemClickListener; if (!selected.add(k)) selected.remove(k); this@PayeesScreen.adapter.notifyDataSetChanged(); this@PayeesScreen.refresh() } else this@PayeesScreen.showPayee(p)
                   }
                   setOnItemLongClickListener { _, _, pos, _ ->
-                      val p = this@PayeesScreen.adapter.items.getOrNull(pos) ?: return@setOnItemLongClickListener false
-                      val k = p["k"] ?: return@setOnItemLongClickListener false
+                      val p = this@PayeesScreen.adapter.items.getOrNull(pos) ?: return@setOnItemClickListener false
+                      val k = p["k"] ?: return@setOnItemClickListener false
                       selectMode = true; selected.add(k); this@PayeesScreen.adapter.notifyDataSetChanged(); this@PayeesScreen.refresh(); true
                   }
               }
@@ -2687,8 +2675,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="v8.2.${{ github.run_number }}"
+          VERSION="v8.3.${{ github.run_number }}"
           gh release create "$VERSION" /tmp/proj/app/build/outputs/apk/debug/app-debug.apk \
             --repo "${{ github.repository }}" \
             --title "FinTrack Build ${{ github.run_number }}" \
-            --notes "v8.2: 2 compile fixes — LedgerScreen.list is now lateinit with init block (fixes self-reference); Widgets.kt uses context.dp() (fixes receiver mismatch). All v8.1 features preserved."
+            --notes "v8.3: fix DonutView JVM signature clash (rename slices setter to updateSlices). All v8.2 features preserved."
