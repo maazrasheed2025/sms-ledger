@@ -1,29 +1,4 @@
-        name: Apply compile fixes
-        run: |
-          python3 - <<'PY'
-          import pathlib, re
-          d = pathlib.Path('/tmp/proj/app/src/main/java/com/example/fintrack')
-          def sub(fn, old, new):
-              p = d / fn
-              s = p.read_text()
-              if old not in s:
-                  print('MISSING', fn, old)
-                  return
-              p.write_text(s.replace(old, new, 1))
-          sub('Screens1.kt', 'list.pointToPosition(', '(v as ListView).pointToPosition(')
-          sub('Widgets.kt', '(dp(34)).toInt()', 'context.dp(34)')
-          sub('Tolls.kt', 'fun count(ctx: Context): Int {', '@Synchronized fun invalidate() { loaded = false }\n    fun count(ctx: Context): Int {')
-          sub('MainActivity.kt', 'val count = Importer.importTollJson(applicationContext, uri)', 'val count = Importer.importTollJson(applicationContext, uri)\n                      Tolls.invalidate()')
-          sub('Importer.kt', '} finally { db.endTransaction() }', '} finally { if (db.inTransaction()) db.endTransaction() }')
-          p = d / 'Tolls.kt'
-          s = p.read_text()
-          guard = '        if (!Regex("""(?i)\\b(fastag|netc|toll|plaza|nhai|ihmcl)\\b""").containsMatchIn(t.body + " " + t.merchant)) return\n'
-          s2 = re.sub(r'(if \(!t\.debit\) return\n)(\s*val p = match\(ctx, t\.merchant)', lambda m: m.group(1) + guard + m.group(2), s, count=1)
-          print('toll guard', 'applied' if s2 != s else 'MISSING')
-          p.write_text(s2)
-          PY
-          
-          name: Build and Release FinTrack APK
+name: Build and Release FinTrack APK
 
 on:
   workflow_dispatch:
@@ -86,8 +61,8 @@ jobs:
                   applicationId = "com.example.fintrack"
                   minSdk = 30
                   targetSdk = 33
-                  versionCode = 9
-                  versionName = "8.1"
+                  versionCode = 10
+                  versionName = "8.2"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -148,7 +123,6 @@ jobs:
           </paths>
           EOF_XML1
 
-          # Backup.kt (same as before, unchanged)
           cat > app/src/main/java/com/example/fintrack/Backup.kt <<'EOF_5'
           package com.example.fintrack
 
@@ -163,12 +137,10 @@ jobs:
               val CANONICAL = listOf("Bank", "Account_No", "Txn_Date", "Description", "Ref_No", "Withdrawal", "Deposit", "Category", "UPI_ID")
               private val tables = listOf("txn","payees","net_items","senders","merchant_rules","parse_patterns","nb_words","toll_trips","toll_plazas","payee_tags","loans")
               private val dateFmt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
-
               private fun q(s: String): String {
                   val cleaned = s.replace("\r", " ").replace("\n", " ").replace("\"", "\"\"")
                   return "\"" + cleaned + "\""
               }
-
               fun export(ctx: Context): String {
                   val db = Db.get(ctx).readableDatabase
                   val sb = StringBuilder()
@@ -205,7 +177,6 @@ jobs:
                   }
                   return sb.toString()
               }
-
               private fun parseLine(line: String): List<String?> {
                   val out = ArrayList<String?>(); val sb = StringBuilder()
                   var inQ = false; var quoted = false; var i = 0
@@ -221,7 +192,6 @@ jobs:
                   out.add(if (!quoted && sb.isEmpty()) null else sb.toString())
                   return out
               }
-
               fun restore(ctx: Context, text: String): Int {
                   val db = Db.get(ctx).writableDatabase
                   var n = 0; var table: String? = null; var cols: List<String>? = null
@@ -411,7 +381,6 @@ jobs:
           }
           EOF_6
 
-          # Learner.kt — same
           cat > app/src/main/java/com/example/fintrack/Learner.kt <<'EOF_7'
           package com.example.fintrack
 
@@ -1199,7 +1168,7 @@ jobs:
           EOF_16
 
           # ============================================================
-          # Widgets.kt — no duplicate `dp` helper, uses Context.dp from Ui.kt
+          # Widgets.kt — FIXED: use context.dp() instead of dp()
           # ============================================================
           cat > app/src/main/java/com/example/fintrack/Widgets.kt <<'EOF_W'
           package com.example.fintrack
@@ -1213,7 +1182,6 @@ jobs:
           import android.util.AttributeSet
           import android.view.View
           import android.view.animation.DecelerateInterpolator
-          import kotlin.math.max
           import kotlin.math.min
 
           class SpendRingView @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) {
@@ -1298,12 +1266,14 @@ jobs:
               }
           }
 
+          // FIX: uses context.dp() instead of dp() — dp is a Context extension
           class HeatmapStripView @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) {
               var values: IntArray = IntArray(30)
               var maxValue: Int = 1
               override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
                   super.onMeasure(widthMeasureSpec, heightMeasureSpec)
-                  setMeasuredDimension(MeasureSpec.getSize(widthMeasureSpec), (dp(34)).toInt())
+                  val h = (context.dp(34))
+                  setMeasuredDimension(MeasureSpec.getSize(widthMeasureSpec), h)
               }
               override fun onDraw(canvas: Canvas) {
                   super.onDraw(canvas)
@@ -1358,7 +1328,6 @@ jobs:
           }
           EOF_W
 
-          # PdfReport.kt
           cat > app/src/main/java/com/example/fintrack/PdfReport.kt <<'EOF_PDF'
           package com.example.fintrack
 
@@ -1451,9 +1420,6 @@ jobs:
           }
           EOF_PDF
 
-          # ============================================================
-          # MainActivity.kt — no Snackbar/Material; toast-based undo
-          # ============================================================
           cat > app/src/main/java/com/example/fintrack/MainActivity.kt <<'EOF_17'
           package com.example.fintrack
 
@@ -1517,10 +1483,9 @@ jobs:
                   }
                   window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
 
-                  // OSM config — explicit User-Agent for tile usage policy
                   try {
                       org.osmdroid.config.Configuration.getInstance().apply {
-                          userAgentValue = "FinTrack/8.1 (com.example.fintrack; Android)"
+                          userAgentValue = "FinTrack/8.2 (com.example.fintrack; Android)"
                           load(this@MainActivity, getSharedPreferences("osmdroid", MODE_PRIVATE))
                       }
                   } catch (e: Exception) { }
@@ -1555,7 +1520,6 @@ jobs:
                   }
                   root.addView(main)
 
-                  // FAB
                   val fab = TextView(this).apply {
                       text = "+"; textSize = 32f; setTextColor(android.graphics.Color.WHITE); gravity = Gravity.CENTER
                       setBackgroundColor(C.ACCENT); setPadding(0,0,0,0); elevation = 12f
@@ -1639,7 +1603,6 @@ jobs:
               fun refreshAll() { if (unlocked) screens[cur].refresh() }
               fun toast(m: String) = Toast.makeText(this, m, Toast.LENGTH_LONG).show()
 
-              // Toast-based undo (#14): shows a message + Undo button
               fun undo(message: String, onUndo: () -> Unit) {
                   val col = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(14), dp(10), dp(14), dp(10)); background = shape(C.CARD2, 12) }
                   col.addView(tv(message, 13f, C.TEXT).apply { gravity = Gravity.CENTER_VERTICAL })
@@ -1786,7 +1749,7 @@ jobs:
           EOF_17
 
           # ============================================================
-          # Screens1.kt — recursive-when fix, swipe listener fix
+          # Screens1.kt — FIXED: lateinit list + init block
           # ============================================================
           cat > app/src/main/java/com/example/fintrack/Screens1.kt <<'EOF_18'
           package com.example.fintrack
@@ -1951,6 +1914,9 @@ jobs:
               }
           }
 
+          // ============================================================
+          // LedgerScreen with fixed init order (lateinit list + init block)
+          // ============================================================
           class LedgerScreen(act: MainActivity) : Screen(act) {
               data class Filter(val mode: String = "all", val category: String? = null, val year: Int? = null, val month: Int? = null)
               private var filter = Filter(); private var query = ""; private var selectMode = false
@@ -1985,35 +1951,43 @@ jobs:
                       }
                   }
               }
-              private val list: ListView = ListView(act).apply {
-                  divider = null; adapter = this@LedgerScreen.adapter
-                  setOnItemClickListener { _, _, pos, _ ->
-                      when (val item = this@LedgerScreen.adapter.items.getOrNull(pos)) {
-                          is Row.TxnRow -> { if (selectMode) { if (!selected.add(item.t.id)) selected.remove(item.t.id); this@LedgerScreen.adapter.notifyDataSetChanged() } else showTxn(item.t) }
-                          is Row.GroupRow -> openGroupFix(item)
-                          is Row.DupGroupRow -> openDupPicker(item.g)
-                          null -> {}
+
+              // FIX: lateinit + init block so `list` can reference itself
+              private lateinit var list: ListView
+
+              init {
+                  list = ListView(act).apply {
+                      divider = null
+                      adapter = this@LedgerScreen.adapter
+                      setOnItemClickListener { _, _, pos, _ ->
+                          when (val item = this@LedgerScreen.adapter.items.getOrNull(pos)) {
+                              is Row.TxnRow -> { if (selectMode) { if (!selected.add(item.t.id)) selected.remove(item.t.id); this@LedgerScreen.adapter.notifyDataSetChanged() } else showTxn(item.t) }
+                              is Row.GroupRow -> openGroupFix(item)
+                              is Row.DupGroupRow -> openDupPicker(item.g)
+                              null -> {}
+                          }
+                      }
+                      setOnItemLongClickListener { _, _, pos, _ ->
+                          val item = this@LedgerScreen.adapter.items.getOrNull(pos) as? Row.TxnRow ?: return@setOnItemLongClickListener false
+                          selectMode = true; selected.add(item.t.id); this@LedgerScreen.adapter.notifyDataSetChanged(); true
                       }
                   }
-                  setOnItemLongClickListener { _, _, pos, _ ->
-                      val item = this@LedgerScreen.adapter.items.getOrNull(pos) as? Row.TxnRow ?: return@setOnItemLongClickListener false
-                      selectMode = true; selected.add(item.t.id); this@LedgerScreen.adapter.notifyDataSetChanged(); true
-                  }
-                  setOnTouchListener(object : View.OnTouchListener {
+                  // Now `list` is assigned, set the touch listener in a separate statement
+                  list.setOnTouchListener(object : View.OnTouchListener {
                       private var downX = 0f
                       private var downY = 0f
                       private var rowPos = -1
                       override fun onTouch(v: View, e: MotionEvent): Boolean {
                           when (e.action) {
-                              MotionEvent.ACTION_DOWN -> { downX = e.x; downY = e.y; rowPos = list.pointToPosition(e.x.toInt(), e.y.toInt()) }
+                              MotionEvent.ACTION_DOWN -> {
+                                  downX = e.x; downY = e.y
+                                  rowPos = list.pointToPosition(e.x.toInt(), e.y.toInt())
+                              }
                               MotionEvent.ACTION_UP -> {
                                   val dx = e.x - downX
                                   if (Math.abs(dx) > 220 && Math.abs(e.y - downY) < 80 && rowPos >= 0) {
                                       val item = this@LedgerScreen.adapter.items.getOrNull(rowPos) as? Row.TxnRow
-                                      if (item != null) {
-                                          if (dx > 0) quickCategorize(item.t) else quickCategorize(item.t)
-                                          return true
-                                      }
+                                      if (item != null) { quickCategorize(item.t); return true }
                                   }
                               }
                           }
@@ -2021,6 +1995,7 @@ jobs:
                       }
                   })
               }
+
               override val root: View = act.vbox().apply {
                   val search = EditText(act).apply {
                       hint = "Search · #cat · >500 · <2024-06"; setHintTextColor(C.MUTED); setTextColor(C.TEXT); setSingleLine()
@@ -2185,9 +2160,6 @@ jobs:
           }
           EOF_18
 
-          # ============================================================
-          # Screens2.kt — CartoDB Positron tiles (fix 403), attribution
-          # ============================================================
           cat > app/src/main/java/com/example/fintrack/Screens2.kt <<'EOF_19'
           package com.example.fintrack
 
@@ -2211,12 +2183,10 @@ jobs:
           import org.osmdroid.views.MapView
           import org.osmdroid.views.overlay.Marker
           import org.osmdroid.views.overlay.Polyline
-          import org.osmdroid.views.overlay.TilesOverlay
           import java.text.SimpleDateFormat
           import java.util.Date
           import java.util.Locale
 
-          // CartoDB Positron — real OSM data, generous free tier, no API key
           private val CARTO_POSITRON = object : OnlineTileSourceBase(
               "CartoDB Positron", 0, 20, 256, ".png",
               arrayOf("https://a.basemaps.cartocdn.com/light_all/",
@@ -2342,7 +2312,6 @@ jobs:
               private val adapter = RowAdapter<Map<String, String?>>(act, emptyList()) { p, r ->
                   val key = p["k"] ?: ""
                   val name = p["display"] ?: ""
-                  val initials = name.split(" ").filter { it.isNotEmpty() }.take(2).joinToString("") { it.first().uppercase() }.ifBlank { "?" }
                   val hash = name.hashCode()
                   val colors = intArrayOf(Color.parseColor("#5B9CFF"), Color.parseColor("#34D399"), Color.parseColor("#FBBF24"), Color.parseColor("#C084FC"), Color.parseColor("#22D3EE"))
                   val avatarCol = colors[Math.abs(hash) % colors.size]
@@ -2452,7 +2421,6 @@ jobs:
           class MoneyScreen(act: MainActivity) : Screen(act) {
               private val body = act.vbox(14)
               override val root: View = ScrollView(act).apply { addView(body) }
-
               override fun refresh() {
                   body.removeAllViews()
                   val db = Db.get(act)
@@ -2635,7 +2603,7 @@ jobs:
           }
           EOF_21
 
-          # Vector drawables (same as before)
+          # Vector drawables
           cat > app/src/main/res/drawable/ic_bank.xml <<'EOF_D0'
           <?xml version="1.0" encoding="utf-8"?>
           <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
@@ -2719,8 +2687,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="v8.1.${{ github.run_number }}"
+          VERSION="v8.2.${{ github.run_number }}"
           gh release create "$VERSION" /tmp/proj/app/build/outputs/apk/debug/app-debug.apk \
             --repo "${{ github.repository }}" \
             --title "FinTrack Build ${{ github.run_number }}" \
-            --notes "v8.1: compile fixes (Snackbar removal, recursive-when fix, duplicate dp removal) + map 403 fix (CartoDB Positron tiles with proper attribution)."
+            --notes "v8.2: 2 compile fixes — LedgerScreen.list is now lateinit with init block (fixes self-reference); Widgets.kt uses context.dp() (fixes receiver mismatch). All v8.1 features preserved."
