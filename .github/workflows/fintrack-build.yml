@@ -61,8 +61,8 @@ jobs:
                   applicationId = "com.example.fintrack"
                   minSdk = 30
                   targetSdk = 33
-                  versionCode = 18
-                  versionName = "10.0"
+                  versionCode = 19
+                  versionName = "10.1"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -274,7 +274,7 @@ jobs:
               var note: String? = null, var voicePath: String? = null
           )
 
-          class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "fintrack.db", null, 7) {
+          class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "fintrack.db", null, 8) {
               companion object {
                   @Volatile private var inst: Db? = null
                   fun get(ctx: Context): Db = inst ?: synchronized(this) { inst ?: Db(ctx.applicationContext).also { inst = it } }
@@ -299,8 +299,15 @@ jobs:
                   db.execSQL("CREATE TABLE payee_tags (merchant_key TEXT, tag TEXT, note TEXT, PRIMARY KEY(merchant_key, tag))")
                   db.execSQL("CREATE TABLE txn_skipped (id INTEGER PRIMARY KEY AUTOINCREMENT, reason TEXT, ref TEXT, body TEXT, ts INTEGER)")
                   db.execSQL("CREATE TABLE subs_detected (merchant_key TEXT PRIMARY KEY, avg_amt REAL, last_ts INTEGER, count INTEGER)")
-                  // NEW: payee_merges logs every merge for undo
                   db.execSQL("CREATE TABLE payee_merges (id INTEGER PRIMARY KEY AUTOINCREMENT, survivor_key TEXT, merged_keys TEXT, survivor_name TEXT, merged_at INTEGER, undone INTEGER DEFAULT 0)")
+                  seedTollPlazas(db)
+              }
+              private fun seedTollPlazas(db: SQLiteDatabase) {
+                  var sid = 1000
+                  for ((name, lonLat) in Tolls.TOLL_SEED) {
+                      db.execSQL("INSERT OR IGNORE INTO toll_plazas(plaza_id, name, state, nh, lat, lon, car_fare) VALUES(?,?,?,?,?,?,?)",
+                          arrayOf(sid++, name, "", "", lonLat[1], lonLat[0], 0.0))
+                  }
               }
               override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
                   if (oldVersion < 2) db.execSQL("CREATE TABLE IF NOT EXISTS toll_plazas (plaza_id INTEGER PRIMARY KEY, name TEXT, state TEXT, nh TEXT, lat REAL, lon REAL, car_fare REAL)")
@@ -327,6 +334,10 @@ jobs:
                   }
                   if (oldVersion < 7) {
                       db.execSQL("CREATE TABLE IF NOT EXISTS payee_merges (id INTEGER PRIMARY KEY AUTOINCREMENT, survivor_key TEXT, merged_keys TEXT, survivor_name TEXT, merged_at INTEGER, undone INTEGER DEFAULT 0)")
+                  }
+                  if (oldVersion < 8) {
+                      val hasAny = db.rawQuery("SELECT COUNT(*) FROM toll_plazas", null).use { c -> c.moveToFirst(); c.getLong(0) }
+                      if (hasAny == 0L) seedTollPlazas(db)
                   }
               }
               fun rows(sql: String, vararg args: String): List<Map<String, String?>> {
@@ -963,7 +974,6 @@ jobs:
               }
           }
 
-          // NEW: scan report with counters
           data class ScanReport(val scanned: Int, val imported: Int, val duplicates: Int, val ignored: Int, val maxTs: Long)
 
           object SmsImport {
@@ -1081,16 +1091,60 @@ jobs:
           package com.example.fintrack
 
           import android.content.Context
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+          import java.util.concurrent.ConcurrentHashMap
 
-          data class Plaza(val id: Int, val name: String, val state: String, val nh: String, val lat: Double, val lon: Double, val car: Double?, val toks: Set<String>)
+          data class Plaza(
+              val id: Int,
+              val name: String,
+              val state: String,
+              val nh: String,
+              val lat: Double,
+              val lon: Double,
+              val car: Double?,
+              val toks: Set<String>
+          )
+
+          data class TollCheckpoint(
+              val plaza: String,
+              val ts: Long,
+              val amount: Double,
+              val lat: Double,
+              val lon: Double
+          )
+
+          data class TollTrip(
+              val tripId: Int,
+              val direction: String,
+              val dayKey: String,
+              val title: String,
+              val total: Double,
+              val checkpoints: List<TollCheckpoint>,
+              val roadPolyline: List<DoubleArray>
+          )
 
           object Tolls {
+              val TOLL_SEED: Map<String, DoubleArray> = linkedMapOf(
+                  "Nawabganj Toll Plaza"    to doubleArrayOf(80.6591, 26.6214),
+                  "Shahabpur Toll Plaza"    to doubleArrayOf(81.1422, 26.7845),
+                  "Aaini Toll Plaza"        to doubleArrayOf(81.9845, 26.8012),
+                  "Newada Toll Plaza"       to doubleArrayOf(81.1234, 26.5120),
+                  "Basheerapur Toll Plaza"  to doubleArrayOf(81.6789, 26.2345),
+                  "Tarwa Deva"              to doubleArrayOf(82.1234, 25.9876)
+              )
+
               private var index: Map<String, List<Plaza>> = emptyMap()
               private var loaded = false
               private val stop = setOf("toll","plaza","tp","the","road","ltd","pvt","and","bridge","gate","check","post")
               private val splitRe = Regex("""[^a-z0-9]+""")
-              private val aliases = mapOf("anantram" to "anatram", "anatram" to "anatram")
-              private fun toks(s: String): Set<String> = s.lowercase().split(splitRe).filter { it.length >= 3 && it !in stop }.toSet()
+              private val aliases = mapOf("anantram" to "anatram")
+
+              private fun toks(s: String): Set<String> =
+                  s.lowercase().split(splitRe).filter { it.length >= 3 && it !in stop }.toSet()
 
               @Synchronized
               fun load(ctx: Context) {
@@ -1103,11 +1157,15 @@ jobs:
                           val name = r["name"] ?: continue
                           val tk = toks(name); if (tk.isEmpty()) continue
                           val car = r["car_fare"]?.toDoubleOrNull()
-                          val p = Plaza(r["plaza_id"]?.toIntOrNull() ?: 0, name, r["state"] ?: "", r["nh"] ?: "",
-                              r["lat"]?.toDoubleOrNull() ?: 0.0, r["lon"]?.toDoubleOrNull() ?: 0.0, car, tk)
+                          val p = Plaza(
+                              r["plaza_id"]?.toIntOrNull() ?: 0, name, r["state"] ?: "", r["nh"] ?: "",
+                              r["lat"]?.toDoubleOrNull() ?: 0.0,
+                              r["lon"]?.toDoubleOrNull() ?: 0.0,
+                              car, tk
+                          )
                           for (t in tk) idx.getOrPut(t) { ArrayList() }.add(p)
                       }
-                  } catch (e: Exception) {}
+                  } catch (_: Exception) {}
                   index = idx; loaded = true
               }
 
@@ -1142,12 +1200,16 @@ jobs:
                   val p = match(ctx, t.merchant + " " + t.body, t.amount)
                   val veh = vehicleRe.find(t.body.uppercase())?.groupValues?.get(1)
                   if (p != null) {
-                      db.exec("INSERT OR REPLACE INTO toll_trips(txn_id, plaza_id, plaza, state, lat, lon, ts, amount, vehicle) VALUES(?,?,?,?,?,?,?,?,?)",
-                          t.id, p.id, p.name, p.state, p.lat, p.lon, t.ts, t.amount, veh)
+                      db.exec(
+                          "INSERT OR REPLACE INTO toll_trips(txn_id, plaza_id, plaza, state, lat, lon, ts, amount, vehicle) VALUES(?,?,?,?,?,?,?,?,?)",
+                          t.id, p.id, p.name, p.state, p.lat, p.lon, t.ts, t.amount, veh
+                      )
                   } else {
                       val plazaFromBody = plazaNameRe.find(t.body)?.groupValues?.get(1)?.trim() ?: t.merchant
-                      db.exec("INSERT OR REPLACE INTO toll_trips(txn_id, plaza_id, plaza, state, lat, lon, ts, amount, vehicle) VALUES(?,?,?,?,?,?,?,?,?)",
-                          t.id, 0, plazaFromBody, "", 0.0, 0.0, t.ts, t.amount, veh)
+                      db.exec(
+                          "INSERT OR REPLACE INTO toll_trips(txn_id, plaza_id, plaza, state, lat, lon, ts, amount, vehicle) VALUES(?,?,?,?,?,?,?,?,?)",
+                          t.id, 0, plazaFromBody, "", 0.0, 0.0, t.ts, t.amount, veh
+                      )
                   }
               }
 
@@ -1159,6 +1221,106 @@ jobs:
                   for (t in list) { record(ctx, t); n++ }
                   return n
               }
+
+              private val dayFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+
+              private fun plazaCoord(name: String): DoubleArray? {
+                  TOLL_SEED[name]?.let { return it }
+                  for ((k, v) in TOLL_SEED) if (k.equals(name, ignoreCase = true)) return v
+                  return null
+              }
+
+              fun fetchRoadRoute(waypoints: List<DoubleArray>): List<DoubleArray> {
+                  if (waypoints.size < 2) return waypoints.map { doubleArrayOf(it[1], it[0]) }
+                  return try {
+                      val coords = waypoints.joinToString(";") { "${it[0]},${it[1]}" }
+                      val url = URL("https://router.project-osrm.org/route/v1/driving/$coords?overview=full&geometries=polyline")
+                      val conn = url.openConnection() as HttpURLConnection
+                      conn.requestMethod = "GET"
+                      conn.connectTimeout = 8000
+                      conn.readTimeout = 8000
+                      conn.setRequestProperty("User-Agent", "FinTrack/10.1")
+                      if (conn.responseCode != 200) throw RuntimeException("OSRM HTTP ${conn.responseCode}")
+                      val txt = conn.inputStream.bufferedReader().use { it.readText() }
+                      val json = org.json.JSONObject(txt)
+                      if (json.optString("code") != "Ok") throw RuntimeException("OSRM not Ok")
+                      val routes = json.optJSONArray("routes")
+                      if (routes == null || routes.length() == 0) throw RuntimeException("No routes")
+                      val geom = routes.getJSONObject(0).optString("geometry", "")
+                      if (geom.isBlank()) throw RuntimeException("No geometry")
+                      decodePolyline(geom)
+                  } catch (_: Exception) {
+                      waypoints.map { doubleArrayOf(it[1], it[0]) }
+                  }
+              }
+
+              fun decodePolyline(encoded: String): List<DoubleArray> {
+                  val points = ArrayList<DoubleArray>()
+                  var index = 0; val len = encoded.length
+                  var lat = 0; var lng = 0
+                  while (index < len) {
+                      var b: Int; var shift = 0; var result = 0
+                      do { b = encoded[index++].code - 63; result = result or ((b and 0x1f) shl shift); shift += 5 } while (b >= 0x20)
+                      val dlat = if (result and 1 != 0) (result shr 1).inv() else (result shr 1)
+                      lat += dlat
+                      shift = 0; result = 0
+                      do { b = encoded[index++].code - 63; result = result or ((b and 0x1f) shl shift); shift += 5 } while (b >= 0x20)
+                      val dlng = if (result and 1 != 0) (result shr 1).inv() else (result shr 1)
+                      lng += dlng
+                      points.add(doubleArrayOf(lat * 1e-5, lng * 1e-5))
+                  }
+                  return points
+              }
+
+              fun buildTrips(ctx: Context): Pair<List<TollTrip>, Double> {
+                  val db = Db.get(ctx)
+                  val rows = db.rows("SELECT plaza, lat, lon, ts, amount FROM toll_trips ORDER BY ts ASC")
+
+                  val events = rows.mapNotNull { r ->
+                      val name = r["plaza"] ?: return@mapNotNull null
+                      val ts = r["ts"]?.toLongOrNull() ?: return@mapNotNull null
+                      val amt = r["amount"]?.toDoubleOrNull() ?: return@mapNotNull null
+                      val seed = plazaCoord(name)
+                      val lat = seed?.get(1) ?: r["lat"]?.toDoubleOrNull() ?: 0.0
+                      val lon = seed?.get(0) ?: r["lon"]?.toDoubleOrNull() ?: 0.0
+                      if (lat == 0.0 || lon == 0.0) return@mapNotNull null
+                      TollCheckpoint(name, ts, amt, lat, lon)
+                  }.sortedBy { it.ts }
+
+                  if (events.isEmpty()) return emptyList<TollTrip>() to 0.0
+
+                  val legs = ArrayList<MutableList<TollCheckpoint>>()
+                  var cur = ArrayList<TollCheckpoint>()
+                  for (ev in events) {
+                      if (cur.isEmpty()) { cur.add(ev); continue }
+                      val prev = cur.last()
+                      val gapMs = ev.ts - prev.ts
+                      val samePlaza = ev.plaza.equals(prev.plaza, ignoreCase = true)
+                      val sameDay = dayFmt.format(Date(ev.ts)) == dayFmt.format(Date(prev.ts))
+                      val uturn = samePlaza
+                      val longGap = gapMs > 6L * 60 * 60 * 1000
+                      val newDay = !sameDay
+                      if (uturn || longGap || newDay) { legs.add(cur); cur = ArrayList() }
+                      cur.add(ev)
+                  }
+                  if (cur.isNotEmpty()) legs.add(cur)
+
+                  val cache = ConcurrentHashMap<String, List<DoubleArray>>()
+                  val trips = ArrayList<TollTrip>()
+                  var total = 0.0
+                  for ((i, leg) in legs.withIndex()) {
+                      val direction = if (i % 2 == 0) "Going" else "Returning"
+                      val waypoints = leg.map { doubleArrayOf(it.lon, it.lat) }
+                      val key = waypoints.joinToString("|") { "${it[0]},${it[1]}" }
+                      val route = cache.getOrPut(key) { fetchRoadRoute(waypoints) }
+                      val legTotal = leg.sumOf { it.amount }
+                      total += legTotal
+                      val title = leg.joinToString(" → ") { it.plaza }
+                      val day = dayFmt.format(Date(leg.first().ts))
+                      trips.add(TollTrip(i + 1, direction, day, title, legTotal, leg.toList(), route))
+                  }
+                  return trips to total
+              }
           }
           EOF_15
 
@@ -1169,7 +1331,6 @@ jobs:
           import android.content.Context
 
           object PayeeOps {
-              // MERGE — now logs to payee_merges for undo
               fun merge(ctx: Context, keys: List<String>, survivorKey: String, survivorName: String) {
                   if (keys.size < 2) return
                   val db = Db.get(ctx); val w = db.writableDatabase
@@ -1191,14 +1352,12 @@ jobs:
                       w.execSQL("INSERT OR REPLACE INTO payees(merchant_key, display, upi_id, alt_upis) VALUES(?,?,?,?)",
                           arrayOf(survivorKey, survivorName, survivorUpi ?: "", allAlt))
                       w.delete("payees", "merchant_key IN ($marks) AND merchant_key != ?", (keys + survivorKey).toTypedArray())
-                      // NEW: log the merge
                       w.execSQL("INSERT INTO payee_merges(survivor_key, merged_keys, survivor_name, merged_at, undone) VALUES(?,?,?,?,0)",
                           arrayOf(survivorKey, keys.joinToString("\u0001"), survivorName, System.currentTimeMillis()))
                       w.setTransactionSuccessful()
                   } finally { w.endTransaction() }
               }
 
-              // NEW: unmerge last merge (or all undos)
               fun undoLastMerge(ctx: Context): Boolean {
                   val db = Db.get(ctx); val w = db.writableDatabase
                   val row = db.rows("SELECT id, survivor_key, merged_keys, survivor_name FROM payee_merges WHERE undone=0 ORDER BY id DESC LIMIT 1").firstOrNull() ?: return false
@@ -1208,8 +1367,6 @@ jobs:
                   val mergedKeys = (row["merged_keys"] ?: "").split("\u0001").filter { it.isNotBlank() }
                   w.beginTransaction()
                   try {
-                      // Best-effort: we can only restore the display name back to original merchant text
-                      // For each merged key, restore its own payee row and re-point txn rows whose merchant matches the survivor display
                       for (k in mergedKeys) {
                           w.execSQL("INSERT OR IGNORE INTO payees(merchant_key, display) VALUES(?,?)", arrayOf(k, k))
                           w.execSQL("UPDATE txn SET merchant_key=? WHERE merchant_key=? AND merchant=?", arrayOf(k, survivorKey, survivorName))
@@ -1220,7 +1377,6 @@ jobs:
                   return true
               }
 
-              // NEW: bulk-reassign all txns of a set of merchant keys into a new payee
               fun reassignToPayee(ctx: Context, fromKeys: List<String>, newKey: String, newName: String) {
                   if (fromKeys.isEmpty()) return
                   val db = Db.get(ctx); val w = db.writableDatabase
@@ -1230,7 +1386,6 @@ jobs:
                       val cv = ContentValues().apply { put("merchant_key", newKey); put("merchant", newName); put("status", "USER"); put("review", 0); putNull("review_hash") }
                       w.update("txn", cv, "merchant_key IN ($marks)", fromKeys.toTypedArray())
                       w.execSQL("INSERT OR IGNORE INTO payees(merchant_key, display) VALUES(?,?)", arrayOf(newKey, newName))
-                      // If user typed the name of an existing payee, migrate their other txns onto the new name/key too
                       w.execSQL("UPDATE txn SET merchant=? WHERE merchant_key=?", arrayOf(newName, newKey))
                       w.setTransactionSuccessful()
                   } finally { w.endTransaction() }
@@ -1337,9 +1492,6 @@ jobs:
                   return sorted.drop(1).map { it.id }
               }
 
-              // NEW: smart filter just for a single payee's transaction list.
-              // Rule: same date + same amount + same direction + one has 00:00, other has real time.
-              // Auto-tick the 00:00 one for deletion.
               fun smartMidnightDeleteIds(txns: List<Txn>): Set<Long> {
                   val toDelete = HashSet<Long>()
                   val buckets = LinkedHashMap<String, MutableList<Txn>>()
@@ -1775,7 +1927,7 @@ jobs:
                   window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
                   try {
                       org.osmdroid.config.Configuration.getInstance().apply {
-                          userAgentValue = "FinTrack/10.0 (com.example.fintrack; Android)"
+                          userAgentValue = "FinTrack/10.1 (com.example.fintrack; Android)"
                           tileFileSystemCacheMaxBytes = 600L * 1024 * 1024
                           tileFileSystemCacheTrimBytes = 500L * 1024 * 1024
                           load(this@MainActivity, getSharedPreferences("osmdroid", MODE_PRIVATE))
@@ -1825,7 +1977,6 @@ jobs:
               private fun lock() { unlocked = false; lockView.visibility = View.VISIBLE }
               private fun unlock() {
                   unlocked = true; lockView.visibility = View.GONE; refreshAll()
-                  // NEW: first-run onboarding
                   val prefs = getSharedPreferences("fin", MODE_PRIVATE)
                   if (!prefs.getBoolean("onboarded_v10", false)) {
                       prefs.edit().putBoolean("onboarded_v10", true).apply()
@@ -1931,7 +2082,6 @@ jobs:
               }
               fun pickRestore() { openDoc.launch(arrayOf("text/*", "application/csv", "application/vnd.ms-excel", "*/*")) }
 
-              // Restore, then set the SMS cutoff to the max restored timestamp
               private fun afterRestore(text: String) {
                   val n = Backup.restore(applicationContext, text)
                   val maxTs = Db.get(applicationContext).one("SELECT MAX(ts) FROM txn")?.toLongOrNull() ?: 0L
@@ -1971,7 +2121,6 @@ jobs:
                   }.start()
               }
 
-              // NEW: first-run restore path — sets cutoff on the restored txns
               private fun doFirstRunRestore(uri: Uri) {
                   Thread {
                       try {
@@ -2040,12 +2189,6 @@ jobs:
           }
           EOF_19
 
-          # ============================================================
-          # Screens1.kt
-          # NEW:
-          #  - Ledger "Merge to payee" chip when query active
-          #  - Payee detail: smart midnight dedupe button
-          # ============================================================
           cat > app/src/main/java/com/example/fintrack/Screens1.kt <<'EOF_20'
           package com.example.fintrack
 
@@ -2212,7 +2355,6 @@ jobs:
                       chips.addView(act.pill(label, true) { filter = filter.copy(year = null, month = null); refresh() })
                   }
                   chips.addView(act.pill("Scan duplicates", false) { showDuplicates() })
-                  // NEW: bulk-merge chip appears when a query is typed
                   if (query.isNotBlank()) chips.addView(act.pill("Merge to payee", false) { askBulkMerge() })
                   if (selectMode) {
                       chips.addView(act.pill("Delete (${selected.size})", true) { act.bulkDelete(selected.toList()); selectMode = false; selected.clear(); refresh() })
@@ -2234,7 +2376,6 @@ jobs:
                   adapter.notifyDataSetChanged()
               }
 
-              // returns the same list that drives the adapter, useful for merge
               private fun currentRows(): List<Txn> {
                   val where = StringBuilder("1=1"); val args = ArrayList<String>()
                   when (filter.mode) { "debit" -> where.append(" AND debit=1"); "credit" -> where.append(" AND debit=0"); "cat" -> { where.append(" AND category=?"); args.add(filter.category ?: "") } }
@@ -2263,7 +2404,6 @@ jobs:
                   return Db.get(act).queryTxns(where.toString(), args.toTypedArray(), 1000)
               }
 
-              // NEW: bulk-merge from a search
               private fun askBulkMerge() {
                   val rows = currentRows()
                   if (rows.isEmpty()) { act.toast("Is search me kuch nahi mila"); return }
@@ -2388,12 +2528,6 @@ jobs:
           }
           EOF_20
 
-          # ============================================================
-          # Screens2.kt
-          # NEW:
-          #  - Payee detail: "Auto-tick 00:00 dups" button
-          #  - Payee screen: "Unmerge last" chip
-          # ============================================================
           cat > app/src/main/java/com/example/fintrack/Screens2.kt <<'EOF_21'
           package com.example.fintrack
 
@@ -2436,87 +2570,117 @@ jobs:
 
           class RouteMapView @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? = null) : MapView(ctx, attrs) {
               class Pt(val lat: Double, val lon: Double, val label: String, val ts: Long)
-              init { setTileSource(OSMFR_HOT); setMultiTouchControls(true); setBuiltInZoomControls(false); controller.setZoom(5.0); controller.setCenter(GeoPoint(22.0, 79.0)); try { overlayManager.tilesOverlay.setColorFilter(null) } catch (e: Exception) {} }
-              fun setTrips(trips: List<List<Pt>>) {
+              class Trip(val direction: String, val checkpoints: List<Pt>, val roadPolyline: List<DoubleArray>)
+
+              init {
+                  setTileSource(OSMFR_HOT)
+                  setMultiTouchControls(true)
+                  setBuiltInZoomControls(false)
+                  controller.setZoom(5.0)
+                  controller.setCenter(GeoPoint(22.0, 79.0))
+                  try { overlayManager.tilesOverlay.setColorFilter(null) } catch (_: Exception) {}
+              }
+
+              fun setTrips(trips: List<Trip>) {
                   overlays.clear()
-                  val allPoints = trips.flatten().filter { it.lat != 0.0 && it.lon != 0.0 }
-                  if (allPoints.isEmpty()) { controller.setCenter(GeoPoint(22.0, 79.0)); controller.setZoom(5.0); invalidate(); return }
-                  for ((tripIndex, rawTrip) in trips.withIndex()) {
-                      val trip = rawTrip.filter { it.lat != 0.0 && it.lon != 0.0 }.sortedBy { it.ts }
-                      if (trip.isEmpty()) continue
-                      if (trip.size == 1) { addPin(trip[0], "📍"); continue }
-                      val start = trip.first()
-                      var farIdx = 0; var maxDist = 0.0
-                      for (k in trip.indices) { val d = haversine(start, trip[k]); if (d > maxDist) { maxDist = d; farIdx = k } }
-                      val outbound = trip.subList(0, farIdx + 1); val returning = trip.subList(farIdx, trip.size)
-                      val outPts = if (outbound.size >= 2) outbound else trip.subList(0, (trip.size / 2) + 1)
-                      val retPts = if (returning.size >= 2) returning else trip.subList(trip.size / 2, trip.size)
-                      addPolyline(outPts, Color.parseColor("#10B981"))
-                      if (retPts.size >= 2 && farIdx > 0 && farIdx < trip.size - 1) addPolyline(retPts, Color.parseColor("#DC2626"))
-                      for ((i, p) in trip.withIndex()) addPin(p, if (i == 0) "🟢 Start" else if (i == trip.size - 1) "🔴 End" else "📍")
+                  val allPts = ArrayList<GeoPoint>()
+                  for (trip in trips) {
+                      val isGoing = trip.direction == "Going"
+                      val color = if (isGoing) Color.parseColor("#2563EB") else Color.parseColor("#DC2626")
+                      if (trip.roadPolyline.size >= 2) {
+                          val polyline = Polyline()
+                          polyline.setPoints(trip.roadPolyline.map { GeoPoint(it[0], it[1]) })
+                          polyline.outlinePaint.color = color
+                          polyline.outlinePaint.strokeWidth = if (isGoing) 12f else 8f
+                          if (!isGoing) {
+                              val dash = Polyline()
+                              dash.setPoints(trip.roadPolyline.map { GeoPoint(it[0], it[1]) })
+                              dash.outlinePaint.color = Color.argb(120, 255, 255, 255)
+                              dash.outlinePaint.strokeWidth = 3f
+                              overlays.add(dash)
+                          }
+                          overlays.add(polyline)
+                      }
+                      for (cp in trip.checkpoints) {
+                          allPts.add(GeoPoint(cp.lat, cp.lon))
+                          val m = Marker(this)
+                          m.position = GeoPoint(cp.lat, cp.lon)
+                          m.title = "${if (isGoing) "🟢" else "🔴"} ${cp.label}"
+                          m.snippet = SimpleDateFormat("HH:mm", Locale.US).format(Date(cp.ts))
+                          m.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                          overlays.add(m)
+                      }
                   }
-                  try { val bbox = BoundingBox.fromGeoPoints(allPoints.map { GeoPoint(it.lat, it.lon) }); zoomToBoundingBox(bbox, true, 80) }
-                  catch (e: Exception) { controller.setCenter(GeoPoint(allPoints.first().lat, allPoints.first().lon)); controller.setZoom(7.0) }
+                  if (allPts.isNotEmpty()) {
+                      try {
+                          val bbox = BoundingBox.fromGeoPoints(allPts)
+                          zoomToBoundingBox(bbox, true, 80)
+                      } catch (_: Exception) {}
+                  }
                   invalidate()
-              }
-              private fun haversine(a: Pt, b: Pt): Double {
-                  val R = 6371.0
-                  val dLat = Math.toRadians(b.lat - a.lat); val dLon = Math.toRadians(b.lon - a.lon)
-                  val la1 = Math.toRadians(a.lat); val la2 = Math.toRadians(b.lat)
-                  val x = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(la1) * Math.cos(la2) * Math.sin(dLon / 2) * Math.sin(dLon / 2)
-                  return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x))
-              }
-              private fun addPolyline(points: List<Pt>, color: Int) {
-                  val line = Polyline(); line.setPoints(points.map { GeoPoint(it.lat, it.lon) })
-                  line.outlinePaint.color = color; line.outlinePaint.strokeWidth = 10f
-                  overlays.add(line)
-              }
-              private fun addPin(p: Pt, labelPrefix: String) {
-                  val m = Marker(this); m.position = GeoPoint(p.lat, p.lon)
-                  val time = SimpleDateFormat("HH:mm", Locale.US).format(Date(p.ts))
-                  m.title = "$labelPrefix ${p.label}"; m.snippet = time
-                  m.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM); overlays.add(m)
               }
           }
 
           class TravelScreen(act: MainActivity) : Screen(act) {
-              private var selDate: String? = null
+              private var selDay: String? = null
+              private var trips: List<TollTrip> = emptyList()
+              private var total = 0.0
               private val summary = act.tv("", 13f, C.MUTED).apply { setPadding(act.dp(14), act.dp(8), act.dp(14), act.dp(2)) }
               private val chips = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; setPadding(act.dp(8), 0, act.dp(8), 0) }
               private val map = RouteMapView(act)
               private val detail = act.vbox(10)
-              private val dateFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+
               override val root: View = act.vbox().apply {
                   put(summary, 0)
                   put(HorizontalScrollView(act).apply { isHorizontalScrollBarEnabled = false; addView(chips) }, 2)
-                  put(map, 4); (getChildAt(childCount - 1).layoutParams as LinearLayout.LayoutParams).height = act.dp(340)
+                  put(map, 4); (getChildAt(childCount - 1).layoutParams as LinearLayout.LayoutParams).height = act.dp(360)
                   put(ScrollView(act).apply { addView(detail) }, 4, 1f)
               }
+
               override fun refresh() {
-                  val db = Db.get(act)
-                  val rows = db.rows("SELECT * FROM toll_trips ORDER BY ts ASC")
-                  val byDate = LinkedHashMap<String, MutableList<Map<String, String?>>>()
-                  for (r in rows) { val ts = r["ts"]?.toLongOrNull() ?: 0L; byDate.getOrPut(dateFmt.format(Date(ts))) { ArrayList() }.add(r) }
-                  val total = rows.sumOf { it["amount"]?.toDoubleOrNull() ?: 0.0 }
-                  summary.text = "${byDate.size} din  •  ${rows.size} tolls  •  Total ${inr(total)}\n🟢 going, 🔴 return"
-                  chips.removeAllViews()
-                  chips.addView(act.pill("All", selDate == null) { selDate = null; refresh() })
-                  for (d in byDate.keys.toList().reversed().take(30)) chips.addView(act.pill(d, selDate == d) { selDate = d; refresh() })
-                  chips.addView(act.pill("Fix Toll SMS", false) { Thread { val n = Tolls.rematchAll(act); act.runOnUiThread { act.toast("$n toll txns re-matched"); refresh() } }.start() })
-                  chips.addView(act.pill("Reload tiles", false) { map.invalidate(); act.toast("Tile cache reloaded") })
-                  val chosenDates = if (selDate == null) byDate.keys.toList() else listOf(selDate!!)
-                  map.setTrips(chosenDates.map { d -> (byDate[d] ?: emptyList()).sortedBy { it["ts"]?.toLongOrNull() ?: 0L }.map { RouteMapView.Pt(it["lat"]?.toDoubleOrNull() ?: 0.0, it["lon"]?.toDoubleOrNull() ?: 0.0, it["plaza"] ?: "", it["ts"]?.toLongOrNull() ?: 0L) } })
-                  detail.removeAllViews()
-                  for (d in chosenDates) {
-                      val list = byDate[d] ?: continue
-                      if (list.isEmpty()) continue
-                      detail.addView(act.tv("📅 $d", 14f, C.ACCENT, true))
-                      for (r in list.sortedBy { it["ts"]?.toLongOrNull() ?: 0L }) {
-                          val line = "${fmtDateTime(r["ts"]?.toLongOrNull() ?: 0L)}  ${r["plaza"]}" + (if (!r["state"].isNullOrBlank()) " (${r["state"]})" else "") + (if (!r["vehicle"].isNullOrBlank()) " 🚗 ${r["vehicle"]}" else "") + "  ${inr(r["amount"]?.toDoubleOrNull() ?: 0.0)}"
-                          detail.addView(act.tv(line, 12f, C.TEXT))
+                  Thread {
+                      val (built, sum) = Tolls.buildTrips(act)
+                      act.runOnUiThread {
+                          trips = built; total = sum
+                          render()
                       }
+                  }.start()
+              }
+
+              private fun render() {
+                  summary.text = "${trips.size} trips  •  Total toll ${inr(total)}\nSolid blue = Going, dashed red = Returning"
+                  chips.removeAllViews()
+                  chips.addView(act.pill("All", selDay == null) { selDay = null; render() })
+                  val days = trips.map { it.dayKey }.distinct().reversed()
+                  for (d in days.take(30)) chips.addView(act.pill(d, selDay == d) { selDay = d; render() })
+                  chips.addView(act.pill("Fix Toll SMS", false) {
+                      Thread { val n = Tolls.rematchAll(act); act.runOnUiThread { act.toast("$n toll txns re-matched"); refresh() } }.start()
+                  })
+                  chips.addView(act.pill("Reload tiles", false) { map.invalidate(); act.toast("Tile cache reloaded") })
+
+                  val visible = if (selDay == null) trips else trips.filter { it.dayKey == selDay }
+
+                  val tripsForMap = visible.map { t ->
+                      RouteMapView.Trip(t.direction, t.checkpoints.map { RouteMapView.Pt(it.lat, it.lon, it.plaza, it.ts) }, t.roadPolyline)
                   }
-                  if (byDate.isEmpty()) detail.addView(act.tv("FASTag toll SMS milte hi yahan trips dikhengi.", 12f, C.MUTED))
+                  map.setTrips(tripsForMap)
+
+                  detail.removeAllViews()
+                  if (visible.isEmpty()) {
+                      detail.addView(act.tv("FASTag toll SMS milte hi yahan trips dikhengi.", 12f, C.MUTED))
+                      return
+                  }
+                  for (t in visible) {
+                      val card = act.card()
+                      val head = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+                      head.put(act.tv(t.dayKey, 14f, C.TEXT, true), 0, 1f)
+                      val badge = act.tv(t.direction, 11f, if (t.direction == "Going") C.ACCENT else C.RED, true)
+                      head.put(badge, 0)
+                      card.addView(head)
+                      card.addView(act.tv("📍 ${t.title}", 12f, C.MUTED))
+                      card.addView(act.tv("Total toll: ${inr(t.total, true)}", 14f, C.TEXT, true))
+                      detail.put(card, 10)
+                  }
               }
           }
 
@@ -2573,7 +2737,6 @@ jobs:
                   sortChips.addView(act.pill("Name", sortMode == "name") { sortMode = "name"; refresh() })
                   sortChips.addView(act.pill("Recent", sortMode == "recent") { sortMode = "recent"; refresh() })
                   sortChips.addView(act.pill("Total", sortMode == "total") { sortMode = "total"; refresh() })
-                  // NEW: unmerge chip
                   sortChips.addView(act.pill("Unmerge last", false) {
                       val ok = PayeeOps.undoLastMerge(act)
                       if (ok) { act.toast("Last merge undone"); refresh() } else act.toast("Koi merge history nahi mili")
@@ -2612,7 +2775,6 @@ jobs:
                   col.addView(act.tv("Out: ${inr(spent)}  •  In: ${inr(recv)}  •  Net: ${inr(recv - spent)}", 13f, C.TEXT, true))
                   if (!p["upi_id"].isNullOrBlank()) col.addView(act.tv("UPI: ${p["upi_id"]}", 12f, C.MUTED))
 
-                  // NEW: smart 00:00 dedupe button
                   val autoIds = PayeeOps.smartMidnightDeleteIds(all)
                   if (autoIds.isNotEmpty()) {
                       col.addView(act.tv("💡 ${autoIds.size} duplicate entries mile (same date+amount+type, 00:00 timestamp) — auto-tick ho gaye hain", 12f, C.AMBER))
@@ -2900,8 +3062,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="v10.0.${{ github.run_number }}"
+          VERSION="v10.1.${{ github.run_number }}"
           gh release create "$VERSION" /tmp/proj/app/build/outputs/apk/debug/app-debug.apk \
             --repo "${{ github.repository }}" \
             --title "FinTrack Build ${{ github.run_number }}" \
-            --notes "v10.0: (1) smart 00:00 midnight dedupe inside payee detail, (2) 'Merge to payee' bulk action in Ledger search, (3) unmerge support via payee_merges table, (4) first-run onboarding: Scan SMS vs Restore backup, (5) restore sets last_sms_date cutoff so old SMS never re-import; scan report popup shows scanned/imported/duplicates/ignored."
+            --notes "v10.1: OSRM road-snapped travel map. Trip legs auto-grouped on U-turn / >6h gap / new day. Direction badges Going (solid blue) / Returning (dashed red). Polyline decoder ported from Python. 6 default toll plazas seeded so travel map works on first launch."
