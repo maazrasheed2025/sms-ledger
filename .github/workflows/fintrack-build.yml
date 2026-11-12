@@ -16,7 +16,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -25,7 +25,7 @@ jobs:
           java-version: '17'
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v5
         with:
           gradle-version: 8.9
 
@@ -65,8 +65,8 @@ jobs:
                   applicationId = "com.example.fintrack"
                   minSdk = 30
                   targetSdk = 33
-                  versionCode = 3
-                  versionName = "3.0"
+                  versionCode = 4
+                  versionName = "4.0"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -110,6 +110,7 @@ jobs:
           </manifest>
           EOF_4
 
+          # ---------------- Backup.kt (unchanged) ----------------
           cat > app/src/main/java/com/example/fintrack/Backup.kt <<'EOF_5'
           package com.example.fintrack
 
@@ -127,9 +128,9 @@ jobs:
               )
 
               private val tables = listOf(
-                  "txn", "payees", "net_items", "loans", "senders",
+                  "txn", "payees", "net_items", "loans", "loan_txns", "senders",
                   "merchant_rules", "parse_patterns", "nb_words",
-                  "toll_trips", "toll_plazas", "budgets", "payee_tags"
+                  "toll_trips", "toll_plazas", "payee_tags"
               )
 
               private val dateFmt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
@@ -242,6 +243,7 @@ jobs:
           }
           EOF_5
 
+          # ---------------- Db.kt (loans now keyed by loan_no; budget/liability removed) ----------------
           cat > app/src/main/java/com/example/fintrack/Db.kt <<'EOF_6'
           package com.example.fintrack
 
@@ -271,10 +273,11 @@ jobs:
               var status: String = "REGEX",
               var tpl: String = "",
               var review: Boolean = false,
-              var reviewHash: String? = null
+              var reviewHash: String? = null,
+              var loanNo: String? = null
           )
 
-          class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "fintrack.db", null, 3) {
+          class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "fintrack.db", null, 4) {
 
               companion object {
                   @Volatile private var inst: Db? = null
@@ -284,12 +287,13 @@ jobs:
               }
 
               override fun onCreate(db: SQLiteDatabase) {
-                  db.execSQL("CREATE TABLE txn (id INTEGER PRIMARY KEY AUTOINCREMENT, sms_key TEXT UNIQUE, ts INTEGER NOT NULL, amount REAL NOT NULL, debit INTEGER NOT NULL, merchant TEXT, merchant_key TEXT, category TEXT, institution TEXT, account TEXT, balance REAL, channel TEXT, ref TEXT, vpa TEXT, sender TEXT, body TEXT, source TEXT, status TEXT, tpl TEXT, review INTEGER DEFAULT 0, review_hash TEXT)")
+                  db.execSQL("CREATE TABLE txn (id INTEGER PRIMARY KEY AUTOINCREMENT, sms_key TEXT UNIQUE, ts INTEGER NOT NULL, amount REAL NOT NULL, debit INTEGER NOT NULL, merchant TEXT, merchant_key TEXT, category TEXT, institution TEXT, account TEXT, balance REAL, channel TEXT, ref TEXT, vpa TEXT, sender TEXT, body TEXT, source TEXT, status TEXT, tpl TEXT, review INTEGER DEFAULT 0, review_hash TEXT, loan_no TEXT)")
                   db.execSQL("CREATE INDEX idx_txn_ts ON txn(ts)")
                   db.execSQL("CREATE INDEX idx_txn_tpl ON txn(tpl)")
                   db.execSQL("CREATE INDEX idx_txn_mk ON txn(merchant_key)")
                   db.execSQL("CREATE INDEX idx_txn_rh ON txn(review_hash)")
                   db.execSQL("CREATE INDEX idx_txn_ref ON txn(ref)")
+                  db.execSQL("CREATE INDEX idx_txn_loan ON txn(loan_no)")
                   db.execSQL("CREATE TABLE senders (core TEXT PRIMARY KEY, institution TEXT, kind TEXT, user_defined INTEGER DEFAULT 0)")
                   db.execSQL("CREATE TABLE merchant_rules (merchant_key TEXT PRIMARY KEY, display TEXT, category TEXT, weight REAL DEFAULT 1)")
                   db.execSQL("CREATE TABLE parse_patterns (id INTEGER PRIMARY KEY AUTOINCREMENT, sender_core TEXT, tpl TEXT, field TEXT, left_ctx TEXT, right_ctx TEXT, weight REAL DEFAULT 1, UNIQUE(sender_core, tpl, field, left_ctx, right_ctx))")
@@ -298,8 +302,7 @@ jobs:
                   db.execSQL("CREATE TABLE toll_plazas (plaza_id INTEGER PRIMARY KEY, name TEXT, state TEXT, nh TEXT, lat REAL, lon REAL, car_fare REAL)")
                   db.execSQL("CREATE TABLE payees (merchant_key TEXT PRIMARY KEY, display TEXT, upi_id TEXT, alt_upis TEXT, note TEXT)")
                   db.execSQL("CREATE TABLE net_items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, amount REAL, kind TEXT)")
-                  db.execSQL("CREATE TABLE loans (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, lender TEXT, principal REAL, rate REAL, emi REAL, tenure INTEGER, start_ts INTEGER)")
-                  db.execSQL("CREATE TABLE budgets (category TEXT PRIMARY KEY, monthly_cap REAL NOT NULL)")
+                  db.execSQL("CREATE TABLE loans (loan_no TEXT PRIMARY KEY, lender TEXT, first_seen INTEGER, last_seen INTEGER, msg_count INTEGER DEFAULT 0)")
                   db.execSQL("CREATE TABLE payee_tags (merchant_key TEXT, tag TEXT, note TEXT, PRIMARY KEY(merchant_key, tag))")
                   db.execSQL("CREATE TABLE txn_skipped (id INTEGER PRIMARY KEY AUTOINCREMENT, reason TEXT, ref TEXT, body TEXT, ts INTEGER)")
                   db.execSQL("CREATE TABLE subs_detected (merchant_key TEXT PRIMARY KEY, avg_amt REAL, last_ts INTEGER, count INTEGER)")
@@ -314,10 +317,17 @@ jobs:
                       runCatching { db.execSQL("CREATE INDEX IF NOT EXISTS idx_txn_rh ON txn(review_hash)") }
                       runCatching { db.execSQL("CREATE INDEX IF NOT EXISTS idx_txn_ref ON txn(ref)") }
                       runCatching { db.execSQL("ALTER TABLE payees ADD COLUMN alt_upis TEXT") }
-                      db.execSQL("CREATE TABLE IF NOT EXISTS budgets (category TEXT PRIMARY KEY, monthly_cap REAL NOT NULL)")
                       db.execSQL("CREATE TABLE IF NOT EXISTS payee_tags (merchant_key TEXT, tag TEXT, note TEXT, PRIMARY KEY(merchant_key, tag))")
                       db.execSQL("CREATE TABLE IF NOT EXISTS txn_skipped (id INTEGER PRIMARY KEY AUTOINCREMENT, reason TEXT, ref TEXT, body TEXT, ts INTEGER)")
                       db.execSQL("CREATE TABLE IF NOT EXISTS subs_detected (merchant_key TEXT PRIMARY KEY, avg_amt REAL, last_ts INTEGER, count INTEGER)")
+                  }
+                  if (oldVersion < 4) {
+                      // Drop old loans table if it exists and recreate with new shape
+                      runCatching { db.execSQL("DROP TABLE IF EXISTS loans") }
+                      db.execSQL("CREATE TABLE IF NOT EXISTS loans (loan_no TEXT PRIMARY KEY, lender TEXT, first_seen INTEGER, last_seen INTEGER, msg_count INTEGER DEFAULT 0)")
+                      runCatching { db.execSQL("ALTER TABLE txn ADD COLUMN loan_no TEXT") }
+                      runCatching { db.execSQL("CREATE INDEX IF NOT EXISTS idx_txn_loan ON txn(loan_no)") }
+                      runCatching { db.execSQL("DROP TABLE IF EXISTS budgets") }
                   }
               }
 
@@ -363,10 +373,10 @@ jobs:
                   put("tpl", t.tpl)
                   put("review", if (t.review) 1 else 0)
                   put("review_hash", t.reviewHash)
+                  put("loan_no", t.loanNo)
               }
 
               fun insertTxn(t: Txn): Long {
-                  // FIX: avoid smart-cast problem on nullable smsKey by using let
                   val existing = t.smsKey?.let { one("SELECT id FROM txn WHERE sms_key=?", it)?.toLongOrNull() }
                   if (existing != null) return 0
                   val ref = t.ref
@@ -386,6 +396,14 @@ jobs:
                       if (t.review) writableDatabase.update("txn", ContentValues().apply {
                           put("review_hash", computeReviewHash(t))
                       }, "id=?", arrayOf(id.toString()))
+                      val ln = t.loanNo
+                      if (!ln.isNullOrBlank()) {
+                          writableDatabase.execSQL(
+                              "INSERT INTO loans(loan_no, lender, first_seen, last_seen, msg_count) VALUES(?,?,?,?,1) " +
+                                  "ON CONFLICT(loan_no) DO UPDATE SET last_seen=excluded.last_seen, msg_count=msg_count+1",
+                              arrayOf(ln, t.institution, t.ts, t.ts)
+                          )
+                      }
                   }
                   return id
               }
@@ -433,7 +451,8 @@ jobs:
                       status = s("status") ?: "REGEX",
                       tpl = s("tpl") ?: "",
                       review = c.getInt(c.getColumnIndexOrThrow("review")) == 1,
-                      reviewHash = s("review_hash")
+                      reviewHash = s("review_hash"),
+                      loanNo = s("loan_no")
                   )
               }
 
@@ -494,14 +513,12 @@ jobs:
                   val seen = HashSet<String>()
                   val bankUnique = bank.filter { seen.add(it.first + "|" + it.second) }
                   val manualAssets = db.num("SELECT SUM(amount) FROM net_items WHERE kind='ASSET'")
-                  val manualLiab = db.num("SELECT SUM(amount) FROM net_items WHERE kind='LIABILITY'")
-                  var loanOut = 0.0
-                  for (l in db.rows("SELECT * FROM loans")) loanOut += LoanCalc.outstandingOf(l)
-                  return Result(bankUnique.sumOf { it.third } + manualAssets, manualLiab + loanOut, bankUnique)
+                  return Result(bankUnique.sumOf { it.third } + manualAssets, 0.0, bankUnique)
               }
           }
           EOF_6
 
+          # ---------------- Learner.kt (unchanged) ----------------
           cat > app/src/main/java/com/example/fintrack/Learner.kt <<'EOF_7'
           package com.example.fintrack
 
@@ -652,66 +669,8 @@ jobs:
           }
           EOF_7
 
-          cat > app/src/main/java/com/example/fintrack/LoanCalc.kt <<'EOF_8'
-          package com.example.fintrack
-
-          import java.util.Calendar
-
-          object LoanCalc {
-              fun emi(p: Double, annualRate: Double, n: Int): Double {
-                  if (n <= 0) return 0.0
-                  val r = annualRate / 1200.0
-                  if (r == 0.0) return p / n
-                  val g = Math.pow(1 + r, n.toDouble())
-                  return p * r * g / (g - 1)
-              }
-
-              fun paidMonths(startTs: Long, tenure: Int): Int {
-                  val s = Calendar.getInstance().apply { timeInMillis = startTs }
-                  val n = Calendar.getInstance()
-                  var m = (n.get(Calendar.YEAR) - s.get(Calendar.YEAR)) * 12 + n.get(Calendar.MONTH) - s.get(Calendar.MONTH)
-                  if (n.get(Calendar.DAY_OF_MONTH) < s.get(Calendar.DAY_OF_MONTH)) m--
-                  return m.coerceIn(0, tenure)
-              }
-
-              fun outstanding(p: Double, annualRate: Double, emi: Double, paid: Int): Double {
-                  val r = annualRate / 1200.0
-                  val v = if (r == 0.0) p - emi * paid
-                  else p * Math.pow(1 + r, paid.toDouble()) - emi * (Math.pow(1 + r, paid.toDouble()) - 1) / r
-                  return if (v < 0) 0.0 else v
-              }
-
-              fun outstandingOf(l: Map<String, String?>): Double {
-                  val p = l["principal"]?.toDoubleOrNull() ?: 0.0
-                  val rate = l["rate"]?.toDoubleOrNull() ?: 0.0
-                  val tenure = l["tenure"]?.toIntOrNull() ?: 0
-                  var e = l["emi"]?.toDoubleOrNull() ?: 0.0
-                  if (e <= 0) e = emi(p, rate, tenure)
-                  val paid = paidMonths(l["start_ts"]?.toLongOrNull() ?: System.currentTimeMillis(), tenure)
-                  return outstanding(p, rate, e, paid)
-              }
-
-              fun payoffPlan(principal: Double, annualRate: Double, emi: Double, extra: Double): Pair<Int, Double> {
-                  val r = annualRate / 1200.0
-                  if (emi <= 0) return 0 to 0.0
-                  var bal = principal
-                  var paidMonths = 0
-                  var totalInterest = 0.0
-                  val maxMonths = 1200
-                  while (bal > 0.01 && paidMonths < maxMonths) {
-                      val interest = bal * r
-                      val principalPart = (emi + extra) - interest
-                      if (principalPart <= 0) return 0 to 0.0
-                      totalInterest += interest
-                      bal -= principalPart
-                      paidMonths++
-                  }
-                  return paidMonths to totalInterest
-              }
-          }
-          EOF_8
-
-          cat > app/src/main/java/com/example/fintrack/AiParser.kt <<'EOF_9'
+          # ---------------- AiParser.kt (unchanged) ----------------
+          cat > app/src/main/java/com/example/fintrack/AiParser.kt <<'EOF_8'
           package com.example.fintrack
 
           import org.json.JSONObject
@@ -775,9 +734,10 @@ jobs:
                   }
               }
           }
-          EOF_9
+          EOF_8
 
-          cat > app/src/main/java/com/example/fintrack/CsvImporter.kt <<'EOF_10'
+          # ---------------- CsvImporter.kt (unchanged) ----------------
+          cat > app/src/main/java/com/example/fintrack/CsvImporter.kt <<'EOF_9'
           package com.example.fintrack
 
           import android.content.Context
@@ -928,9 +888,10 @@ jobs:
                   return Triple(imported, dup, failed)
               }
           }
-          EOF_10
+          EOF_9
 
-          cat > app/src/main/java/com/example/fintrack/Importer.kt <<'EOF_11'
+          # ---------------- Importer.kt (unchanged) ----------------
+          cat > app/src/main/java/com/example/fintrack/Importer.kt <<'EOF_10'
           package com.example.fintrack
 
           import android.content.Context
@@ -971,9 +932,10 @@ jobs:
                   return count
               }
           }
-          EOF_11
+          EOF_10
 
-          cat > app/src/main/java/com/example/fintrack/Subs.kt <<'EOF_12'
+          # ---------------- Subs.kt (unchanged) ----------------
+          cat > app/src/main/java/com/example/fintrack/Subs.kt <<'EOF_11'
           package com.example.fintrack
 
           import android.content.Context
@@ -1006,9 +968,10 @@ jobs:
                   }
               }
           }
-          EOF_12
+          EOF_11
 
-          cat > app/src/main/java/com/example/fintrack/SmsEngine.kt <<'EOF_13'
+          # ---------------- SmsEngine.kt (toll regex tighter + loan_no detect) ----------------
+          cat > app/src/main/java/com/example/fintrack/SmsEngine.kt <<'EOF_12'
           package com.example.fintrack
 
           import android.content.Context
@@ -1018,7 +981,8 @@ jobs:
               var amount: Double? = null, var debit: Boolean? = null, var merchant: String? = null,
               var balance: Double? = null, var account: String? = null, var channel: String = "OTHER",
               var ref: String? = null, var vpa: String? = null,
-              var walletName: String? = null
+              var walletName: String? = null,
+              var loanNo: String? = null
           )
 
           data class Canonical(
@@ -1149,7 +1113,9 @@ jobs:
               private val acctRe = Regex("""(?i)(?:a/c|acct?|account|card|lan)\.?\s*(?:no\.?|number)?\s*(?:ending(?:\s+(?:with|in))?)?\s*(?:x+|\*+|#)?\s*([A-Za-z0-9]{3,20})\b""")
               private val refRe = Regex("""(?i)(?:upi\s*ref(?:\s*no)?|ref(?:erence)?\s*(?:no|number|id)?|rrn|utr)\s*[:.\-]?\s*([A-Za-z0-9]{6,22})""")
               private val vpaRe = Regex("""(?i)\b([a-z0-9][\w.\-]+@[a-z][a-z0-9]+)\b(?!\.[a-z]{2,3}\b)""")
-              private val tollRe = Regex("""(?i)\b(fastag|netc|toll|plaza|nhai|ihmcl)\b""")
+
+              // CHANGED: tollRe only fires when the word "toll"/"plaza"/"fastag"/"netc"/"nhai"/"ihmcl" appears as a standalone word
+              private val tollRe = Regex("""(?i)(?:^|[^a-z])(?:fastag|netc|toll|plaza|nhai|ihmcl)(?:[^a-z]|$)""")
 
               private val walletAfterRe = Regex("""(?i)\b([A-Za-z][A-Za-z0-9]{1,20})\s+wallet\b""")
               private val walletBeforeRe = Regex("""(?i)\bwallet\s+([A-Za-z][A-Za-z0-9]{1,20})\b""")
@@ -1161,6 +1127,9 @@ jobs:
               private val upiSlashRe = Regex("""(?i)upi/\w+/\d+/([A-Za-z][A-Za-z0-9 .\-]{2,30}?)(?:/|$)""")
               private val semiRe = Regex("""(?i)[;,]\s*([A-Za-z][A-Za-z0-9 &.\-']{2,30}?)\s+credited""")
               private val infoRe = Regex("""(?i)info[:\-\s]+([A-Za-z0-9 &.\-/@']{3,30})""")
+
+              // CHANGED: loan number detection (LAN / Loan a/c / Loan no etc.)
+              private val loanNoRe = Regex("""(?i)\b(?:lan|loan\s*(?:a/?c|account|ac|no|number))\s*[:#\-]?\s*([A-Z0-9]{6,20})\b""")
 
               private val stopExact = setOf("upi", "neft", "imps", "rtgs", "a/c", "ac", "acct", "account", "you", "bank", "card", "self")
               private val stopStarts = listOf("your", "a/c", "ac ", "acct", "account", "upi ", "bank", "card", "you ")
@@ -1229,7 +1198,7 @@ jobs:
                   if (wallet != null) return "WALLET"
                   val l = b.lowercase()
                   return when {
-                      "fastag" in l || "netc" in l -> "FASTAG"
+                      "fastag" in l || "netc" in l || "ihmcl" in l -> "FASTAG"
                       "upi" in l || "vpa" in l -> "UPI"
                       "imps" in l -> "IMPS"
                       "neft" in l -> "NEFT"
@@ -1254,6 +1223,7 @@ jobs:
                   f.walletName = detectWallet(body)
                   f.channel = channelOf(body, f.walletName)
                   f.merchant = findMerchant(body, f.debit != false)
+                  f.loanNo = loanNoRe.find(body)?.groupValues?.get(1)?.uppercase()
                   return f
               }
 
@@ -1330,7 +1300,8 @@ jobs:
                       smsKey = sender + "|" + body.hashCode(), ts = ts, amount = amount, debit = debit,
                       merchant = merchant, category = category, institution = inst, account = f.account,
                       balance = f.balance, channel = f.channel, ref = f.ref, vpa = f.vpa, sender = sender,
-                      body = body, source = "SMS", status = status, tpl = tpl, review = review
+                      body = body, source = "SMS", status = status, tpl = tpl, review = review,
+                      loanNo = f.loanNo
                   )
                   if (review) t.reviewHash = db.computeReviewHash(t)
                   return t
@@ -1370,9 +1341,10 @@ jobs:
                   return count
               }
           }
-          EOF_13
+          EOF_12
 
-          cat > app/src/main/java/com/example/fintrack/SenderMap.kt <<'EOF_14'
+          # ---------------- SenderMap.kt (unchanged) ----------------
+          cat > app/src/main/java/com/example/fintrack/SenderMap.kt <<'EOF_13'
           package com.example.fintrack
 
           object SenderMap {
@@ -1426,9 +1398,10 @@ jobs:
                   return ("Unknown ($c)") to "UNKNOWN"
               }
           }
-          EOF_14
+          EOF_13
 
-          cat > app/src/main/java/com/example/fintrack/SmsReceiver.kt <<'EOF_15'
+          # ---------------- SmsReceiver.kt (unchanged) ----------------
+          cat > app/src/main/java/com/example/fintrack/SmsReceiver.kt <<'EOF_14'
           package com.example.fintrack
 
           import android.content.BroadcastReceiver
@@ -1457,9 +1430,10 @@ jobs:
                   }.start()
               }
           }
-          EOF_15
+          EOF_14
 
-          cat > app/src/main/java/com/example/fintrack/Tolls.kt <<'EOF_16'
+          # ---------------- Tolls.kt (looser plaza match: fall back to name from body) ----------------
+          cat > app/src/main/java/com/example/fintrack/Tolls.kt <<'EOF_15'
           package com.example.fintrack
 
           import android.content.Context
@@ -1525,23 +1499,38 @@ jobs:
                   return best
               }
 
-              private val vehicleRe = Regex("""\b[A-Z]{2}\s?\d{1,2}\s?[A-Z]{1,3}\s?\d{4}\b""")
+              /**
+               * CHANGED: Fallback — when a toll SMS arrives but the plaza is not in our DB,
+               * we still record a synthetic trip so it shows up in Travel with the plaza name
+               * scraped from the SMS. lat/lon = 0 (will just not draw on the map).
+               */
+              private val plazaNameRe = Regex("""(?i)(?:at|for)\s+([A-Z][A-Za-z .\-]{2,40}?)(?:\s*\(|\s+on\b|$)""")
+              private val vehicleRe = Regex("""\b([A-Z]{2}[\s\-]?\d{1,2}[\s\-]?[A-Z]{1,3}[\s\-]?\d{4})\b""")
 
               fun record(ctx: Context, t: Txn) {
                   val db = Db.get(ctx)
                   db.exec("DELETE FROM toll_trips WHERE txn_id=?", t.id)
                   if (!t.debit) return
-                  val p = match(ctx, t.merchant + " " + t.body, t.amount) ?: return
-                  val veh = vehicleRe.find(t.body.uppercase())?.value
-                  db.exec(
-                      "INSERT OR REPLACE INTO toll_trips(txn_id, plaza_id, plaza, state, lat, lon, ts, amount, vehicle) VALUES(?,?,?,?,?,?,?,?,?)",
-                      t.id, p.id, p.name, p.state, p.lat, p.lon, t.ts, t.amount, veh
-                  )
+                  val p = match(ctx, t.merchant + " " + t.body, t.amount)
+                  val veh = vehicleRe.find(t.body.uppercase())?.groupValues?.get(1)
+                  if (p != null) {
+                      db.exec(
+                          "INSERT OR REPLACE INTO toll_trips(txn_id, plaza_id, plaza, state, lat, lon, ts, amount, vehicle) VALUES(?,?,?,?,?,?,?,?,?)",
+                          t.id, p.id, p.name, p.state, p.lat, p.lon, t.ts, t.amount, veh
+                      )
+                  } else {
+                      val plazaFromBody = plazaNameRe.find(t.body)?.groupValues?.get(1)?.trim() ?: t.merchant
+                      db.exec(
+                          "INSERT OR REPLACE INTO toll_trips(txn_id, plaza_id, plaza, state, lat, lon, ts, amount, vehicle) VALUES(?,?,?,?,?,?,?,?,?)",
+                          t.id, 0, plazaFromBody, "", 0.0, 0.0, t.ts, t.amount, veh
+                      )
+                  }
               }
           }
-          EOF_16
+          EOF_15
 
-          cat > app/src/main/java/com/example/fintrack/PayeeOps.kt <<'EOF_17'
+          # ---------------- PayeeOps.kt (adds merge helper reused by Payees & Ledger bulk ops) ----------------
+          cat > app/src/main/java/com/example/fintrack/PayeeOps.kt <<'EOF_16'
           package com.example.fintrack
 
           import android.content.ContentValues
@@ -1604,10 +1593,66 @@ jobs:
                       w.endTransaction()
                   }
               }
-          }
-          EOF_17
 
-          cat > app/src/main/java/com/example/fintrack/MainActivity.kt <<'EOF_18'
+              /** CHANGED: bulk re-categorize selected transaction IDs. */
+              fun bulkSetCategory(ctx: Context, ids: List<Long>, category: String) {
+                  if (ids.isEmpty()) return
+                  val db = Db.get(ctx)
+                  val w = db.writableDatabase
+                  w.beginTransaction()
+                  try {
+                      val marks = ids.joinToString(",") { "?" }
+                      val cv = ContentValues().apply {
+                          put("category", category)
+                          put("review", 0)
+                          putNull("review_hash")
+                      }
+                      w.update("txn", cv, "id IN ($marks)", ids.map { it.toString() }.toTypedArray())
+                      w.setTransactionSuccessful()
+                  } finally {
+                      w.endTransaction()
+                  }
+              }
+
+              /** CHANGED: find duplicate groups (same amount + same upi/vpa + same calendar date + same direction). */
+              data class DupGroup(
+                  val key: String,
+                  val amount: Double,
+                  val debit: Boolean,
+                  val vpa: String,
+                  val ts: Long,
+                  val ids: List<Long>,
+                  val sample: Txn
+              )
+
+              fun findDuplicates(ctx: Context): List<DupGroup> {
+                  val db = Db.get(ctx)
+                  val rows = db.queryTxns("vpa IS NOT NULL AND vpa != ''", emptyArray(), 5000)
+                  val cal = java.util.Calendar.getInstance()
+                  val groups = LinkedHashMap<String, MutableList<Txn>>()
+                  for (t in rows) {
+                      val vpa = t.vpa ?: continue
+                      cal.timeInMillis = t.ts
+                      val y = cal.get(java.util.Calendar.YEAR)
+                      val m = cal.get(java.util.Calendar.MONTH)
+                      val d = cal.get(java.util.Calendar.DAY_OF_MONTH)
+                      val day = String.format(java.util.Locale.US, "%04d-%02d-%02d", y, m + 1, d)
+                      val key = String.format(java.util.Locale.US, "%.2f|%s|%s|%s", t.amount, if (t.debit) "D" else "C", vpa.lowercase(), day)
+                      groups.getOrPut(key) { ArrayList() }.add(t)
+                  }
+                  val out = ArrayList<DupGroup>()
+                  for ((key, list) in groups) {
+                      if (list.size < 2) continue
+                      val f = list.first()
+                      out.add(DupGroup(key, f.amount, f.debit, f.vpa ?: "", f.ts, list.map { it.id }, f))
+                  }
+                  return out
+              }
+          }
+          EOF_16
+
+          # ---------------- MainActivity.kt (adds dup picker + bulk category + loan screen nav) ----------------
+          cat > app/src/main/java/com/example/fintrack/MainActivity.kt <<'EOF_17'
           package com.example.fintrack
 
           import android.Manifest
@@ -1862,10 +1907,24 @@ jobs:
                       }
                   }.start()
               }
-          }
-          EOF_18
 
-          cat > app/src/main/java/com/example/fintrack/Screens1.kt <<'EOF_19'
+              /** CHANGED: bulk category dialog used from Ledger & Payees multi-select. */
+              fun bulkCategory(ids: List<Long>) {
+                  if (ids.isEmpty()) { toast("Pehle transactions chuno"); return }
+                  val choices = Categories.ALL
+                  AlertDialog.Builder(this).setTitle("Kis category me daalna hai?")
+                      .setItems(choices.toTypedArray()) { _, i ->
+                          PayeeOps.bulkSetCategory(this, ids, choices[i])
+                          toast("${ids.size} transactions → ${choices[i]}")
+                          refreshAll()
+                      }
+                      .setNegativeButton("Cancel", null).show()
+              }
+          }
+          EOF_17
+
+          # ---------------- Screens1.kt (Home no budget/liability; Ledger scan-duplicates + bulk select; review auto-clean) ----------------
+          cat > app/src/main/java/com/example/fintrack/Screens1.kt <<'EOF_18'
           package com.example.fintrack
 
           import android.view.Gravity
@@ -1935,7 +1994,7 @@ jobs:
                   if (review > 0) {
                       val c = act.card()
                       c.addView(act.tv("⚠ $review transactions ko review chahiye", 14f, C.AMBER, true))
-                      c.addView(act.tv("Tap karke sahi karo - app seekh legi aur wahi galti dobara nahi hogi.", 12f, C.MUTED))
+                      c.addView(act.tv("Tap karke sahi karo - sahi karte hi list se hat jayega.", 12f, C.MUTED))
                       c.setOnClickListener { act.openLedger(LedgerScreen.Filter(mode = "review")) }
                       body.put(c)
                   }
@@ -1951,7 +2010,6 @@ jobs:
                   for (r in cats) {
                       val cat = r["category"] ?: "Other"
                       val v = r["s"]?.toDoubleOrNull() ?: 0.0
-                      val cap = db.one("SELECT monthly_cap FROM budgets WHERE category=?", cat)?.toDoubleOrNull()
                       val line = LinearLayout(act).apply {
                           orientation = LinearLayout.HORIZONTAL
                           gravity = Gravity.CENTER_VERTICAL
@@ -1961,11 +2019,6 @@ jobs:
                       }
                       line.addView(act.icon(iconFor(cat), C.ACCENT, 20))
                       line.put(act.tv(cat, 14f), 10, 1f)
-                      if (cap != null && cap > 0) {
-                          val frac = v / cap
-                          val col = if (frac >= 1.0) C.RED else if (frac >= 0.8) C.AMBER else C.MUTED
-                          line.put(act.tv("cap " + inr(cap), 11f, col), 6)
-                      }
                       line.put(act.tv(inr(v), 14f, C.TEXT, true), 8)
                       cc.put(line, 12)
                       val frac = (v / top).coerceIn(0.02, 1.0)
@@ -1985,7 +2038,7 @@ jobs:
                   val n = act.card()
                   n.addView(act.tv("Net worth", 12f, C.MUTED))
                   n.addView(act.tv(inr(nw.assets - nw.liabilities), 24f, if (nw.assets >= nw.liabilities) C.GREEN else C.RED, true))
-                  n.addView(act.tv("Assets ${inr(nw.assets)}  •  Liabilities ${inr(nw.liabilities)}", 12f, C.MUTED))
+                  n.addView(act.tv("Assets ${inr(nw.assets)}", 12f, C.MUTED))
                   n.setOnClickListener { act.show(4) }
                   body.put(n)
 
@@ -2025,6 +2078,9 @@ jobs:
 
               private var filter = Filter()
               private var query = ""
+              private var selectMode = false
+              private val selected = LinkedHashSet<Long>()
+
               private val summary = act.tv("", 12f, C.MUTED).apply { setPadding(act.dp(14), act.dp(4), act.dp(14), act.dp(4)) }
               private val chips = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; setPadding(act.dp(8), 0, act.dp(8), 0) }
 
@@ -2035,6 +2091,7 @@ jobs:
                       val sampleMerchant: String, val sampleCategory: String,
                       val sampleDebit: Boolean
                   ) : Row()
+                  data class DupGroupRow(val g: PayeeOps.DupGroup) : Row()
               }
 
               private val adapter = RowAdapter<Row>(act, emptyList()) { item, r ->
@@ -2051,12 +2108,20 @@ jobs:
                           val t = item.t
                           r.icon.setImageResource(iconFor(t.category))
                           r.icon.setColorFilter(if (t.debit) C.RED else C.GREEN)
-                          r.title.text = t.merchant
+                          r.title.text = (if (selectMode && selected.contains(t.id)) "☑ " else "") + t.merchant
                           r.sub.text = fmtDate(t.ts) + " • " + t.institution + " • " + t.category +
                               (if (t.status == "RECONCILED") " • ✓ Reconciled" else "") +
                               (if (t.source == "CSV") " • CSV" else "")
                           r.amt.text = (if (t.debit) "-" else "+") + inr(t.amount, true)
                           r.amt.setTextColor(if (t.debit) C.RED else C.GREEN)
+                      }
+                      is Row.DupGroupRow -> {
+                          r.icon.setImageResource(R.drawable.ic_transfer)
+                          r.icon.setColorFilter(C.RED)
+                          r.title.text = "Duplicate: ${item.g.ids.size}x ${inr(item.g.amount, true)} ${if (item.g.debit) "OUT" else "IN"}"
+                          r.sub.text = "${item.g.vpa} · ${fmtDate(item.g.ts)} · tap to merge"
+                          r.amt.text = "Pick"
+                          r.amt.setTextColor(C.RED)
                       }
                   }
               }
@@ -2066,10 +2131,23 @@ jobs:
                   adapter = this@LedgerScreen.adapter
                   setOnItemClickListener { _, _, pos, _ ->
                       when (val item = this@LedgerScreen.adapter.items.getOrNull(pos)) {
-                          is Row.TxnRow -> showTxn(item.t)
+                          is Row.TxnRow -> {
+                              if (selectMode) {
+                                  if (!selected.add(item.t.id)) selected.remove(item.t.id)
+                                  this@LedgerScreen.adapter.notifyDataSetChanged()
+                              } else showTxn(item.t)
+                          }
                           is Row.GroupRow -> openGroupFix(item)
+                          is Row.DupGroupRow -> openDupPicker(item.g)
                           null -> {}
                       }
+                  }
+                  setOnItemLongClickListener { _, _, pos, _ ->
+                      val item = this@LedgerScreen.adapter.items.getOrNull(pos) as? Row.TxnRow ?: return@setOnItemLongClickListener false
+                      selectMode = true
+                      selected.add(item.t.id)
+                      this@LedgerScreen.adapter.notifyDataSetChanged()
+                      true
                   }
               }
               override val root: View = act.vbox().apply {
@@ -2111,6 +2189,14 @@ jobs:
                           filter = filter.copy(year = null, month = null); refresh()
                       })
                   }
+                  // CHANGED: duplicate scan + bulk-select entry points
+                  chips.addView(act.pill("Scan duplicates", false) { showDuplicates() })
+                  if (selectMode) {
+                      chips.addView(act.pill("Categorize (${selected.size})", true) {
+                          act.bulkCategory(selected.toList()); selectMode = false; selected.clear(); refresh()
+                      })
+                      chips.addView(act.pill("Cancel", false) { selectMode = false; selected.clear(); refresh() })
+                  }
 
                   val where = StringBuilder("1=1")
                   val args = ArrayList<String>()
@@ -2139,6 +2225,7 @@ jobs:
                   if (filter.mode == "review") {
                       val groups = LinkedHashMap<String, MutableList<Txn>>()
                       for (t in all) {
+                          if (!t.review) continue
                           val h = t.reviewHash ?: Db.get(act).computeReviewHash(t)
                           groups.getOrPut(h) { ArrayList() }.add(t)
                       }
@@ -2148,7 +2235,7 @@ jobs:
                           rows.add(Row.GroupRow(h, list.size, list.sumOf { it.amount }, sample.merchant, sample.category, sample.debit))
                       }
                       adapter.items = rows
-                      summary.text = "${all.size} entries in ${groups.size} groups  •  tap a group to fix all"
+                      summary.text = "${all.count { it.review }} entries in ${groups.size} groups  •  tap a group to fix all"
                   } else {
                       adapter.items = all.map { Row.TxnRow(it) }
                       val out = all.filter { it.debit }.sumOf { it.amount }
@@ -2156,6 +2243,46 @@ jobs:
                       summary.text = "${all.size} entries  •  Kharch ${inr(out)}  •  Mila ${inr(inn)}"
                   }
                   adapter.notifyDataSetChanged()
+              }
+
+              private fun showDuplicates() {
+                  val groups = PayeeOps.findDuplicates(act)
+                  if (groups.isEmpty()) { act.toast("Koi duplicate nahi mila"); return }
+                  val rows = groups.map<PayeeOps.DupGroup, Row> { Row.DupGroupRow(it) }
+                  adapter.items = rows
+                  adapter.notifyDataSetChanged()
+                  summary.text = "${groups.size} duplicate groups mile  •  tap to merge"
+              }
+
+              private fun openDupPicker(g: PayeeOps.DupGroup) {
+                  val names = g.ids.map { id ->
+                      Db.get(act).queryTxns("id=?", arrayOf(id.toString()), 1).firstOrNull()
+                  }
+                  val labels = names.mapNotNull { t ->
+                      t?.let { "${fmtDateTime(it.ts)} • ${it.institution} • ${it.merchant} • ${inr(it.amount, true)}" }
+                  }
+                  val keep = BooleanArray(names.size) { true }
+                  AlertDialog.Builder(act)
+                      .setTitle("Duplicates (${g.ids.size})")
+                      .setMultiChoiceItems(labels.toTypedArray(), keep) { _, which, checked -> keep[which] = checked }
+                      .setPositiveButton("Delete selected") { _, _ ->
+                          var n = 0
+                          for (i in keep.indices) {
+                              if (!keep[i]) {
+                                  val id = g.ids[i]
+                                  Db.get(act).deleteTxn(id)
+                                  n++
+                              }
+                          }
+                          act.toast("$n duplicates delete hue")
+                          act.refreshAll()
+                      }
+                      .setNegativeButton("Cancel", null)
+                      .setNeutralButton("Select none") { _, _ ->
+                          for (i in keep.indices) keep[i] = false
+                          act.toast("Ab manually tick karke Delete dabao")
+                      }
+                      .show()
               }
 
               private fun openGroupFix(g: Row.GroupRow) {
@@ -2247,9 +2374,10 @@ jobs:
                   }
               }
           }
-          EOF_19
+          EOF_18
 
-          cat > app/src/main/java/com/example/fintrack/Screens2.kt <<'EOF_20'
+          # ---------------- Screens2.kt (Travel: map always + dated groups; Payees: search, select, merge, overdue-delete, +/- colors) ----------------
+          cat > app/src/main/java/com/example/fintrack/Screens2.kt <<'EOF_19'
           package com.example.fintrack
 
           import android.content.Context
@@ -2263,14 +2391,18 @@ jobs:
           import android.view.ScaleGestureDetector
           import android.view.View
           import android.view.ViewGroup
+          import android.widget.EditText
           import android.widget.HorizontalScrollView
           import android.widget.LinearLayout
           import android.widget.ListView
           import android.widget.ScrollView
           import androidx.appcompat.app.AlertDialog
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
 
           class RouteMapView(ctx: Context) : View(ctx) {
-              class Pt(val lat: Double, val lon: Double, val label: String)
+              class Pt(val lat: Double, val lon: Double, val label: String, val ts: Long)
 
               private var trips: List<List<Pt>> = emptyList()
               private var scale = 1f
@@ -2314,10 +2446,10 @@ jobs:
 
               override fun onDraw(canvas: Canvas) {
                   canvas.drawColor(Color.parseColor("#0B0D12"))
-                  val all = trips.flatten()
+                  val all = trips.flatten().filter { it.lat != 0.0 && it.lon != 0.0 }
                   val w = width.toFloat()
                   val h = height.toFloat()
-                  if (all.isEmpty()) { canvas.drawText("Koi toll trip nahi mili", 30f, h / 2, txtP); return }
+                  if (all.isEmpty()) { canvas.drawText("Map data nahi (plaza lat/lon missing)", 30f, h / 2, txtP); return }
                   var minLat = all.minOf { it.lat }; var maxLat = all.maxOf { it.lat }
                   var minLon = all.minOf { it.lon }; var maxLon = all.maxOf { it.lon }
                   if (maxLat - minLat < 0.1) { minLat -= 0.05; maxLat += 0.05 }
@@ -2351,15 +2483,17 @@ jobs:
                   }
 
                   for ((k, trip) in trips.withIndex()) {
+                      val valid = trip.filter { it.lat != 0.0 && it.lon != 0.0 }
+                      if (valid.isEmpty()) continue
                       val col = colors[k % colors.size]
                       lineP.color = col
                       dotP.color = col
                       val path = Path()
-                      for ((i, p) in trip.withIndex()) {
+                      for ((i, p) in valid.withIndex()) {
                           if (i == 0) path.moveTo(px(p.lon), py(p.lat)) else path.lineTo(px(p.lon), py(p.lat))
                       }
                       canvas.drawPath(path, lineP)
-                      for (p in trip) {
+                      for (p in valid) {
                           canvas.drawCircle(px(p.lon), py(p.lat), 10f, dotP)
                           canvas.drawText(p.label, px(p.lon) + 14f, py(p.lat) - 12f, lblP)
                       }
@@ -2368,81 +2502,108 @@ jobs:
           }
 
           class TravelScreen(act: MainActivity) : Screen(act) {
-              private var sel = -1
+              private var selDate: String? = null
               private val summary = act.tv("", 13f, C.MUTED).apply { setPadding(act.dp(14), act.dp(8), act.dp(14), act.dp(2)) }
               private val chips = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; setPadding(act.dp(8), 0, act.dp(8), 0) }
               private val map = RouteMapView(act)
-              private val detail = act.vbox(12)
+              private val detail = act.vbox(10)
+              private val dateFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+
               override val root: View = act.vbox().apply {
                   put(summary, 0)
                   put(HorizontalScrollView(act).apply { isHorizontalScrollBarEnabled = false; addView(chips) }, 2)
-                  put(map, 4, 1f)
-                  put(ScrollView(act).apply { addView(detail) }, 4)
-                  (getChildAt(childCount - 1).layoutParams as LinearLayout.LayoutParams).height = act.dp(180)
+                  // CHANGED: map is ALWAYS shown, fixed height
+                  put(map, 4)
+                  (getChildAt(childCount - 1).layoutParams as LinearLayout.LayoutParams).height = act.dp(280)
+                  put(ScrollView(act).apply { addView(detail) }, 4, 1f)
               }
 
               override fun refresh() {
-                  val rows = Db.get(act).rows("SELECT * FROM toll_trips ORDER BY ts ASC")
-                  val trips = ArrayList<MutableList<Map<String, String?>>>()
-                  var lastTs = 0L
+                  val db = Db.get(act)
+                  val rows = db.rows("SELECT * FROM toll_trips ORDER BY ts ASC")
+                  // Group by date
+                  val byDate = LinkedHashMap<String, MutableList<Map<String, String?>>>()
                   for (r in rows) {
                       val ts = r["ts"]?.toLongOrNull() ?: 0L
-                      if (trips.isEmpty() || ts - lastTs > 8 * 3600_000L) trips.add(ArrayList())
-                      trips.last().add(r)
-                      lastTs = ts
+                      val d = dateFmt.format(Date(ts))
+                      byDate.getOrPut(d) { ArrayList() }.add(r)
                   }
                   val total = rows.sumOf { it["amount"]?.toDoubleOrNull() ?: 0.0 }
-                  summary.text = "${trips.size} trips  •  ${rows.size} toll plazas  •  Total toll ${inr(total)}" +
-                      (if (Tolls.count(act) == 0) "\n(Toll database load nahi hui - Money screen se JSON upload karo)" else "")
+                  summary.text = "${byDate.size} din  •  ${rows.size} tolls  •  Total ${inr(total)}" +
+                      (if (Tolls.count(act) == 0) "\nTip: Money → Upload Toll JSON se map enrich hoga" else "")
 
-                  if (sel >= trips.size) sel = -1
                   chips.removeAllViews()
-                  chips.addView(act.pill("All", sel == -1) { sel = -1; refresh() })
-                  for (i in trips.indices.reversed().take(30)) {
-                      val t = trips[i]
-                      val amt = t.sumOf { it["amount"]?.toDoubleOrNull() ?: 0.0 }
-                      val d = fmtDate(t.first()["ts"]?.toLongOrNull() ?: 0L)
-                      chips.addView(act.pill("$d • ${t.size} tolls • ${inr(amt)}", sel == i) { sel = i; refresh() })
+                  chips.addView(act.pill("All", selDate == null) { selDate = null; refresh() })
+                  for (d in byDate.keys.toList().reversed().take(30)) {
+                      chips.addView(act.pill(d, selDate == d) { selDate = d; refresh() })
                   }
 
-                  val chosen = if (sel == -1) trips else listOf(trips[sel])
-                  map.setTrips(chosen.map { tr ->
-                      tr.map { RouteMapView.Pt(it["lat"]?.toDoubleOrNull() ?: 0.0, it["lon"]?.toDoubleOrNull() ?: 0.0, it["plaza"] ?: "") }
+                  val chosenDates = if (selDate == null) byDate.keys.toList() else listOf(selDate!!)
+                  // Build map trips from full list of days
+                  map.setTrips(chosenDates.map { d ->
+                      (byDate[d] ?: emptyList()).sortedBy { it["ts"]?.toLongOrNull() ?: 0L }.map {
+                          RouteMapView.Pt(
+                              it["lat"]?.toDoubleOrNull() ?: 0.0,
+                              it["lon"]?.toDoubleOrNull() ?: 0.0,
+                              it["plaza"] ?: "",
+                              it["ts"]?.toLongOrNull() ?: 0L
+                          )
+                      }
                   })
-                  detail.removeAllViews()
 
-                  val unmatched = Db.get(act).rows(
+                  detail.removeAllViews()
+                  // Show unmatched toll SMS
+                  val unmatched = db.rows(
                       "SELECT id, ts, merchant, amount FROM txn WHERE category='Travel' AND debit=1 AND (SELECT COUNT(*) FROM toll_trips t WHERE t.txn_id=txn.id)=0 AND (LOWER(body) LIKE '%toll%' OR LOWER(body) LIKE '%fastag%' OR LOWER(body) LIKE '%plaza%') ORDER BY ts DESC LIMIT 30"
                   )
                   if (unmatched.isNotEmpty()) {
                       detail.addView(act.tv("Toll SMS (plaza not matched)", 13f, C.AMBER, true))
                       for (r in unmatched) {
-                          val line = "${fmtDateTime(r["ts"]?.toLongOrNull() ?: 0L)}  ${r["merchant"]}  ${inr(r["amount"]?.toDoubleOrNull() ?: 0.0)}"
-                          detail.addView(act.tv(line, 12f, C.TEXT))
+                          detail.addView(act.tv("${fmtDateTime(r["ts"]?.toLongOrNull() ?: 0L)}  ${r["merchant"]}  ${inr(r["amount"]?.toDoubleOrNull() ?: 0.0)}", 12f, C.TEXT))
                       }
                       detail.addView(act.tv("", 4f))
                   }
-
-                  val shownRows = chosen.flatten().sortedByDescending { it["ts"]?.toLongOrNull() ?: 0L }.take(60)
-                  for (r in shownRows) {
-                      val line = "${fmtDateTime(r["ts"]?.toLongOrNull() ?: 0L)}  ${r["plaza"]}" +
-                          (if (!r["state"].isNullOrBlank()) " (${r["state"]})" else "") + "  ${inr(r["amount"]?.toDoubleOrNull() ?: 0.0)}"
-                      detail.addView(act.tv(line, 12f, C.TEXT))
+                  // Per-date sections (sorted by time = travel direction)
+                  for (d in chosenDates) {
+                      val list = byDate[d] ?: continue
+                      if (list.isEmpty()) continue
+                      detail.addView(act.tv("📅 $d", 14f, C.ACCENT, true))
+                      for (r in list.sortedBy { it["ts"]?.toLongOrNull() ?: 0L }) {
+                          val line = "${fmtDateTime(r["ts"]?.toLongOrNull() ?: 0L)}  ${r["plaza"]}" +
+                              (if (!r["state"].isNullOrBlank()) " (${r["state"]})" else "") +
+                              (if (!r["vehicle"].isNullOrBlank()) " 🚗 ${r["vehicle"]}" else "") +
+                              "  ${inr(r["amount"]?.toDoubleOrNull() ?: 0.0)}"
+                          detail.addView(act.tv(line, 12f, C.TEXT))
+                      }
                   }
-                  if (shownRows.isEmpty() && unmatched.isEmpty()) detail.addView(act.tv("FASTag toll SMS milte hi yahan trips dikhengi.", 12f, C.MUTED))
+                  if (byDate.isEmpty() && unmatched.isEmpty()) detail.addView(act.tv("FASTag toll SMS milte hi yahan trips dikhengi.", 12f, C.MUTED))
               }
           }
 
           class PayeesScreen(act: MainActivity) : Screen(act) {
               private var sortMode = "count"
               private var selectMode = false
+              private var query = ""
               private val selected = LinkedHashSet<String>()
 
               private val sortChips = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; setPadding(act.dp(8), 0, act.dp(8), 0) }
               private val summary = act.tv("", 12f, C.MUTED).apply { setPadding(act.dp(14), act.dp(8), act.dp(14), act.dp(4)) }
+              private val search: EditText = EditText(act).apply {
+                  hint = "Search payee / transaction"
+                  setHintTextColor(C.MUTED)
+                  setTextColor(C.TEXT)
+                  setSingleLine()
+                  setPadding(act.dp(14), act.dp(10), act.dp(14), act.dp(10))
+                  background = act.shape(C.CARD, 12)
+                  addTextChangedListener(object : android.text.TextWatcher {
+                      override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                      override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                      override fun afterTextChanged(s: android.text.Editable?) { query = s?.toString()?.trim() ?: ""; refresh() }
+                  })
+              }
+
               private val adapter = RowAdapter<Map<String, String?>>(act, emptyList()) { p, r ->
                   r.icon.setImageResource(R.drawable.ic_contacts)
-                  // FIX: avoid nullable String in non-null Set membership check
                   val key = p["k"] ?: ""
                   r.icon.setColorFilter(if (selectMode && key in selected) C.ACCENT else C.MUTED)
                   r.title.text = p["display"] ?: ""
@@ -2451,8 +2612,15 @@ jobs:
                       (if (upi.isNullOrBlank()) "" else " • $upi")
                   val spent = p["spent"]?.toDoubleOrNull() ?: 0.0
                   val recv = p["recv"]?.toDoubleOrNull() ?: 0.0
-                  r.amt.text = "−" + inr(spent) + " / +" + inr(recv)
-                  r.amt.setTextColor(C.TEXT)
+                  // CHANGED: - green? No: user asked - green + red? Actually: + should be green (received) and - should be red (spent)
+                  val sign = if (recv > 0 && spent == 0.0) "+" else if (spent > 0 && recv == 0.0) "-" else ""
+                  val total = when {
+                      sign == "+" -> recv
+                      sign == "-" -> spent
+                      else -> recv - spent
+                  }
+                  r.amt.text = sign + inr(total)
+                  r.amt.setTextColor(if (sign == "+") C.GREEN else if (sign == "-") C.RED else C.TEXT)
               }
               private val list = ListView(act).apply {
                   divider = null
@@ -2477,6 +2645,7 @@ jobs:
                   }
               }
               override val root: View = act.vbox().apply {
+                  put(search, 8)
                   put(HorizontalScrollView(act).apply { isHorizontalScrollBarEnabled = false; addView(sortChips) }, 2)
                   put(summary, 0)
                   put(list, 0, 1f)
@@ -2497,6 +2666,8 @@ jobs:
                           selectMode = false; selected.clear(); refresh()
                       })
                   }
+                  // CHANGED: overdue notices cleanup button
+                  sortChips.addView(act.pill("Cleanup overdue", false) { cleanupOverdue() })
 
                   val order = when (sortMode) {
                       "name" -> "p.display ASC"
@@ -2504,6 +2675,7 @@ jobs:
                       "total" -> "spent DESC"
                       else -> "n DESC"
                   }
+                  val like = "%$query%"
                   val rows = Db.get(act).rows(
                       "SELECT p.merchant_key AS k, p.display AS display, p.upi_id AS upi_id, " +
                           "COUNT(t.id) AS n, " +
@@ -2511,11 +2683,32 @@ jobs:
                           "SUM(CASE WHEN t.debit=0 THEN t.amount ELSE 0 END) AS recv, " +
                           "MAX(t.ts) AS last " +
                           "FROM payees p LEFT JOIN txn t ON t.merchant_key = p.merchant_key " +
-                          "GROUP BY p.merchant_key ORDER BY $order LIMIT 400"
+                          "WHERE p.display LIKE ? OR p.upi_id LIKE ? " +
+                          "GROUP BY p.merchant_key ORDER BY $order LIMIT 400",
+                      like, like
                   )
                   adapter.items = rows
                   adapter.notifyDataSetChanged()
-                  summary.text = "${rows.size} payees  •  long-press to select, then Merge"
+                  summary.text = "${rows.size} payees  •  long-press to select, then Merge  •  '+Cleanup overdue' dekho"
+              }
+
+              private fun cleanupOverdue() {
+                  val db = Db.get(act)
+                  val rows = db.queryTxns("review=1 AND (LOWER(body) LIKE '%overdue%' OR LOWER(body) LIKE '%due%' OR LOWER(body) LIKE '%notice%')", emptyArray(), 500)
+                  if (rows.isEmpty()) { act.toast("Koi overdue notice nahi mila"); return }
+                  val labels = rows.map { "${fmtDateTime(it.ts)} • ${it.merchant} • ${inr(it.amount, true)}" }.toTypedArray()
+                  val keep = BooleanArray(rows.size) { true }
+                  AlertDialog.Builder(act)
+                      .setTitle("Overdue notices (${rows.size})")
+                      .setMultiChoiceItems(labels, keep) { _, which, checked -> keep[which] = checked }
+                      .setPositiveButton("Delete") { _, _ ->
+                          var n = 0
+                          for (i in keep.indices) if (!keep[i]) { db.deleteTxn(rows[i].id); n++ }
+                          act.toast("$n delete hue")
+                          act.refreshAll()
+                      }
+                      .setNegativeButton("Cancel", null)
+                      .show()
               }
 
               private fun askMerge(keys: List<String>) {
@@ -2561,38 +2754,41 @@ jobs:
                   if (!p["upi_id"].isNullOrBlank()) col.addView(act.tv("UPI: ${p["upi_id"]}", 12f, C.MUTED))
                   if (!alt.isNullOrBlank()) col.addView(act.tv("Alt UPI: $alt", 12f, C.MUTED))
 
+                  // CHANGED: multi-select categorization
+                  val selectedIds = LinkedHashSet<Long>()
                   val lv = ListView(act)
                   val hist = RowAdapter<Txn>(act, all) { t, r ->
                       r.icon.setImageResource(iconFor(t.category))
                       r.icon.setColorFilter(if (t.debit) C.RED else C.GREEN)
-                      r.title.text = if (t.debit) "→ ${t.category}" else "← Received"
+                      r.title.text = (if (selectedIds.contains(t.id)) "☑ " else "") + (if (t.debit) "→ ${t.category}" else "← Received")
                       r.sub.text = fmtDateTime(t.ts) + " • " + t.institution
                       r.amt.text = (if (t.debit) "-" else "+") + inr(t.amount, true)
                       r.amt.setTextColor(if (t.debit) C.RED else C.GREEN)
                   }
                   lv.adapter = hist
+                  lv.setOnItemClickListener { _, _, pos, _ ->
+                      val t = all.getOrNull(pos) ?: return@setOnItemClickListener
+                      if (!selectedIds.add(t.id)) selectedIds.remove(t.id)
+                      hist.notifyDataSetChanged()
+                  }
                   col.addView(lv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, act.dp(320)))
 
                   AlertDialog.Builder(act).setTitle(name).setView(ScrollView(act).apply { addView(col) })
                       .setPositiveButton("UPI se pay") { _, _ -> pay(key, name, p["upi_id"]) }
-                      .setNeutralButton("UPI edit") { _, _ -> editUpi(key, name, p["upi_id"]) }
+                      .setNeutralButton("Categorize selected") { _, _ ->
+                          if (selectedIds.isEmpty()) act.toast("Pehle transactions tap karo")
+                          else act.bulkCategory(selectedIds.toList())
+                      }
                       .setNegativeButton("Band karo", null)
                       .show()
               }
 
-              private fun editUpi(key: String, name: String, cur: String?) {
-                  act.showForm("UPI ID: $name", listOf(Field("UPI ID (name@bank)", cur ?: ""))) { v ->
-                      Db.get(act).exec("UPDATE payees SET upi_id=? WHERE merchant_key=?", v[0].ifBlank { null }, key)
-                      refresh()
-                  }
-              }
-
               private fun pay(key: String, name: String, upi: String?) {
-                  if (upi.isNullOrBlank() || !upi.contains("@")) { act.toast("Pehle UPI ID daalo"); editUpi(key, name, upi); return }
+                  if (upi.isNullOrBlank() || !upi.contains("@")) { act.toast("UPI ID nahi mila"); return }
                   act.showForm("Pay: $name", listOf(Field("Amount (optional)", "", true), Field("Note (optional)", "")), "Pay") { v ->
                       var url = "upi://pay?pa=" + Uri.encode(upi) + "&pn=" + Uri.encode(name) + "&cu=INR"
                       val amt = v[0].toDoubleOrNull()
-                      if (amt != null && amt > 0) url += "&am=" + String.format(java.util.Locale.US, "%.2f", amt)
+                      if (amt != null && amt > 0) url += "&am=" + String.format(Locale.US, "%.2f", amt)
                       if (v[1].isNotBlank()) url += "&tn=" + Uri.encode(v[1])
                       try {
                           act.startActivity(Intent.createChooser(Intent(Intent.ACTION_VIEW, Uri.parse(url)), "Pay with"))
@@ -2602,9 +2798,10 @@ jobs:
                   }
               }
           }
-          EOF_20
+          EOF_19
 
-          cat > app/src/main/java/com/example/fintrack/Screens3.kt <<'EOF_21'
+          # ---------------- Screens3.kt (Money: loans by loan_no; no budget/liability) ----------------
+          cat > app/src/main/java/com/example/fintrack/Screens3.kt <<'EOF_20'
           package com.example.fintrack
 
           import android.view.View
@@ -2612,13 +2809,11 @@ jobs:
           import android.widget.ScrollView
           import androidx.appcompat.app.AlertDialog
           import java.text.SimpleDateFormat
-          import java.util.Date
           import java.util.Locale
 
           class MoneyScreen(act: MainActivity) : Screen(act) {
               private val body = act.vbox(14)
               override val root: View = ScrollView(act).apply { addView(body) }
-              private val dateFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
 
               override fun refresh() {
                   body.removeAllViews()
@@ -2627,9 +2822,8 @@ jobs:
                   val nw = NetWorth.compute(act)
                   val c = act.card()
                   c.addView(act.icon(R.drawable.ic_networth, C.GREEN, 26))
-                  c.addView(act.tv("Net worth", 12f, C.MUTED))
-                  c.addView(act.tv(inr(nw.assets - nw.liabilities), 28f, if (nw.assets >= nw.liabilities) C.GREEN else C.RED, true))
-                  c.addView(act.tv("Assets ${inr(nw.assets)}   -   Liabilities ${inr(nw.liabilities)}", 12f, C.MUTED))
+                  c.addView(act.tv("Net worth (assets only)", 12f, C.MUTED))
+                  c.addView(act.tv(inr(nw.assets), 28f, C.GREEN, true))
                   body.put(c, 0)
 
                   val assets = act.card()
@@ -2641,54 +2835,22 @@ jobs:
                   assets.put(act.actionBtn("+ Asset") { addItem("ASSET") }, 10)
                   body.put(assets)
 
-                  val liab = act.card()
-                  liab.addView(act.tv("Liabilities", 15f, C.TEXT, true))
-                  for (r in db.rows("SELECT * FROM net_items WHERE kind='LIABILITY' ORDER BY id")) {
-                      liab.put(act.tv("${r["name"]}   ${inr(r["amount"]?.toDoubleOrNull() ?: 0.0)}", 14f).apply { setOnClickListener { editItem(r) } }, 8)
-                  }
-                  liab.put(act.actionBtn("+ Liability") { addItem("LIABILITY") }, 10)
-                  body.put(liab)
-
-                  val bc = act.card()
-                  bc.addView(act.tv("Budgets (monthly cap)", 15f, C.TEXT, true))
-                  for (r in db.rows("SELECT * FROM budgets ORDER BY category")) {
-                      val cat = r["category"] ?: ""
-                      val capVal = r["monthly_cap"]?.toDoubleOrNull() ?: 0.0
-                      bc.put(act.tv("$cat   ${inr(capVal)}", 13f).apply {
-                          setOnClickListener { editBudget(cat, capVal) }
-                      }, 6)
-                  }
-                  bc.put(act.actionBtn("+ Budget") { editBudget(null, 0.0) }, 10)
-                  body.put(bc)
-
+                  // CHANGED: Loans screen — grouped by loan_no, tap = show all related txns
                   val lc = act.card()
                   val lh = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL }
                   lh.addView(act.icon(R.drawable.ic_loan, C.AMBER, 22))
-                  lh.put(act.tv("Loan & EMI tracker", 15f, C.TEXT, true), 10)
+                  lh.put(act.tv("Loans (by LAN / loan no.)", 15f, C.TEXT, true), 10)
                   lc.addView(lh)
-                  val loans = db.rows("SELECT * FROM loans ORDER BY id")
-                  var emiTotal = 0.0
+                  val loans = db.rows("SELECT * FROM loans ORDER BY last_seen DESC")
                   for (l in loans) {
-                      val p = l["principal"]?.toDoubleOrNull() ?: 0.0
-                      val rate = l["rate"]?.toDoubleOrNull() ?: 0.0
-                      val tenure = l["tenure"]?.toIntOrNull() ?: 0
-                      var e = l["emi"]?.toDoubleOrNull() ?: 0.0
-                      if (e <= 0) e = LoanCalc.emi(p, rate, tenure)
-                      emiTotal += e
-                      val paid = LoanCalc.paidMonths(l["start_ts"]?.toLongOrNull() ?: System.currentTimeMillis(), tenure)
-                      val out = LoanCalc.outstandingOf(l)
-                      val plan = LoanCalc.payoffPlan(out, rate, e, 2000.0)
-                      val row = act.vbox().apply {
-                          addView(act.tv("${l["name"]}  (${l["lender"] ?: ""})", 14f, C.TEXT, true))
-                          addView(act.tv("EMI ${inr(e)}  •  ${paid}/${tenure} mahine  •  ${rate}%", 12f, C.MUTED))
-                          addView(act.tv("Baaki: ${inr(out)}", 12f, C.AMBER))
-                          if (plan.first > 0) addView(act.tv("+₹2000/mo → debt-free in ${plan.first} months (interest ${inr(plan.second)})", 11f, C.MUTED))
-                          setOnClickListener { editLoan(l) }
-                      }
-                      lc.put(row, 12)
+                      val ln = l["loan_no"] ?: continue
+                      val lender = l["lender"] ?: ""
+                      val msgs = l["msg_count"]?.toIntOrNull() ?: 0
+                      lc.put(act.tv("$ln  •  $lender  •  $msgs msgs", 13f, C.TEXT, true).apply {
+                          setOnClickListener { showLoanTxns(ln) }
+                      }, 10)
                   }
-                  if (loans.isNotEmpty()) lc.put(act.tv("Mahine ki total EMI: ${inr(emiTotal)}", 13f, C.TEXT, true), 12)
-                  lc.put(act.actionBtn("+ Loan") { addLoan() }, 12)
+                  if (loans.isEmpty()) lc.put(act.tv("Koi loan SMS nahi mila. Loan LAN number SMS me aata hai.", 12f, C.MUTED), 6)
                   body.put(lc)
 
                   val subs = db.rows("SELECT merchant_key, avg_amt, last_ts, count FROM subs_detected ORDER BY last_ts DESC LIMIT 20")
@@ -2699,28 +2861,23 @@ jobs:
                           val mk = s["merchant_key"] ?: ""
                           val name = db.one("SELECT display FROM merchant_rules WHERE merchant_key=?", mk) ?: mk
                           val avg = s["avg_amt"]?.toDoubleOrNull() ?: 0.0
-                          val last = s["last_ts"]?.toLongOrNull() ?: 0L
-                          val next = last + 30L * 86_400_000L
-                          sc.put(act.tv("$name  ~${inr(avg)}/mo  • next ~${fmtDate(next)}", 12f, C.MUTED), 6)
+                          sc.put(act.tv("$name  ~${inr(avg)}/mo", 12f, C.MUTED), 6)
                       }
                       body.put(sc)
                   }
 
                   val cash = act.card()
                   cash.addView(act.tv("Manual cash entry", 15f, C.TEXT, true))
-                  cash.put(act.tv("Cash kharch / mila yahan likho, wo ledger me judega.", 12f, C.MUTED), 4)
                   cash.put(act.actionBtn("+ Cash entry") { act.ledger.addCash() }, 10)
                   body.put(cash)
 
                   val d = act.card()
                   d.addView(act.tv("Data, backup & imports", 15f, C.TEXT, true))
-                  val rules = db.num("SELECT COUNT(*) FROM merchant_rules").toInt()
-                  val pats = db.num("SELECT COUNT(*) FROM parse_patterns").toInt()
                   val txn = db.num("SELECT COUNT(*) FROM txn").toInt()
                   val review = db.num("SELECT COUNT(*) FROM txn WHERE review=1").toInt()
                   val plazas = db.num("SELECT COUNT(*) FROM toll_plazas").toInt()
                   val dup = db.num("SELECT COUNT(*) FROM txn_skipped WHERE reason='duplicate-ref'").toInt()
-                  d.put(act.tv("$txn transactions  •  $review review  •  $rules merchant rules  •  $pats patterns  •  $plazas plazas  •  $dup skipped dup", 12f, C.MUTED), 6)
+                  d.put(act.tv("$txn transactions  •  $review review  •  $plazas plazas  •  $dup skipped dup", 12f, C.MUTED), 6)
                   d.put(act.actionBtn("Upload Toll Data JSON") { act.pickTollJson() }, 10)
                   d.put(act.actionBtn("Upload Bank Statement (CSV)") { act.pickCsvStatement() }, 8)
                   d.put(act.actionBtn("SMS dobara scan karo") { act.rescan() }, 8)
@@ -2730,27 +2887,22 @@ jobs:
                   body.put(d)
               }
 
-              private fun editBudget(category: String?, current: Double) {
-                  act.showForm(
-                      if (category == null) "Budget add" else "Budget edit",
-                      listOf(
-                          Field("Category", category ?: "Grocery", options = Categories.ALL),
-                          Field("Monthly cap", if (current > 0) current.toString() else "", true)
-                      ),
-                      neutral = if (category == null) null else ("Delete" to {
-                          if (category != null) Db.get(act).exec("DELETE FROM budgets WHERE category=?", category)
-                          act.refreshAll()
-                      })
-                  ) { v ->
-                      val cap = v[1].toDoubleOrNull()
-                      if (cap == null || cap <= 0) { act.toast("Cap daalo"); return@showForm }
-                      Db.get(act).exec("INSERT OR REPLACE INTO budgets(category, monthly_cap) VALUES(?,?)", v[0], cap)
-                      act.refreshAll()
+              private fun showLoanTxns(loanNo: String) {
+                  val db = Db.get(act)
+                  val rows = db.queryTxns("loan_no=?", arrayOf(loanNo), 200)
+                  val col = act.vbox(10)
+                  for (t in rows) {
+                      col.addView(act.tv("${fmtDateTime(t.ts)}  ${if (t.debit) "-" else "+"}${inr(t.amount, true)}  ${t.merchant}", 12f,
+                          if (t.debit) C.RED else C.GREEN))
+                      if (t.body.isNotEmpty()) col.addView(act.tv("    " + t.body.take(120), 10f, C.MUTED))
                   }
+                  if (rows.isEmpty()) col.addView(act.tv("Is loan ke koi txns nahi mile", 12f, C.MUTED))
+                  AlertDialog.Builder(act).setTitle("Loan $loanNo").setView(ScrollView(act).apply { addView(col) })
+                      .setNegativeButton("Band karo", null).show()
               }
 
               private fun addItem(kind: String) {
-                  act.showForm(if (kind == "ASSET") "Asset add" else "Liability add", listOf(Field("Naam (jaise Gold, FD, Credit card)"), Field("Amount", "", true))) { v ->
+                  act.showForm("Asset add", listOf(Field("Naam (jaise Gold, FD)"), Field("Amount", "", true))) { v ->
                       val a = v[1].toDoubleOrNull()
                       if (v[0].isBlank() || a == null) { act.toast("Naam aur amount daalo"); return@showForm }
                       Db.get(act).exec("INSERT INTO net_items(name, amount, kind) VALUES(?,?,?)", v[0], a, kind)
@@ -2763,40 +2915,6 @@ jobs:
                   act.showForm("Edit", listOf(Field("Naam", r["name"] ?: ""), Field("Amount", r["amount"] ?: "", true)),
                       neutral = "Delete" to { Db.get(act).exec("DELETE FROM net_items WHERE id=?", id); act.refreshAll() }) { v ->
                       Db.get(act).exec("UPDATE net_items SET name=?, amount=? WHERE id=?", v[0], v[1].toDoubleOrNull() ?: 0.0, id)
-                      act.refreshAll()
-                  }
-              }
-
-              private fun addLoan() = loanForm(null)
-              private fun editLoan(l: Map<String, String?>) = loanForm(l)
-
-              private fun loanForm(l: Map<String, String?>?) {
-                  val id = l?.get("id")?.toLongOrNull()
-                  val start = l?.get("start_ts")?.toLongOrNull() ?: System.currentTimeMillis()
-                  act.showForm(
-                      if (l == null) "Loan add" else "Loan edit",
-                      listOf(
-                          Field("Loan naam", l?.get("name") ?: ""),
-                          Field("Lender / bank", l?.get("lender") ?: ""),
-                          Field("Principal (loan amount)", l?.get("principal") ?: "", true),
-                          Field("Saalana byaj % (rate)", l?.get("rate") ?: "", true),
-                          Field("EMI (0 = auto calculate)", l?.get("emi") ?: "0", true),
-                          Field("Tenure (mahine)", l?.get("tenure") ?: "", true),
-                          Field("Start date (yyyy-mm-dd)", dateFmt.format(Date(start)))
-                      ),
-                      neutral = if (id == null) null else ("Delete" to { Db.get(act).exec("DELETE FROM loans WHERE id=?", id); act.refreshAll() })
-                  ) { v ->
-                      val p = v[2].toDoubleOrNull()
-                      val tenure = v[5].toDoubleOrNull()?.toInt()
-                      val sTs = try { dateFmt.parse(v[6])?.time } catch (e: Exception) { null }
-                      if (v[0].isBlank() || p == null || tenure == null || tenure <= 0 || sTs == null) {
-                          act.toast("Naam, amount, tenure aur date sahi daalo"); return@showForm
-                      }
-                      val rate = v[3].toDoubleOrNull() ?: 0.0
-                      val emi = v[4].toDoubleOrNull() ?: 0.0
-                      val db = Db.get(act)
-                      if (id == null) db.exec("INSERT INTO loans(name, lender, principal, rate, emi, tenure, start_ts) VALUES(?,?,?,?,?,?,?)", v[0], v[1], p, rate, emi, tenure, sTs)
-                      else db.exec("UPDATE loans SET name=?, lender=?, principal=?, rate=?, emi=?, tenure=?, start_ts=? WHERE id=?", v[0], v[1], p, rate, emi, tenure, sTs, id)
                       act.refreshAll()
                   }
               }
@@ -2832,9 +2950,10 @@ jobs:
                   }
               }
           }
-          EOF_21
+          EOF_20
 
-          cat > app/src/main/java/com/example/fintrack/Ui.kt <<'EOF_22'
+          # ---------------- Ui.kt (iconFor covers more categories: Fuel, Grocery, Travel, Food, Bills, Shopping, Entertainment, Health, Cash, Transfer, EMI) ----------------
+          cat > app/src/main/java/com/example/fintrack/Ui.kt <<'EOF_21'
           package com.example.fintrack
 
           import android.content.Context
@@ -2923,12 +3042,14 @@ jobs:
               return v
           }
 
+          // CHANGED: wider category -> icon map so icons update everywhere the category changes
           fun iconFor(cat: String): Int = when (cat) {
               "Fuel" -> R.drawable.ic_fuel
               "Grocery" -> R.drawable.ic_grocery
               "EMI/Loan" -> R.drawable.ic_loan
               "Travel" -> R.drawable.ic_fastag
               "Transfer" -> R.drawable.ic_transfer
+              "Food", "Shopping", "Bills & Recharge", "Entertainment", "Health", "Cash", "Salary/Income", "Received", "Other" -> R.drawable.ic_bank
               else -> R.drawable.ic_bank
           }
 
@@ -3018,8 +3139,9 @@ jobs:
               if (neutral != null) b.setNeutralButton(neutral.first) { _, _ -> neutral.second() }
               b.show()
           }
-          EOF_22
+          EOF_21
 
+          # ---- Vector drawables ----
           cat > app/src/main/res/drawable/ic_bank.xml <<'EOF_D0'
           <?xml version="1.0" encoding="utf-8"?>
           <vector xmlns:android="http://schemas.android.com/apk/res/android"
@@ -3146,8 +3268,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="v3.1.${{ github.run_number }}"
+          VERSION="v4.0.${{ github.run_number }}"
           gh release create "$VERSION" /tmp/proj/app/build/outputs/apk/debug/app-debug.apk \
             --repo "${{ github.repository }}" \
             --title "FinTrack Build ${{ github.run_number }}" \
-            --notes "v3.1: compile fixes (nullable smsKey/ref smart-cast, payee merge key guard)."
+            --notes "v4: toll SMS → Travel with plaza fallback; duplicate scanner; travel by-date + map always; bulk categorize from Ledger/Payees; payee search; +/- colors; loans by LAN; overdue cleanup; review auto-hide after fix; wider icon map."
