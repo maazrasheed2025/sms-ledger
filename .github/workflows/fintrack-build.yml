@@ -65,8 +65,8 @@ jobs:
                   applicationId = "com.example.fintrack"
                   minSdk = 30
                   targetSdk = 33
-                  versionCode = 4
-                  versionName = "4.0"
+                  versionCode = 5
+                  versionName = "5.0"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -106,11 +106,28 @@ jobs:
                           <action android:name="android.provider.Telephony.SMS_RECEIVED"/>
                       </intent-filter>
                   </receiver>
+                  <provider
+                      android:name="androidx.core.content.FileProvider"
+                      android:authorities="${applicationId}.fileprovider"
+                      android:exported="false"
+                      android:grantUriPermissions="true">
+                      <meta-data
+                          android:name="android.support.FILE_PROVIDER_PATHS"
+                          android:resource="@xml/file_paths"/>
+                  </provider>
               </application>
           </manifest>
           EOF_4
 
-          # ---------------- Backup.kt (unchanged) ----------------
+          mkdir -p app/src/main/res/xml
+          cat > app/src/main/res/xml/file_paths.xml <<'EOF_XML1'
+          <?xml version="1.0" encoding="utf-8"?>
+          <paths xmlns:android="http://schemas.android.com/apk/res/android">
+              <external-files-path name="exports" path="exports/"/>
+              <cache-path name="cache" path="."/>
+          </paths>
+          EOF_XML1
+
           cat > app/src/main/java/com/example/fintrack/Backup.kt <<'EOF_5'
           package com.example.fintrack
 
@@ -128,9 +145,9 @@ jobs:
               )
 
               private val tables = listOf(
-                  "txn", "payees", "net_items", "loans", "loan_txns", "senders",
+                  "txn", "payees", "net_items", "senders",
                   "merchant_rules", "parse_patterns", "nb_words",
-                  "toll_trips", "toll_plazas", "payee_tags"
+                  "toll_trips", "toll_plazas", "payee_tags", "loans"
               )
 
               private val dateFmt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
@@ -243,7 +260,6 @@ jobs:
           }
           EOF_5
 
-          # ---------------- Db.kt (loans now keyed by loan_no; budget/liability removed) ----------------
           cat > app/src/main/java/com/example/fintrack/Db.kt <<'EOF_6'
           package com.example.fintrack
 
@@ -277,7 +293,7 @@ jobs:
               var loanNo: String? = null
           )
 
-          class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "fintrack.db", null, 4) {
+          class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "fintrack.db", null, 5) {
 
               companion object {
                   @Volatile private var inst: Db? = null
@@ -322,12 +338,14 @@ jobs:
                       db.execSQL("CREATE TABLE IF NOT EXISTS subs_detected (merchant_key TEXT PRIMARY KEY, avg_amt REAL, last_ts INTEGER, count INTEGER)")
                   }
                   if (oldVersion < 4) {
-                      // Drop old loans table if it exists and recreate with new shape
                       runCatching { db.execSQL("DROP TABLE IF EXISTS loans") }
                       db.execSQL("CREATE TABLE IF NOT EXISTS loans (loan_no TEXT PRIMARY KEY, lender TEXT, first_seen INTEGER, last_seen INTEGER, msg_count INTEGER DEFAULT 0)")
                       runCatching { db.execSQL("ALTER TABLE txn ADD COLUMN loan_no TEXT") }
                       runCatching { db.execSQL("CREATE INDEX IF NOT EXISTS idx_txn_loan ON txn(loan_no)") }
                       runCatching { db.execSQL("DROP TABLE IF EXISTS budgets") }
+                  }
+                  if (oldVersion < 5) {
+                      runCatching { db.execSQL("ALTER TABLE payees ADD COLUMN alt_upis TEXT") }
                   }
               }
 
@@ -518,7 +536,6 @@ jobs:
           }
           EOF_6
 
-          # ---------------- Learner.kt (unchanged) ----------------
           cat > app/src/main/java/com/example/fintrack/Learner.kt <<'EOF_7'
           package com.example.fintrack
 
@@ -669,7 +686,6 @@ jobs:
           }
           EOF_7
 
-          # ---------------- AiParser.kt (unchanged) ----------------
           cat > app/src/main/java/com/example/fintrack/AiParser.kt <<'EOF_8'
           package com.example.fintrack
 
@@ -736,7 +752,6 @@ jobs:
           }
           EOF_8
 
-          # ---------------- CsvImporter.kt (unchanged) ----------------
           cat > app/src/main/java/com/example/fintrack/CsvImporter.kt <<'EOF_9'
           package com.example.fintrack
 
@@ -890,7 +905,6 @@ jobs:
           }
           EOF_9
 
-          # ---------------- Importer.kt (unchanged) ----------------
           cat > app/src/main/java/com/example/fintrack/Importer.kt <<'EOF_10'
           package com.example.fintrack
 
@@ -934,7 +948,6 @@ jobs:
           }
           EOF_10
 
-          # ---------------- Subs.kt (unchanged) ----------------
           cat > app/src/main/java/com/example/fintrack/Subs.kt <<'EOF_11'
           package com.example.fintrack
 
@@ -970,7 +983,6 @@ jobs:
           }
           EOF_11
 
-          # ---------------- SmsEngine.kt (toll regex tighter + loan_no detect) ----------------
           cat > app/src/main/java/com/example/fintrack/SmsEngine.kt <<'EOF_12'
           package com.example.fintrack
 
@@ -1113,8 +1125,6 @@ jobs:
               private val acctRe = Regex("""(?i)(?:a/c|acct?|account|card|lan)\.?\s*(?:no\.?|number)?\s*(?:ending(?:\s+(?:with|in))?)?\s*(?:x+|\*+|#)?\s*([A-Za-z0-9]{3,20})\b""")
               private val refRe = Regex("""(?i)(?:upi\s*ref(?:\s*no)?|ref(?:erence)?\s*(?:no|number|id)?|rrn|utr)\s*[:.\-]?\s*([A-Za-z0-9]{6,22})""")
               private val vpaRe = Regex("""(?i)\b([a-z0-9][\w.\-]+@[a-z][a-z0-9]+)\b(?!\.[a-z]{2,3}\b)""")
-
-              // CHANGED: tollRe only fires when the word "toll"/"plaza"/"fastag"/"netc"/"nhai"/"ihmcl" appears as a standalone word
               private val tollRe = Regex("""(?i)(?:^|[^a-z])(?:fastag|netc|toll|plaza|nhai|ihmcl)(?:[^a-z]|$)""")
 
               private val walletAfterRe = Regex("""(?i)\b([A-Za-z][A-Za-z0-9]{1,20})\s+wallet\b""")
@@ -1127,8 +1137,6 @@ jobs:
               private val upiSlashRe = Regex("""(?i)upi/\w+/\d+/([A-Za-z][A-Za-z0-9 .\-]{2,30}?)(?:/|$)""")
               private val semiRe = Regex("""(?i)[;,]\s*([A-Za-z][A-Za-z0-9 &.\-']{2,30}?)\s+credited""")
               private val infoRe = Regex("""(?i)info[:\-\s]+([A-Za-z0-9 &.\-/@']{3,30})""")
-
-              // CHANGED: loan number detection (LAN / Loan a/c / Loan no etc.)
               private val loanNoRe = Regex("""(?i)\b(?:lan|loan\s*(?:a/?c|account|ac|no|number))\s*[:#\-]?\s*([A-Z0-9]{6,20})\b""")
 
               private val stopExact = setOf("upi", "neft", "imps", "rtgs", "a/c", "ac", "acct", "account", "you", "bank", "card", "self")
@@ -1343,7 +1351,6 @@ jobs:
           }
           EOF_12
 
-          # ---------------- SenderMap.kt (unchanged) ----------------
           cat > app/src/main/java/com/example/fintrack/SenderMap.kt <<'EOF_13'
           package com.example.fintrack
 
@@ -1400,7 +1407,6 @@ jobs:
           }
           EOF_13
 
-          # ---------------- SmsReceiver.kt (unchanged) ----------------
           cat > app/src/main/java/com/example/fintrack/SmsReceiver.kt <<'EOF_14'
           package com.example.fintrack
 
@@ -1432,7 +1438,6 @@ jobs:
           }
           EOF_14
 
-          # ---------------- Tolls.kt (looser plaza match: fall back to name from body) ----------------
           cat > app/src/main/java/com/example/fintrack/Tolls.kt <<'EOF_15'
           package com.example.fintrack
 
@@ -1448,6 +1453,12 @@ jobs:
               private var loaded = false
               private val stop = setOf("toll", "plaza", "tp", "the", "road", "ltd", "pvt", "and", "bridge", "gate", "check", "post")
               private val splitRe = Regex("""[^a-z0-9]+""")
+
+              // Aliases for common SMS spellings
+              private val aliases = mapOf(
+                  "anantram" to "anatram",
+                  "anatram" to "anatram"
+              )
 
               private fun toks(s: String): Set<String> =
                   s.lowercase().split(splitRe).filter { it.length >= 3 && it !in stop }.toSet()
@@ -1481,17 +1492,25 @@ jobs:
                   return index.values.flatten().toSet().size
               }
 
+              // RELAXED: overlap-based scoring, no longer requires ALL tokens.
               fun match(ctx: Context, text: String, amount: Double): Plaza? {
                   load(ctx)
-                  val bt = toks(text)
-                  if (bt.isEmpty()) return null
+                  val raw = toks(text)
+                  if (raw.isEmpty()) return null
+                  val bt = HashSet<String>()
+                  for (t in raw) {
+                      bt.add(t)
+                      aliases[t]?.let { bt.add(it) }
+                  }
                   val cand = HashSet<Plaza>()
                   for (t in bt) index[t]?.let { cand.addAll(it) }
                   var best: Plaza? = null
-                  var bestScore = -1.0
+                  var bestScore = 0.0
                   for (p in cand) {
-                      if (!p.toks.all { it in bt }) continue
-                      var score = p.toks.size * 10.0
+                      val overlap = p.toks.count { it in bt }
+                      if (overlap == 0) continue
+                      val overlapRatio = overlap.toDouble() / p.toks.size
+                      var score = overlap * 10.0 + overlapRatio * 10.0
                       val car = p.car
                       if (car != null && car > 0) score -= Math.min(Math.abs(car - amount) / car, 5.0)
                       if (score > bestScore) { best = p; bestScore = score }
@@ -1499,13 +1518,8 @@ jobs:
                   return best
               }
 
-              /**
-               * CHANGED: Fallback — when a toll SMS arrives but the plaza is not in our DB,
-               * we still record a synthetic trip so it shows up in Travel with the plaza name
-               * scraped from the SMS. lat/lon = 0 (will just not draw on the map).
-               */
-              private val plazaNameRe = Regex("""(?i)(?:at|for)\s+([A-Z][A-Za-z .\-]{2,40}?)(?:\s*\(|\s+on\b|$)""")
               private val vehicleRe = Regex("""\b([A-Z]{2}[\s\-]?\d{1,2}[\s\-]?[A-Z]{1,3}[\s\-]?\d{4})\b""")
+              private val plazaNameRe = Regex("""(?i)(?:at|for)\s+([A-Z][A-Za-z .\-]{2,40}?)(?:\s*\(|\s+on\b|$)""")
 
               fun record(ctx: Context, t: Txn) {
                   val db = Db.get(ctx)
@@ -1526,10 +1540,19 @@ jobs:
                       )
                   }
               }
+
+              // Fix pass: re-run matching for every toll txn.
+              fun rematchAll(ctx: Context): Int {
+                  load(ctx)
+                  val db = Db.get(ctx)
+                  val list = db.queryTxns("category='Travel' AND debit=1", emptyArray(), 5000)
+                  var n = 0
+                  for (t in list) { record(ctx, t); n++ }
+                  return n
+              }
           }
           EOF_15
 
-          # ---------------- PayeeOps.kt (adds merge helper reused by Payees & Ledger bulk ops) ----------------
           cat > app/src/main/java/com/example/fintrack/PayeeOps.kt <<'EOF_16'
           package com.example.fintrack
 
@@ -1594,7 +1617,6 @@ jobs:
                   }
               }
 
-              /** CHANGED: bulk re-categorize selected transaction IDs. */
               fun bulkSetCategory(ctx: Context, ids: List<Long>, category: String) {
                   if (ids.isEmpty()) return
                   val db = Db.get(ctx)
@@ -1614,7 +1636,6 @@ jobs:
                   }
               }
 
-              /** CHANGED: find duplicate groups (same amount + same upi/vpa + same calendar date + same direction). */
               data class DupGroup(
                   val key: String,
                   val amount: Double,
@@ -1651,12 +1672,12 @@ jobs:
           }
           EOF_16
 
-          # ---------------- MainActivity.kt (adds dup picker + bulk category + loan screen nav) ----------------
           cat > app/src/main/java/com/example/fintrack/MainActivity.kt <<'EOF_17'
           package com.example.fintrack
 
           import android.Manifest
           import android.content.ContentValues
+          import android.content.Intent
           import android.content.pm.PackageManager
           import android.net.Uri
           import android.os.Bundle
@@ -1677,6 +1698,8 @@ jobs:
           import androidx.biometric.BiometricPrompt
           import androidx.core.app.ActivityCompat
           import androidx.core.content.ContextCompat
+          import androidx.core.content.FileProvider
+          import java.io.File
           import java.text.SimpleDateFormat
           import java.util.Date
           import java.util.Locale
@@ -1837,21 +1860,85 @@ jobs:
                   }.start()
               }
 
+              // === FIXED BACKUP ===
+              // Strategy:
+              // 1) Write to Downloads via MediaStore (primary path).
+              // 2) If that fails, write to app's external-files-dir and share via FileProvider.
+              // 3) Final fallback: write to cache and share.
               fun backup() {
-                  try {
-                      val name = "fintrack_backup_" + SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date()) + ".csv"
-                      val values = ContentValues().apply {
-                          put(MediaStore.Downloads.DISPLAY_NAME, name)
-                          put(MediaStore.Downloads.MIME_TYPE, "text/csv")
-                          put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                  Thread {
+                      var csv: String
+                      try {
+                          csv = Backup.export(this)
+                      } catch (e: Exception) {
+                          runOnUiThread { toast("Backup error (export): ${e.message}") }
+                          return@Thread
                       }
-                      val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                      if (uri == null) { toast("Backup fail ho gaya"); return }
-                      contentResolver.openOutputStream(uri)?.use { it.write(Backup.export(this).toByteArray()) }
-                      toast("Downloads me save: $name")
-                  } catch (e: Exception) {
-                      toast("Backup error: ${e.message}")
-                  }
+                      val name = "fintrack_backup_" + SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date()) + ".csv"
+                      // 1) MediaStore.Downloads
+                      try {
+                          val values = ContentValues().apply {
+                              put(MediaStore.Downloads.DISPLAY_NAME, name)
+                              put(MediaStore.Downloads.MIME_TYPE, "text/csv")
+                              put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/FinTrack")
+                          }
+                          val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                          if (uri != null) {
+                              contentResolver.openOutputStream(uri)?.use { it.write(csv.toByteArray()) }
+                              runOnUiThread { toast("Backup saved: Downloads/FinTrack/$name") }
+                              return@Thread
+                          }
+                      } catch (e: Exception) {
+                          // fall through
+                      }
+                      // 2) App external-files/FileProvider share
+                      try {
+                          val dir = File(getExternalFilesDir(null), "exports")
+                          if (!dir.exists()) dir.mkdirs()
+                          val file = File(dir, name)
+                          file.writeText(csv)
+                          val uri = FileProvider.getUriForFile(
+                              this, "$packageName.fileprovider", file
+                          )
+                          val share = Intent(Intent.ACTION_SEND).apply {
+                              type = "text/csv"
+                              putExtra(Intent.EXTRA_STREAM, uri)
+                              putExtra(Intent.EXTRA_SUBJECT, name)
+                              addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                          }
+                          runOnUiThread {
+                              toast("Download folder block ho gaya, share dialog khol rahe hain")
+                              startActivity(Intent.createChooser(share, "Save backup"))
+                          }
+                          return@Thread
+                      } catch (e: Exception) {
+                          // fall through
+                      }
+                      // 3) Cache + share
+                      try {
+                          val file = File(cacheDir, name)
+                          file.writeText(csv)
+                          val uri = FileProvider.getUriForFile(
+                              this, "$packageName.fileprovider", file
+                          )
+                          val share = Intent(Intent.ACTION_SEND).apply {
+                              type = "text/csv"
+                              putExtra(Intent.EXTRA_STREAM, uri)
+                              addExtraShare(uri)
+                          }
+                          runOnUiThread {
+                              toast("Share dialog se save karo")
+                              startActivity(Intent.createChooser(share, "Save backup"))
+                          }
+                      } catch (e: Exception) {
+                          runOnUiThread { toast("Backup error: ${e.message}") }
+                      }
+                  }.start()
+              }
+
+              private fun Intent.addExtraShare(uri: Uri) {
+                  putExtra(Intent.EXTRA_STREAM, uri)
+                  addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
               }
 
               fun pickRestore() { openDoc.launch(arrayOf("text/*", "application/csv", "application/vnd.ms-excel", "*/*")) }
@@ -1872,7 +1959,9 @@ jobs:
               private fun doImportTolls(uri: Uri) {
                   Thread {
                       val count = Importer.importTollJson(applicationContext, uri)
-                      runOnUiThread { toast("$count toll plazas database me import hue"); refreshAll() }
+                      Tolls.load(this)
+                      val re = Tolls.rematchAll(this)
+                      runOnUiThread { toast("$count toll plazas import • $re tolls re-matched"); refreshAll() }
                   }.start()
               }
 
@@ -1908,7 +1997,6 @@ jobs:
                   }.start()
               }
 
-              /** CHANGED: bulk category dialog used from Ledger & Payees multi-select. */
               fun bulkCategory(ids: List<Long>) {
                   if (ids.isEmpty()) { toast("Pehle transactions chuno"); return }
                   val choices = Categories.ALL
@@ -1923,7 +2011,6 @@ jobs:
           }
           EOF_17
 
-          # ---------------- Screens1.kt (Home no budget/liability; Ledger scan-duplicates + bulk select; review auto-clean) ----------------
           cat > app/src/main/java/com/example/fintrack/Screens1.kt <<'EOF_18'
           package com.example.fintrack
 
@@ -2189,7 +2276,6 @@ jobs:
                           filter = filter.copy(year = null, month = null); refresh()
                       })
                   }
-                  // CHANGED: duplicate scan + bulk-select entry points
                   chips.addView(act.pill("Scan duplicates", false) { showDuplicates() })
                   if (selectMode) {
                       chips.addView(act.pill("Categorize (${selected.size})", true) {
@@ -2376,7 +2462,6 @@ jobs:
           }
           EOF_18
 
-          # ---------------- Screens2.kt (Travel: map always + dated groups; Payees: search, select, merge, overdue-delete, +/- colors) ----------------
           cat > app/src/main/java/com/example/fintrack/Screens2.kt <<'EOF_19'
           package com.example.fintrack
 
@@ -2512,7 +2597,6 @@ jobs:
               override val root: View = act.vbox().apply {
                   put(summary, 0)
                   put(HorizontalScrollView(act).apply { isHorizontalScrollBarEnabled = false; addView(chips) }, 2)
-                  // CHANGED: map is ALWAYS shown, fixed height
                   put(map, 4)
                   (getChildAt(childCount - 1).layoutParams as LinearLayout.LayoutParams).height = act.dp(280)
                   put(ScrollView(act).apply { addView(detail) }, 4, 1f)
@@ -2521,7 +2605,6 @@ jobs:
               override fun refresh() {
                   val db = Db.get(act)
                   val rows = db.rows("SELECT * FROM toll_trips ORDER BY ts ASC")
-                  // Group by date
                   val byDate = LinkedHashMap<String, MutableList<Map<String, String?>>>()
                   for (r in rows) {
                       val ts = r["ts"]?.toLongOrNull() ?: 0L
@@ -2537,9 +2620,15 @@ jobs:
                   for (d in byDate.keys.toList().reversed().take(30)) {
                       chips.addView(act.pill(d, selDate == d) { selDate = d; refresh() })
                   }
+                  // NEW: Fix Toll SMS button
+                  chips.addView(act.pill("Fix Toll SMS", false) {
+                      Thread {
+                          val n = Tolls.rematchAll(act)
+                          act.runOnUiThread { act.toast("$n toll txns re-matched"); refresh() }
+                      }.start()
+                  })
 
                   val chosenDates = if (selDate == null) byDate.keys.toList() else listOf(selDate!!)
-                  // Build map trips from full list of days
                   map.setTrips(chosenDates.map { d ->
                       (byDate[d] ?: emptyList()).sortedBy { it["ts"]?.toLongOrNull() ?: 0L }.map {
                           RouteMapView.Pt(
@@ -2552,7 +2641,6 @@ jobs:
                   })
 
                   detail.removeAllViews()
-                  // Show unmatched toll SMS
                   val unmatched = db.rows(
                       "SELECT id, ts, merchant, amount FROM txn WHERE category='Travel' AND debit=1 AND (SELECT COUNT(*) FROM toll_trips t WHERE t.txn_id=txn.id)=0 AND (LOWER(body) LIKE '%toll%' OR LOWER(body) LIKE '%fastag%' OR LOWER(body) LIKE '%plaza%') ORDER BY ts DESC LIMIT 30"
                   )
@@ -2563,7 +2651,6 @@ jobs:
                       }
                       detail.addView(act.tv("", 4f))
                   }
-                  // Per-date sections (sorted by time = travel direction)
                   for (d in chosenDates) {
                       val list = byDate[d] ?: continue
                       if (list.isEmpty()) continue
@@ -2612,7 +2699,6 @@ jobs:
                       (if (upi.isNullOrBlank()) "" else " • $upi")
                   val spent = p["spent"]?.toDoubleOrNull() ?: 0.0
                   val recv = p["recv"]?.toDoubleOrNull() ?: 0.0
-                  // CHANGED: - green? No: user asked - green + red? Actually: + should be green (received) and - should be red (spent)
                   val sign = if (recv > 0 && spent == 0.0) "+" else if (spent > 0 && recv == 0.0) "-" else ""
                   val total = when {
                       sign == "+" -> recv
@@ -2666,7 +2752,6 @@ jobs:
                           selectMode = false; selected.clear(); refresh()
                       })
                   }
-                  // CHANGED: overdue notices cleanup button
                   sortChips.addView(act.pill("Cleanup overdue", false) { cleanupOverdue() })
 
                   val order = when (sortMode) {
@@ -2689,7 +2774,7 @@ jobs:
                   )
                   adapter.items = rows
                   adapter.notifyDataSetChanged()
-                  summary.text = "${rows.size} payees  •  long-press to select, then Merge  •  '+Cleanup overdue' dekho"
+                  summary.text = "${rows.size} payees  •  long-press to select, then Merge"
               }
 
               private fun cleanupOverdue() {
@@ -2754,7 +2839,6 @@ jobs:
                   if (!p["upi_id"].isNullOrBlank()) col.addView(act.tv("UPI: ${p["upi_id"]}", 12f, C.MUTED))
                   if (!alt.isNullOrBlank()) col.addView(act.tv("Alt UPI: $alt", 12f, C.MUTED))
 
-                  // CHANGED: multi-select categorization
                   val selectedIds = LinkedHashSet<Long>()
                   val lv = ListView(act)
                   val hist = RowAdapter<Txn>(act, all) { t, r ->
@@ -2800,7 +2884,6 @@ jobs:
           }
           EOF_19
 
-          # ---------------- Screens3.kt (Money: loans by loan_no; no budget/liability) ----------------
           cat > app/src/main/java/com/example/fintrack/Screens3.kt <<'EOF_20'
           package com.example.fintrack
 
@@ -2808,8 +2891,6 @@ jobs:
           import android.widget.LinearLayout
           import android.widget.ScrollView
           import androidx.appcompat.app.AlertDialog
-          import java.text.SimpleDateFormat
-          import java.util.Locale
 
           class MoneyScreen(act: MainActivity) : Screen(act) {
               private val body = act.vbox(14)
@@ -2835,7 +2916,6 @@ jobs:
                   assets.put(act.actionBtn("+ Asset") { addItem("ASSET") }, 10)
                   body.put(assets)
 
-                  // CHANGED: Loans screen — grouped by loan_no, tap = show all related txns
                   val lc = act.card()
                   val lh = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL }
                   lh.addView(act.icon(R.drawable.ic_loan, C.AMBER, 22))
@@ -2952,7 +3032,6 @@ jobs:
           }
           EOF_20
 
-          # ---------------- Ui.kt (iconFor covers more categories: Fuel, Grocery, Travel, Food, Bills, Shopping, Entertainment, Health, Cash, Transfer, EMI) ----------------
           cat > app/src/main/java/com/example/fintrack/Ui.kt <<'EOF_21'
           package com.example.fintrack
 
@@ -3042,14 +3121,12 @@ jobs:
               return v
           }
 
-          // CHANGED: wider category -> icon map so icons update everywhere the category changes
           fun iconFor(cat: String): Int = when (cat) {
               "Fuel" -> R.drawable.ic_fuel
               "Grocery" -> R.drawable.ic_grocery
               "EMI/Loan" -> R.drawable.ic_loan
               "Travel" -> R.drawable.ic_fastag
               "Transfer" -> R.drawable.ic_transfer
-              "Food", "Shopping", "Bills & Recharge", "Entertainment", "Health", "Cash", "Salary/Income", "Received", "Other" -> R.drawable.ic_bank
               else -> R.drawable.ic_bank
           }
 
@@ -3141,7 +3218,6 @@ jobs:
           }
           EOF_21
 
-          # ---- Vector drawables ----
           cat > app/src/main/res/drawable/ic_bank.xml <<'EOF_D0'
           <?xml version="1.0" encoding="utf-8"?>
           <vector xmlns:android="http://schemas.android.com/apk/res/android"
@@ -3268,8 +3344,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="v4.0.${{ github.run_number }}"
+          VERSION="v5.0.${{ github.run_number }}"
           gh release create "$VERSION" /tmp/proj/app/build/outputs/apk/debug/app-debug.apk \
             --repo "${{ github.repository }}" \
             --title "FinTrack Build ${{ github.run_number }}" \
-            --notes "v4: toll SMS → Travel with plaza fallback; duplicate scanner; travel by-date + map always; bulk categorize from Ledger/Payees; payee search; +/- colors; loans by LAN; overdue cleanup; review auto-hide after fix; wider icon map."
+            --notes "v5: CSV backup fix (MediaStore + FileProvider fallback), Toll map fix (relaxed match + Anantram alias + Fix Toll SMS button), all v4 corrections preserved."
