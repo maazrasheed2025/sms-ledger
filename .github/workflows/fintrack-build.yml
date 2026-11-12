@@ -61,8 +61,8 @@ jobs:
                   applicationId = "com.example.fintrack"
                   minSdk = 30
                   targetSdk = 33
-                  versionCode = 12
-                  versionName = "8.4"
+                  versionCode = 13
+                  versionName = "8.5"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -90,6 +90,7 @@ jobs:
               <application
                   android:label="FinTrack"
                   android:allowBackup="false"
+                  android:usesCleartextTraffic="true"
                   android:theme="@style/Theme.AppCompat.DayNight.NoActionBar">
                   <activity android:name=".MainActivity" android:exported="true" android:configChanges="uiMode">
                       <intent-filter>
@@ -478,13 +479,22 @@ jobs:
           cat > app/src/main/java/com/example/fintrack/AiParser.kt <<'EOF_8'
           package com.example.fintrack
 
+          import org.json.JSONArray
           import org.json.JSONObject
           import java.io.OutputStreamWriter
           import java.net.HttpURLConnection
           import java.net.URL
 
+          /**
+           * Free AI parser using Groq (https://console.groq.com) — free tier allows
+           * ~30 req/min on llama-3.3-70b-versatile. No billing. Just set GROQ_API_KEY
+           * below (starts with gsk_...). If empty, SMS parsing falls back to the
+           * regular regex/heuristic pipeline (no crash, no AI call).
+           */
           object AiParser {
-              private const val GEMINI_API_KEY = ""
+              // Replace with your Groq key to enable AI parsing of unknown SMS.
+              private const val GROQ_API_KEY = ""
+
               fun redactSensitiveData(body: String): String {
                   var clean = body
                   clean = clean.replace(Regex("""(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b"""), "[REDACTED_VPA]")
@@ -492,26 +502,48 @@ jobs:
                   clean = clean.replace(Regex("""(?i)\b(?:a/c|acct?|account|card)\.?\s*(?:no\.?|number)?\s*(?:ending)?\s*(?:x+|\*+|#)?\s*\d{3,4}\b"""), "ACCOUNT: [REDACTED_ACC]")
                   return clean
               }
+
               fun parseUnknownSms(rawBody: String): Fields? {
-                  if (GEMINI_API_KEY.isBlank()) return null
+                  if (GROQ_API_KEY.isBlank()) return null
                   val redacted = redactSensitiveData(rawBody)
-                  val prompt = "Analyze this Indian SMS financial notice and return JSON ONLY: " + redacted
+                  val prompt = """
+          Analyze this Indian SMS financial notice. Return STRICT JSON ONLY, no markdown, no explanation:
+          {"amount": <number or null>, "debit": <true if money left the account, false if it arrived>, "merchant": <string or null>, "balance": <number or null>, "account_ending": <string or null>, "account_type": "BANK"|"CARD"|"WALLET"|"UPI"|"ATM"|"OTHER"}
+
+          SMS: $redacted
+                  """.trimIndent()
                   return try {
-                      val url = URL("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$GEMINI_API_KEY")
+                      val url = URL("https://api.groq.com/openai/v1/chat/completions")
                       val conn = url.openConnection() as HttpURLConnection
-                      conn.requestMethod = "POST"; conn.setRequestProperty("Content-Type", "application/json"); conn.doOutput = true
-                      val jsonPayload = JSONObject().apply { put("contents", listOf(JSONObject().apply { put("parts", listOf(JSONObject().apply { put("text", prompt) })) })) }
-                      OutputStreamWriter(conn.outputStream).use { it.write(jsonPayload.toString()) }
+                      conn.requestMethod = "POST"
+                      conn.connectTimeout = 8000
+                      conn.readTimeout = 8000
+                      conn.setRequestProperty("Content-Type", "application/json")
+                      conn.setRequestProperty("Authorization", "Bearer $GROQ_API_KEY")
+                      conn.doOutput = true
+                      val payload = JSONObject().apply {
+                          put("model", "llama-3.3-70b-versatile")
+                          put("temperature", 0.0)
+                          put("max_tokens", 200)
+                          put("messages", JSONArray().apply {
+                              put(JSONObject().apply { put("role", "user"); put("content", prompt) })
+                          })
+                      }
+                      OutputStreamWriter(conn.outputStream).use { it.write(payload.toString()) }
                       if (conn.responseCode == 200) {
                           val respText = conn.inputStream.bufferedReader().use { it.readText() }
-                          val textResponse = JSONObject(respText).getJSONArray("candidates").getJSONObject(0).getJSONObject("content").getJSONArray("parts").getJSONObject(0).getString("text")
-                          val start = textResponse.indexOf("{"); val end = textResponse.lastIndexOf("}")
+                          val text = JSONObject(respText).getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content")
+                          val start = text.indexOf("{"); val end = text.lastIndexOf("}")
                           if (start < 0 || end <= start) return null
-                          val parsed = JSONObject(textResponse.substring(start, end + 1))
-                          Fields(amount = parsed.optDouble("amount"), debit = parsed.optBoolean("debit"), merchant = parsed.optString("merchant"),
+                          val parsed = JSONObject(text.substring(start, end + 1))
+                          Fields(
+                              amount = if (parsed.isNull("amount")) null else parsed.optDouble("amount"),
+                              debit = if (parsed.isNull("debit")) null else parsed.optBoolean("debit"),
+                              merchant = if (parsed.isNull("merchant")) null else parsed.optString("merchant"),
                               balance = if (parsed.isNull("balance")) null else parsed.optDouble("balance"),
                               account = if (parsed.isNull("account_ending")) null else parsed.optString("account_ending"),
-                              channel = parsed.optString("account_type", "OTHER"))
+                              channel = parsed.optString("account_type", "OTHER")
+                          )
                       } else null
                   } catch (e: Exception) { null }
               }
@@ -1092,6 +1124,9 @@ jobs:
           }
           EOF_15
 
+          # ============================================================
+          # PayeeOps.kt — NEW smart duplicate grouping + smart delete
+          # ============================================================
           cat > app/src/main/java/com/example/fintrack/PayeeOps.kt <<'EOF_16'
           package com.example.fintrack
 
@@ -1142,18 +1177,81 @@ jobs:
                       w.setTransactionSuccessful()
                   } finally { w.endTransaction() }
               }
-              data class DupGroup(val key: String, val amount: Double, val debit: Boolean, val vpa: String, val ts: Long, val ids: List<Long>, val sample: Txn)
+
+              /**
+               * Duplicate group = same amount + same direction + same calendar day + same UPI/VP
+               * OR fuzzy merchant. Only includes groups with 2+ items.
+               */
+              data class DupGroup(
+                  val key: String,
+                  val amount: Double,
+                  val debit: Boolean,
+                  val vpa: String,
+                  val ts: Long,
+                  val ids: List<Long>,
+                  val sample: Txn
+              )
+
+              /**
+               * "Unknown" heuristic — if merchant is literally "Unknown" OR body starts with
+               * a FED-like sender token with no real merchant, the SMS is almost useless.
+               */
+              private fun isJunk(t: Txn): Boolean {
+                  val m = t.merchant.trim().lowercase()
+                  if (m == "unknown" || m.isEmpty()) return true
+                  // FEDFIB style — 6 uppercase letters, no space, no letters pattern
+                  if (t.merchant.matches(Regex("[A-Z]{5,8}"))) return true
+                  if (t.institution.contains("Unknown", ignoreCase = true) && m == "unknown") return true
+                  return false
+              }
+
+              /**
+               * Score how "good" a transaction is. Higher is better. Used to *keep* the best.
+               * - Real merchant (not junk): +50
+               * - Has UPI vpa: +30
+               * - Longer merchant text: +length/5 (capped)
+               * - Has a reference: +15
+               * - Has a balance: +10
+               */
+              private fun qualityScore(t: Txn): Double {
+                  var s = 0.0
+                  if (!isJunk(t)) s += 50.0
+                  if (!t.vpa.isNullOrBlank()) s += 30.0
+                  if (!t.ref.isNullOrBlank()) s += 15.0
+                  if (t.balance != null) s += 10.0
+                  s += Math.min(t.merchant.length / 5.0, 20.0)
+                  return s
+              }
+
+              /**
+               * Returns the list of ids that should be DELETED for a duplicate group.
+               * Keeps the highest-quality txn, deletes the rest.
+               * If all are "junk", keeps the longest-merchant one.
+               * If a specific known-UPI merchant exists, it wins.
+               */
+              fun smartDeleteIds(list: List<Txn>): List<Long> {
+                  if (list.size < 2) return emptyList()
+                  val sorted = list.sortedByDescending { qualityScore(it) }
+                  val keep = sorted.first()
+                  return sorted.drop(1).map { it.id }
+              }
+
+              /**
+               * Find duplicate groups using amount + direction + day.
+               */
               fun findDuplicates(ctx: Context): List<DupGroup> {
                   val db = Db.get(ctx)
-                  val rows = db.queryTxns("vpa IS NOT NULL AND vpa != ''", emptyArray(), 5000)
+                  val rows = db.queryTxns("1=1", emptyArray(), 5000)
                   val cal = java.util.Calendar.getInstance()
                   val groups = LinkedHashMap<String, MutableList<Txn>>()
                   for (t in rows) {
-                      val vpa = t.vpa ?: continue
                       cal.timeInMillis = t.ts
                       val y = cal.get(java.util.Calendar.YEAR); val m = cal.get(java.util.Calendar.MONTH); val d = cal.get(java.util.Calendar.DAY_OF_MONTH)
                       val day = String.format(java.util.Locale.US, "%04d-%02d-%02d", y, m + 1, d)
-                      val key = String.format(java.util.Locale.US, "%.2f|%s|%s|%s", t.amount, if (t.debit) "D" else "C", vpa.lowercase(), day)
+                      val amt = String.format(java.util.Locale.US, "%.2f", t.amount)
+                      val dir = if (t.debit) "D" else "C"
+                      // Group by amount + direction + day
+                      val key = "$amt|$dir|$day"
                       groups.getOrPut(key) { ArrayList() }.add(t)
                   }
                   val out = ArrayList<DupGroup>()
@@ -1164,9 +1262,28 @@ jobs:
                   }
                   return out
               }
+
+              /**
+               * Flatten all duplicate transactions with a "should_delete" flag for a
+               * simple list-with-checkboxes UI.
+               */
+              data class DupRow(val txn: Txn, val groupKey: String, val defaultDelete: Boolean)
+              fun flattenDuplicates(ctx: Context): List<DupRow> {
+                  val groups = findDuplicates(ctx)
+                  val out = ArrayList<DupRow>()
+                  for (g in groups) {
+                      val txns = g.ids.mapNotNull { id -> Db.get(ctx).queryTxns("id=?", arrayOf(id.toString()), 1).firstOrNull() }
+                      val deleteSet = smartDeleteIds(txns).toSet()
+                      for (t in txns) out.add(DupRow(t, g.key, deleteSet.contains(t.id)))
+                  }
+                  return out
+              }
           }
           EOF_16
 
+          # ============================================================
+          # Widgets.kt — same
+          # ============================================================
           cat > app/src/main/java/com/example/fintrack/Widgets.kt <<'EOF_W'
           package com.example.fintrack
 
@@ -1199,8 +1316,7 @@ jobs:
                   value = v; total = if (t <= 0f) 1f else t; label = l; caption = c; trendColor = col
                   animator?.cancel()
                   animator = ValueAnimator.ofFloat(animated, min(1f, v / total)).apply {
-                      duration = 900
-                      interpolator = DecelerateInterpolator()
+                      duration = 900; interpolator = DecelerateInterpolator()
                       addUpdateListener { animated = it.animatedValue as Float; invalidate() }
                       start()
                   }
@@ -1229,11 +1345,7 @@ jobs:
               private val oval = RectF()
               fun updateSlices(s: List<Slice>) {
                   _slices = s
-                  ValueAnimator.ofFloat(0f, 1f).apply {
-                      duration = 900
-                      addUpdateListener { animated = it.animatedValue as Float; invalidate() }
-                      start()
-                  }
+                  ValueAnimator.ofFloat(0f, 1f).apply { duration = 900; addUpdateListener { animated = it.animatedValue as Float; invalidate() }; start() }
               }
               override fun onDraw(canvas: Canvas) {
                   super.onDraw(canvas)
@@ -1244,12 +1356,7 @@ jobs:
                   oval.set(cx - r + thick / 2, cy - r + thick / 2, cx + r - thick / 2, cy + r - thick / 2)
                   val total = _slices.sumOf { it.value.toDouble() }.toFloat().coerceAtLeast(0.001f)
                   var start = -90f
-                  for (s in _slices) {
-                      val sweep = 360f * (s.value / total) * animated
-                      paint.color = s.color
-                      canvas.drawArc(oval, start, sweep, false, paint)
-                      start += sweep
-                  }
+                  for (s in _slices) { val sweep = 360f * (s.value / total) * animated; paint.color = s.color; canvas.drawArc(oval, start, sweep, false, paint); start += sweep }
                   textP.textSize = r * 0.24f
                   val out = _slices.sumOf { it.value.toDouble() }.toFloat()
                   canvas.drawText(inr(out.toDouble()), cx, cy + textP.textSize / 3, textP)
@@ -1261,8 +1368,7 @@ jobs:
               var maxValue: Int = 1
               override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
                   super.onMeasure(widthMeasureSpec, heightMeasureSpec)
-                  val h = (context.dp(34))
-                  setMeasuredDimension(MeasureSpec.getSize(widthMeasureSpec), h)
+                  setMeasuredDimension(MeasureSpec.getSize(widthMeasureSpec), (context.dp(34)))
               }
               override fun onDraw(canvas: Canvas) {
                   super.onDraw(canvas)
@@ -1273,12 +1379,7 @@ jobs:
                   for (i in 0 until n) {
                       val v = values[i]
                       val frac = (v.toFloat() / maxValue).coerceIn(0f, 1f)
-                      val col = when {
-                          v == 0 -> Color.parseColor("#1A1E26")
-                          frac < 0.33 -> Color.parseColor("#2F6B45")
-                          frac < 0.66 -> Color.parseColor("#5B9CFF")
-                          else -> Color.parseColor("#FF6B6B")
-                      }
+                      val col = when { v == 0 -> Color.parseColor("#1A1E26"); frac < 0.33 -> Color.parseColor("#2F6B45"); frac < 0.66 -> Color.parseColor("#5B9CFF"); else -> Color.parseColor("#FF6B6B") }
                       p.color = col
                       canvas.drawRoundRect(i * w + 2f, 4f, (i + 1) * w - 2f, h - 4f, 4f, 4f, p)
                   }
@@ -1293,24 +1394,15 @@ jobs:
               fun burst(cx: Float, cy: Float) {
                   bits.clear()
                   for (i in 0 until 80) {
-                      val angle = Math.random() * Math.PI * 2
-                      val speed = 8f + Math.random().toFloat() * 10f
-                      bits.add(Bit(cx, cy, Math.cos(angle).toFloat() * speed, Math.sin(angle).toFloat() * speed - 6f,
-                          colors[(Math.random() * colors.size).toInt()], 8f + Math.random().toFloat() * 8f, 0f))
+                      val angle = Math.random() * Math.PI * 2; val speed = 8f + Math.random().toFloat() * 10f
+                      bits.add(Bit(cx, cy, Math.cos(angle).toFloat() * speed, Math.sin(angle).toFloat() * speed - 6f, colors[(Math.random() * colors.size).toInt()], 8f + Math.random().toFloat() * 8f, 0f))
                   }
                   invalidate()
               }
               override fun onDraw(canvas: Canvas) {
-                  super.onDraw(canvas)
-                  var alive = false
-                  for (b in bits) {
-                      b.x += b.vx; b.y += b.vy; b.vy += 0.6f; b.vx *= 0.99f; b.rot += 12f
-                      if (b.y < height + 40) { alive = true
-                          canvas.save(); canvas.rotate(b.rot, b.x, b.y)
-                          paint.color = b.col
-                          canvas.drawRect(b.x - b.size / 2, b.y - b.size / 2, b.x + b.size / 2, b.y + b.size / 2, paint)
-                          canvas.restore()
-                      }
+                  super.onDraw(canvas); var alive = false
+                  for (b in bits) { b.x += b.vx; b.y += b.vy; b.vy += 0.6f; b.vx *= 0.99f; b.rot += 12f
+                      if (b.y < height + 40) { alive = true; canvas.save(); canvas.rotate(b.rot, b.x, b.y); paint.color = b.col; canvas.drawRect(b.x - b.size / 2, b.y - b.size / 2, b.x + b.size / 2, b.y + b.size / 2, paint); canvas.restore() }
                   }
                   if (alive) postInvalidateOnAnimation()
               }
@@ -1335,10 +1427,7 @@ jobs:
           object PdfReport {
               fun generate(ctx: Context, year: Int, month: Int): File {
                   val db = Db.get(ctx)
-                  val cal = Calendar.getInstance().apply {
-                      set(Calendar.YEAR, year); set(Calendar.MONTH, month); set(Calendar.DAY_OF_MONTH, 1)
-                      set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
-                  }
+                  val cal = Calendar.getInstance().apply { set(Calendar.YEAR, year); set(Calendar.MONTH, month); set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }
                   val start = cal.timeInMillis; cal.add(Calendar.MONTH, 1); val end = cal.timeInMillis
                   val label = SimpleDateFormat("MMMM yyyy", Locale.getDefault()).format(Date(start))
                   val spent = db.num("SELECT SUM(amount) FROM txn WHERE debit=1 AND ts>=? AND ts<?", start.toString(), end.toString())
@@ -1359,34 +1448,21 @@ jobs:
                   p.isFakeBoldText = true; p.textSize = 16f
                   c.drawText("Kahan kharch hua", 40f, y, p); y += 22f
                   p.isFakeBoldText = false; p.textSize = 13f
-                  for (r in cats.take(10)) {
-                      val cat = r["category"] ?: ""; val v = r["s"]?.toDoubleOrNull() ?: 0.0
-                      c.drawText("• $cat", 50f, y, p)
-                      c.drawText(inr(v), 555f - p.measureText(inr(v)), y, p)
-                      y += 18f
-                  }
+                  for (r in cats.take(10)) { val cat = r["category"] ?: ""; val v = r["s"]?.toDoubleOrNull() ?: 0.0; c.drawText("• $cat", 50f, y, p); c.drawText(inr(v), 555f - p.measureText(inr(v)), y, p); y += 18f }
                   y += 12f
                   p.isFakeBoldText = true; p.textSize = 16f
                   c.drawText("Top payees", 40f, y, p); y += 22f
                   p.isFakeBoldText = false; p.textSize = 13f
-                  for (r in payees) {
-                      val n = r["merchant"] ?: ""; val v = r["s"]?.toDoubleOrNull() ?: 0.0
-                      c.drawText("• $n", 50f, y, p)
-                      c.drawText(inr(v), 555f - p.measureText(inr(v)), y, p)
-                      y += 18f
-                  }
+                  for (r in payees) { val n = r["merchant"] ?: ""; val v = r["s"]?.toDoubleOrNull() ?: 0.0; c.drawText("• $n", 50f, y, p); c.drawText(inr(v), 555f - p.measureText(inr(v)), y, p); y += 18f }
                   y += 12f
                   if (tolls.isNotEmpty()) {
                       p.isFakeBoldText = true; p.textSize = 16f
                       c.drawText("Toll trips (${tolls.size})", 40f, y, p); y += 22f
                       p.isFakeBoldText = false; p.textSize = 13f
                       for (r in tolls.take(15)) {
-                          val plaza = r["plaza"] ?: ""; val amt = r["amount"]?.toDoubleOrNull() ?: 0.0
-                          val ts = r["ts"]?.toLongOrNull() ?: 0L
+                          val plaza = r["plaza"] ?: ""; val amt = r["amount"]?.toDoubleOrNull() ?: 0.0; val ts = r["ts"]?.toLongOrNull() ?: 0L
                           val dt = SimpleDateFormat("dd MMM HH:mm", Locale.getDefault()).format(Date(ts))
-                          c.drawText("• $dt  $plaza", 50f, y, p)
-                          c.drawText(inr(amt), 555f - p.measureText(inr(amt)), y, p)
-                          y += 18f
+                          c.drawText("• $dt  $plaza", 50f, y, p); c.drawText(inr(amt), 555f - p.measureText(inr(amt)), y, p); y += 18f
                           if (y > 800f) break
                       }
                   }
@@ -1400,9 +1476,7 @@ jobs:
               fun shareIntent(ctx: Context, file: File): android.content.Intent {
                   val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", file)
                   return android.content.Intent(android.content.Intent.ACTION_SEND).apply {
-                      type = "application/pdf"
-                      putExtra(android.content.Intent.EXTRA_STREAM, uri)
-                      addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                      type = "application/pdf"; putExtra(android.content.Intent.EXTRA_STREAM, uri); addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
                   }
               }
           }
@@ -1468,7 +1542,17 @@ jobs:
                       else -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM)
                   }
                   window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
-                  try { org.osmdroid.config.Configuration.getInstance().apply { userAgentValue = "FinTrack/8.4 (com.example.fintrack; Android)"; load(this@MainActivity, getSharedPreferences("osmdroid", MODE_PRIVATE)) } } catch (e: Exception) {}
+                  try {
+                      org.osmdroid.config.Configuration.getInstance().apply {
+                          userAgentValue = "FinTrack/8.5 (com.example.fintrack; Android)"
+                          // bigger disk cache so tiles persist across sessions
+                          tileFileSystemCacheMaxBytes = 600L * 1024 * 1024
+                          tileFileSystemCacheTrimBytes = 500L * 1024 * 1024
+                          httpConnectionTimeout = 15000
+                          httpReadTimeout = 15000
+                          load(this@MainActivity, getSharedPreferences("osmdroid", MODE_PRIVATE))
+                      }
+                  } catch (e: Exception) {}
                   home = HomeScreen(this)
                   ledger = LedgerScreen(this)
                   screens.addAll(listOf(home, ledger, TravelScreen(this), PayeesScreen(this), MoneyScreen(this)))
@@ -1478,35 +1562,25 @@ jobs:
                   val names = listOf("Home", "Ledger", "Travel", "Payees", "Money")
                   for (i in names.indices) {
                       val item = LinearLayout(this).apply {
-                          orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
-                          setPadding(0, dp(8), 0, dp(8)); tag = i
-                          addView(icon(icons[i], C.MUTED, 22))
-                          addView(tv(names[i], 11f, C.MUTED).apply { gravity = Gravity.CENTER })
-                          setOnClickListener { show(i) }
+                          orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(0, dp(8), 0, dp(8)); tag = i
+                          addView(icon(icons[i], C.MUTED, 22)); addView(tv(names[i], 11f, C.MUTED).apply { gravity = Gravity.CENTER }); setOnClickListener { show(i) }
                       }
                       nav.addView(item, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                   }
                   val root = FrameLayout(this)
                   val main = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(C.BG); addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)); addView(nav) }
                   root.addView(main)
-                  val fab = TextView(this).apply { text = "+"; textSize = 32f; setTextColor(android.graphics.Color.WHITE); gravity = Gravity.CENTER; setBackgroundColor(C.ACCENT); setPadding(0,0,0,0); elevation = 12f }
+                  val fab = TextView(this).apply { text = "+"; textSize = 32f; setTextColor(android.graphics.Color.WHITE); gravity = Gravity.CENTER; setBackgroundColor(C.ACCENT); elevation = 12f }
                   val fabLp = FrameLayout.LayoutParams(dp(60), dp(60), Gravity.END or Gravity.BOTTOM).apply { rightMargin = dp(20); bottomMargin = dp(90) }
-                  root.addView(fab, fabLp)
-                  fab.setOnClickListener { showQuickActions() }
+                  root.addView(fab, fabLp); fab.setOnClickListener { showQuickActions() }
                   lockMsg = tv("Locked", 14f, C.MUTED).apply { gravity = Gravity.CENTER }
                   lockView = LinearLayout(this).apply {
-                      orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setBackgroundColor(C.BG)
-                      setPadding(dp(30), dp(30), dp(30), dp(30))
-                      addView(icon(R.drawable.ic_networth, C.ACCENT, 56))
-                      addView(tv("FinTrack", 26f, C.TEXT, true).apply { setPadding(0, dp(12), 0, dp(4)) })
-                      addView(lockMsg)
+                      orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setBackgroundColor(C.BG); setPadding(dp(30), dp(30), dp(30), dp(30))
+                      addView(icon(R.drawable.ic_networth, C.ACCENT, 56)); addView(tv("FinTrack", 26f, C.TEXT, true).apply { setPadding(0, dp(12), 0, dp(4)) }); addView(lockMsg)
                       addView(actionBtn("Unlock") { authenticate() }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(20) })
                   }
                   root.addView(lockView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-                  setContentView(root)
-                  show(0)
-                  lock()
-                  authenticate()
+                  setContentView(root); show(0); lock(); authenticate()
               }
 
               private fun showQuickActions() {
@@ -1520,7 +1594,6 @@ jobs:
               override fun onStart() { super.onStart(); if (unlocked && stopAt > 0 && System.currentTimeMillis() - stopAt > 60_000) { lock(); authenticate() } }
               private fun lock() { unlocked = false; lockView.visibility = View.VISIBLE }
               private fun unlock() { unlocked = true; lockView.visibility = View.GONE; refreshAll(); askPermissionsAndScan() }
-
               private fun authenticate() {
                   if (authBusy) return
                   val auth = BiometricManager.Authenticators.BIOMETRIC_STRONG or BiometricManager.Authenticators.DEVICE_CREDENTIAL
@@ -1532,22 +1605,18 @@ jobs:
                   })
                   prompt.authenticate(BiometricPrompt.PromptInfo.Builder().setTitle("FinTrack unlock").setSubtitle("Fingerprint / Face / PIN").setAllowedAuthenticators(auth).build())
               }
-
               fun show(i: Int) {
                   cur = i; content.removeAllViews(); content.addView(screens[i].root)
                   for (k in 0 until nav.childCount) {
                       val item = nav.getChildAt(k) as LinearLayout
                       val col = if (k == i) C.ACCENT else C.MUTED
-                      (item.getChildAt(0) as android.widget.ImageView).setColorFilter(col)
-                      (item.getChildAt(1) as TextView).setTextColor(col)
+                      (item.getChildAt(0) as android.widget.ImageView).setColorFilter(col); (item.getChildAt(1) as TextView).setTextColor(col)
                   }
                   if (unlocked) screens[cur].refresh()
               }
-
               fun openLedger(filter: LedgerScreen.Filter) { ledger.setFilter(filter); show(1) }
               fun refreshAll() { if (unlocked) screens[cur].refresh() }
               fun toast(m: String) = Toast.makeText(this, m, Toast.LENGTH_LONG).show()
-
               fun undo(message: String, onUndo: () -> Unit) {
                   val col = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(14), dp(10), dp(14), dp(10)); background = shape(C.CARD2, 12) }
                   col.addView(tv(message, 13f, C.TEXT).apply { gravity = Gravity.CENTER_VERTICAL })
@@ -1556,7 +1625,6 @@ jobs:
                   (window.decorView as FrameLayout).addView(col, lp)
                   Handler(Looper.getMainLooper()).postDelayed({ try { (col.parent as? ViewGroup)?.removeView(col) } catch (e: Exception) {} }, 5000)
               }
-
               fun toggleTheme() {
                   val prefs = getSharedPreferences("fin", MODE_PRIVATE)
                   val cur = prefs.getString("theme_mode", "system")
@@ -1565,11 +1633,9 @@ jobs:
                   when (next) { "dark" -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES); "light" -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_NO); else -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM) }
                   toast("Theme: $next")
               }
-
               private fun hasSms() = ContextCompat.checkSelfPermission(this, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED
               private fun askPermissionsAndScan() { if (hasSms()) { rescan(); return }; ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.READ_SMS, Manifest.permission.RECEIVE_SMS), 1) }
               override fun onRequestPermissionsResult(code: Int, p: Array<out String>, r: IntArray) { super.onRequestPermissionsResult(code, p, r); if (hasSms()) rescan() else toast("SMS permission zaroori hai") }
-
               fun rescan() {
                   if (!hasSms()) { askPermissionsAndScan(); return }
                   toast("SMS scan ho raha hai...")
@@ -1579,16 +1645,13 @@ jobs:
                       runOnUiThread { toast(if (err != null) "Scan error: $err" else "$n naye transactions mile"); refreshAll() }
                   }.start()
               }
-
               fun backup() {
                   Thread {
                       var csv: String
                       try { csv = Backup.export(this) } catch (e: Exception) { runOnUiThread { toast("Backup error: ${e.message}") }; return@Thread }
                       val name = "fintrack_backup_" + SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date()) + ".csv"
                       try {
-                          val values = ContentValues().apply {
-                              put(MediaStore.Downloads.DISPLAY_NAME, name); put(MediaStore.Downloads.MIME_TYPE, "text/csv"); put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/FinTrack")
-                          }
+                          val values = ContentValues().apply { put(MediaStore.Downloads.DISPLAY_NAME, name); put(MediaStore.Downloads.MIME_TYPE, "text/csv"); put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/FinTrack") }
                           val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
                           if (uri != null) { contentResolver.openOutputStream(uri)?.use { it.write(csv.toByteArray()) }; runOnUiThread { toast("Saved: Downloads/FinTrack/$name") }; return@Thread }
                       } catch (e: Exception) {}
@@ -1597,8 +1660,7 @@ jobs:
                           val file = File(dir, name); file.writeText(csv)
                           val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
                           val share = Intent(Intent.ACTION_SEND).apply { type = "text/csv"; putExtra(Intent.EXTRA_STREAM, uri); putExtra(Intent.EXTRA_SUBJECT, name); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }
-                          runOnUiThread { startActivity(Intent.createChooser(share, "Save backup")) }
-                          return@Thread
+                          runOnUiThread { startActivity(Intent.createChooser(share, "Save backup")) }; return@Thread
                       } catch (e: Exception) {}
                       try {
                           val file = File(cacheDir, name); file.writeText(csv)
@@ -1608,7 +1670,6 @@ jobs:
                       } catch (e: Exception) { runOnUiThread { toast("Backup error: ${e.message}") } }
                   }.start()
               }
-
               fun pickRestore() { openDoc.launch(arrayOf("text/*", "application/csv", "application/vnd.ms-excel", "*/*")) }
               private fun doRestore(uri: Uri) {
                   Thread {
@@ -1637,12 +1698,8 @@ jobs:
                           val canonical = listOf("Bank","Account_No","Txn_Date","Description","Ref_No","Withdrawal","Deposit")
                           val labels = canonical.map { f -> val idx = mapping[f]; val col = if (idx != null) " → " + preview.header.getOrNull(idx) else " → (skip)"; f + col }
                           AlertDialog.Builder(this).setTitle("CSV auto-detect").setMessage("Detected columns:\n\n" + labels.joinToString("\n") + "\n\nImport karna hai?")
-                              .setPositiveButton("Import") { _, _ ->
-                                  Thread {
-                                      val res = CsvImporter.import(applicationContext, uri, mapping, 0)
-                                      runOnUiThread { toast("Imported ${res.first} • Duplicate ${res.second} • Failed ${res.third}"); refreshAll() }
-                                  }.start()
-                              }.setNegativeButton("Cancel", null).show()
+                              .setPositiveButton("Import") { _, _ -> Thread { val res = CsvImporter.import(applicationContext, uri, mapping, 0); runOnUiThread { toast("Imported ${res.first} • Duplicate ${res.second} • Failed ${res.third}"); refreshAll() } }.start() }
+                              .setNegativeButton("Cancel", null).show()
                       }
                   }.start()
               }
@@ -1656,6 +1713,9 @@ jobs:
           }
           EOF_17
 
+          # ============================================================
+          # Screens1.kt — LedgerScreen DUPLICATES section now uses flat list
+          # ============================================================
           cat > app/src/main/java/com/example/fintrack/Screens1.kt <<'EOF_18'
           package com.example.fintrack
 
@@ -1665,6 +1725,7 @@ jobs:
           import android.view.MotionEvent
           import android.view.View
           import android.view.ViewGroup
+          import android.widget.CheckBox
           import android.widget.EditText
           import android.widget.HorizontalScrollView
           import android.widget.LinearLayout
@@ -1683,7 +1744,6 @@ jobs:
               override val root: View = ScrollView(act).apply { addView(body) }
               private var year = Calendar.getInstance().get(Calendar.YEAR)
               private var month = Calendar.getInstance().get(Calendar.MONTH)
-
               override fun refresh() {
                   body.removeAllViews()
                   val db = Db.get(act)
@@ -1713,8 +1773,7 @@ jobs:
                   val hero = act.card()
                   hero.addView(act.tv("Aaj", 12f, C.MUTED)); hero.addView(act.tv(inr(todaySpent), 22f, C.RED, true))
                   val delta: String = when { ySpent <= 0.0 && todaySpent > 0.0 -> "Kal se naya kharch"; ySpent <= 0.0 -> "Aaj abhi tak kuch nahi"; else -> { val pct = ((todaySpent - ySpent) / ySpent * 100).toInt(); if (pct >= 0) "+$pct% kal se" else "$pct% kal se" } }
-                  hero.addView(act.tv(delta, 12f, C.MUTED))
-                  body.put(hero)
+                  hero.addView(act.tv(delta, 12f, C.MUTED)); body.put(hero)
                   val review = db.num("SELECT COUNT(*) FROM txn WHERE review=1").toInt()
                   if (review > 0) {
                       val c = act.card()
@@ -1749,10 +1808,8 @@ jobs:
                   hmCard.addView(act.tv("Din-wise spend", 15f, C.TEXT, true))
                   val hm = HeatmapStripView(act)
                   hm.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                  hm.values = daily
-                  hm.maxValue = (daily.maxOrNull() ?: 1).coerceAtLeast(1)
-                  hmCard.addView(hm)
-                  body.put(hmCard)
+                  hm.values = daily; hm.maxValue = (daily.maxOrNull() ?: 1).coerceAtLeast(1)
+                  hmCard.addView(hm); body.put(hmCard)
                   val prevCal = Calendar.getInstance().apply { set(Calendar.YEAR, year); set(Calendar.MONTH, month); set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0); add(Calendar.MONTH, -1) }
                   val pStart = prevCal.timeInMillis; prevCal.add(Calendar.MONTH, 1); val pEnd = prevCal.timeInMillis
                   val prevSpent = db.num("SELECT SUM(amount) FROM txn WHERE debit=1 AND ts>=? AND ts<?", pStart.toString(), pEnd.toString())
@@ -1760,40 +1817,31 @@ jobs:
                       val pct = ((spent - prevSpent) / prevSpent * 100).toInt()
                       val ins = act.card()
                       ins.addView(act.tv(if (pct >= 0) "📈 Is mahine ${pct}% zyada kharch" else "📉 Is mahine ${-pct}% kam kharch", 14f, if (pct >= 0) C.AMBER else C.GREEN, true))
-                      ins.addView(act.tv("Pichle mahine: ${inr(prevSpent)}", 12f, C.MUTED))
-                      body.put(ins)
+                      ins.addView(act.tv("Pichle mahine: ${inr(prevSpent)}", 12f, C.MUTED)); body.put(ins)
                   }
                   val projected = (spent / elapsedDays) * daysInMonth
                   val proj = act.card()
                   proj.addView(act.tv("Projected month-end total", 12f, C.MUTED))
                   proj.addView(act.tv(inr(projected), 22f, C.AMBER, true))
-                  proj.addView(act.tv("Daily average ${inr(spent / elapsedDays)}", 12f, C.MUTED))
-                  body.put(proj)
+                  proj.addView(act.tv("Daily average ${inr(spent / elapsedDays)}", 12f, C.MUTED)); body.put(proj)
                   val nw = NetWorth.compute(act)
                   val n = act.card()
                   n.addView(act.tv("Net worth", 12f, C.MUTED))
                   n.addView(act.tv(inr(nw.assets - nw.liabilities), 24f, if (nw.assets >= nw.liabilities) C.GREEN else C.RED, true))
-                  n.setOnClickListener { act.show(4) }
-                  body.put(n)
+                  n.setOnClickListener { act.show(4) }; body.put(n)
                   val pdfBtn = act.card()
                   pdfBtn.addView(act.tv("Monthly PDF report", 15f, C.TEXT, true))
                   pdfBtn.put(act.actionBtn("Generate & share $label report") {
-                      Thread {
-                          try { val file = PdfReport.generate(act, year, month); act.runOnUiThread { act.startActivity(android.content.Intent.createChooser(PdfReport.shareIntent(act, file), "Share PDF")) } }
-                          catch (e: Exception) { act.runOnUiThread { act.toast("PDF error: ${e.message}") } }
-                      }.start()
-                  }, 8)
-                  body.put(pdfBtn)
+                      Thread { try { val file = PdfReport.generate(act, year, month); act.runOnUiThread { act.startActivity(android.content.Intent.createChooser(PdfReport.shareIntent(act, file), "Share PDF")) } } catch (e: Exception) { act.runOnUiThread { act.toast("PDF error: ${e.message}") } } }.start()
+                  }, 8); body.put(pdfBtn)
               }
               private fun pickMonthYear() {
                   val years = (Calendar.getInstance().get(Calendar.YEAR) - 5..Calendar.getInstance().get(Calendar.YEAR) + 1).toList()
                   val yearLabels = years.map { it.toString() }
                   AlertDialog.Builder(act).setTitle("Year chuno")
                       .setItems(yearLabels.toTypedArray()) { _, yi ->
-                          val chosenYear = years[yi]
-                          val months = listOf("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec")
-                          AlertDialog.Builder(act).setTitle("Month chuno ($chosenYear)")
-                              .setItems(months.toTypedArray()) { _, mi -> year = chosenYear; month = mi; refresh() }.show()
+                          val chosenYear = years[yi]; val months = listOf("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec")
+                          AlertDialog.Builder(act).setTitle("Month chuno ($chosenYear)").setItems(months.toTypedArray()) { _, mi -> year = chosenYear; month = mi; refresh() }.show()
                       }.show()
               }
           }
@@ -1804,11 +1852,13 @@ jobs:
               private val selected = LinkedHashSet<Long>()
               private val summary = act.tv("", 12f, C.MUTED).apply { setPadding(act.dp(14), act.dp(4), act.dp(14), act.dp(4)) }
               private val chips = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; setPadding(act.dp(8), 0, act.dp(8), 0) }
+
               sealed class Row {
                   data class TxnRow(val t: Txn) : Row()
                   data class GroupRow(val hash: String, val count: Int, val total: Double, val sampleMerchant: String, val sampleCategory: String, val sampleDebit: Boolean) : Row()
-                  data class DupGroupRow(val g: PayeeOps.DupGroup) : Row()
+                  data class DupRowItem(val t: Txn, val groupKey: String) : Row()
               }
+
               private val adapter = RowAdapter<Row>(act, emptyList()) { item, r ->
                   when (item) {
                       is Row.GroupRow -> {
@@ -1824,11 +1874,12 @@ jobs:
                           r.sub.text = fmtDate(t.ts) + " • " + t.institution + " • " + t.category + (if (t.note != null) " • 📝" else "")
                           r.amt.text = (if (t.debit) "-" else "+") + inr(t.amount, true); r.amt.setTextColor(if (t.debit) C.RED else C.GREEN)
                       }
-                      is Row.DupGroupRow -> {
-                          r.icon.setImageResource(R.drawable.ic_transfer); r.icon.setColorFilter(C.RED)
-                          r.title.text = "Duplicate: ${item.g.ids.size}x ${inr(item.g.amount, true)} ${if (item.g.debit) "OUT" else "IN"}"
-                          r.sub.text = "${item.g.vpa} · ${fmtDate(item.g.ts)}"
-                          r.amt.text = "Pick"; r.amt.setTextColor(C.RED)
+                      is Row.DupRowItem -> {
+                          val t = item.t
+                          r.icon.setImageResource(iconFor(t.category)); r.icon.setColorFilter(if (t.merchant.trim().lowercase() == "unknown") C.RED else C.ACCENT)
+                          r.title.text = "${fmtDateTime(t.ts)} • ${t.institution}"
+                          r.sub.text = "${t.merchant}  •  ${if (t.vpa != null) t.vpa else "no UPI"}"
+                          r.amt.text = (if (t.debit) "-" else "+") + inr(t.amount, true); r.amt.setTextColor(if (t.debit) C.RED else C.GREEN)
                       }
                   }
               }
@@ -1840,7 +1891,7 @@ jobs:
                           when (val item = this@LedgerScreen.adapter.items.getOrNull(pos)) {
                               is Row.TxnRow -> { if (selectMode) { if (!selected.add(item.t.id)) selected.remove(item.t.id); this@LedgerScreen.adapter.notifyDataSetChanged() } else showTxn(item.t) }
                               is Row.GroupRow -> openGroupFix(item)
-                              is Row.DupGroupRow -> openDupPicker(item.g)
+                              is Row.DupRowItem -> { /* selection handled by checkbox in row */ }
                               null -> {}
                           }
                       }
@@ -1879,7 +1930,6 @@ jobs:
                   put(search, 8); put(HorizontalScrollView(act).apply { isHorizontalScrollBarEnabled = false; addView(chips) }, 4); put(summary, 0); put(list, 0, 1f)
               }
               fun setFilter(f: Filter) { filter = f; refresh() }
-
               override fun refresh() {
                   chips.removeAllViews()
                   for ((k, label) in listOf("all" to "All", "review" to "⚠ Review", "debit" to "Kharch", "credit" to "Mila")) chips.addView(act.pill(label, filter.mode == k) { filter = Filter(mode = k); refresh() })
@@ -1940,23 +1990,45 @@ jobs:
                       refresh()
                   }.setNegativeButton("Cancel", null).show()
               }
+
+              // ---------- DUPLICATES: flat list + smart checkboxes ----------
               private fun showDuplicates() {
-                  val groups = PayeeOps.findDuplicates(act)
-                  if (groups.isEmpty()) { act.toast("Koi duplicate nahi mila"); return }
-                  adapter.items = groups.map<PayeeOps.DupGroup, Row> { Row.DupGroupRow(it) }; adapter.notifyDataSetChanged()
-                  summary.text = "${groups.size} duplicate groups mile  •  tap to merge"
-              }
-              private fun openDupPicker(g: PayeeOps.DupGroup) {
-                  val names = g.ids.map { id -> Db.get(act).queryTxns("id=?", arrayOf(id.toString()), 1).firstOrNull() }
-                  val labels = names.mapNotNull { t -> t?.let { "${fmtDateTime(it.ts)} • ${it.institution} • ${it.merchant} • ${inr(it.amount, true)}" } }
-                  val keep = BooleanArray(names.size) { true }
-                  AlertDialog.Builder(act).setTitle("Duplicates (${g.ids.size})").setMultiChoiceItems(labels.toTypedArray(), keep) { _, which, checked -> keep[which] = checked }
-                      .setPositiveButton("Delete selected") { _, _ ->
+                  val rows = PayeeOps.flattenDuplicates(act)
+                  if (rows.isEmpty()) { act.toast("Koi duplicate nahi mila"); return }
+                  val container = act.vbox(8)
+                  container.addView(act.tv("${rows.size} rows across ${rows.map { it.groupKey }.distinct().size} groups", 12f, C.MUTED))
+                  val checkboxes = LinkedHashMap<Long, CheckBox>()
+                  for (row in rows) {
+                      val t = row.txn
+                      val line = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, act.dp(6), 0, act.dp(6)) }
+                      val cb = CheckBox(act).apply { isChecked = row.defaultDelete }
+                      checkboxes[t.id] = cb
+                      line.addView(cb)
+                      val info = act.vbox(4)
+                      info.addView(act.tv("${fmtDateTime(t.ts)}  •  ${t.institution}", 12f, C.TEXT, true))
+                      val upi = if (!t.vpa.isNullOrBlank()) "  •  ${t.vpa}" else ""
+                      info.addView(act.tv("${t.merchant}$upi", 12f, if (t.merchant.trim().lowercase() == "unknown") C.RED else C.MUTED))
+                      info.addView(act.tv((if (t.debit) "-" else "+") + inr(t.amount, true), 13f, if (t.debit) C.RED else C.GREEN, true))
+                      line.addView(info, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                      container.addView(line)
+                  }
+                  val dlg = AlertDialog.Builder(act).setTitle("Duplicates — tick to delete")
+                      .setView(ScrollView(act).apply { addView(container) })
+                      .setPositiveButton("Delete ticked") { _, _ ->
                           var n = 0
-                          for (i in keep.indices) if (!keep[i]) { Db.get(act).deleteTxn(g.ids[i]); n++ }
-                          act.toast("$n duplicates delete hue"); act.refreshAll()
-                      }.setNegativeButton("Cancel", null).show()
+                          for ((id, cb) in checkboxes) if (cb.isChecked) { Db.get(act).deleteTxn(id); n++ }
+                          act.toast("$n deleted (smart-default = Unknown / shorter merchant)")
+                          act.refreshAll()
+                      }
+                      .setNegativeButton("Cancel", null)
+                      .setNeutralButton("Smart select") { _, _ ->
+                          // re-run smart default on current rows
+                          val fresh = PayeeOps.flattenDuplicates(act)
+                          for (r in fresh) checkboxes[r.txn.id]?.isChecked = r.defaultDelete
+                      }
+                  dlg.show()
               }
+
               private fun openGroupFix(g: Row.GroupRow) {
                   act.showForm("Fix group (${g.count} txns)",
                       listOf(Field("Kisko / dukaan", g.sampleMerchant), Field("Type", if (g.sampleDebit) "Debit (kharch)" else "Credit (mila)", options = listOf("Debit (kharch)", "Credit (mila)")), Field("Category", g.sampleCategory, options = Categories.ALL)),
@@ -2003,6 +2075,9 @@ jobs:
           }
           EOF_18
 
+          # ============================================================
+          # Screens2.kt — SWITCH to OSM France HOT tile server (no key, works globally)
+          # ============================================================
           cat > app/src/main/java/com/example/fintrack/Screens2.kt <<'EOF_19'
           package com.example.fintrack
 
@@ -2030,12 +2105,17 @@ jobs:
           import java.util.Date
           import java.util.Locale
 
-          private val CARTO_POSITRON = object : OnlineTileSourceBase(
-              "CartoDB Positron", 0, 20, 256, ".png",
-              arrayOf("https://a.basemaps.cartocdn.com/light_all/",
-                      "https://b.basemaps.cartocdn.com/light_all/",
-                      "https://c.basemaps.cartocdn.com/light_all/"),
-              "© OpenStreetMap contributors, © CARTO"
+          /**
+           * OSM France "Humanitarian" tile server. Free, no API key, no rate limit
+           * for casual use, works in India. Tile usage policy requires a UA but
+           * not an API key.
+           */
+          private val OSMFR_HOT = object : OnlineTileSourceBase(
+              "OSM-FR-HOT", 0, 19, 256, ".png",
+              arrayOf("https://a.tile.openstreetmap.fr/hot/",
+                      "https://b.tile.openstreetmap.fr/hot/",
+                      "https://c.tile.openstreetmap.fr/hot/"),
+              "© OpenStreetMap contributors, Tiles: OSM-FR"
           ) {
               override fun getTileURLString(pMapTileIndex: Long): String =
                   baseUrl + MapTileIndex.getZoom(pMapTileIndex) + "/" +
@@ -2046,8 +2126,11 @@ jobs:
           class RouteMapView @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? = null) : MapView(ctx, attrs) {
               class Pt(val lat: Double, val lon: Double, val label: String, val ts: Long)
               init {
-                  setTileSource(CARTO_POSITRON); setMultiTouchControls(true); setBuiltInZoomControls(false)
-                  controller.setZoom(5.0); controller.setCenter(GeoPoint(22.0, 79.0))
+                  setTileSource(OSMFR_HOT)
+                  setMultiTouchControls(true)
+                  setBuiltInZoomControls(false)
+                  controller.setZoom(5.0)
+                  controller.setCenter(GeoPoint(22.0, 79.0))
                   try { overlayManager.tilesOverlay.setColorFilter(null) } catch (e: Exception) {}
               }
               fun setTrips(trips: List<List<Pt>>) {
@@ -2098,6 +2181,7 @@ jobs:
                   chips.addView(act.pill("All", selDate == null) { selDate = null; refresh() })
                   for (d in byDate.keys.toList().reversed().take(30)) chips.addView(act.pill(d, selDate == d) { selDate = d; refresh() })
                   chips.addView(act.pill("Fix Toll SMS", false) { Thread { val n = Tolls.rematchAll(act); act.runOnUiThread { act.toast("$n toll txns re-matched"); refresh() } }.start() })
+                  chips.addView(act.pill("Reload tiles", false) { map.invalidate(); act.toast("Tile cache reloaded") })
                   val chosenDates = if (selDate == null) byDate.keys.toList() else listOf(selDate!!)
                   map.setTrips(chosenDates.map { d -> (byDate[d] ?: emptyList()).sortedBy { it["ts"]?.toLongOrNull() ?: 0L }.map { RouteMapView.Pt(it["lat"]?.toDoubleOrNull() ?: 0.0, it["lon"]?.toDoubleOrNull() ?: 0.0, it["plaza"] ?: "", it["ts"]?.toLongOrNull() ?: 0L) } })
                   detail.removeAllViews()
@@ -2248,17 +2332,13 @@ jobs:
                   assets.addView(act.tv("Assets", 15f, C.TEXT, true))
                   for (b in nw.bank) assets.put(act.tv("${b.first} ${if (b.second.isNotEmpty()) "x" + b.second else ""}   ${inr(b.third)}", 13f, C.MUTED), 6)
                   for (r in db.rows("SELECT * FROM net_items WHERE kind='ASSET' ORDER BY id")) assets.put(act.tv("${r["name"]}   ${inr(r["amount"]?.toDoubleOrNull() ?: 0.0)}", 14f).apply { setOnClickListener { editItem(r) } }, 8)
-                  assets.put(act.actionBtn("+ Asset") { addItem("ASSET") }, 10)
-                  body.put(assets)
+                  assets.put(act.actionBtn("+ Asset") { addItem("ASSET") }, 10); body.put(assets)
                   val lc = act.card()
                   val lh = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL }
                   lh.addView(act.icon(R.drawable.ic_loan, C.AMBER, 22)); lh.put(act.tv("Loans (by LAN)", 15f, C.TEXT, true), 10)
                   lc.addView(lh)
                   val loans = db.rows("SELECT * FROM loans ORDER BY last_seen DESC")
-                  for (l in loans) {
-                      val ln = l["loan_no"] ?: continue
-                      lc.put(act.tv("$ln  •  ${l["lender"] ?: ""}  •  ${l["msg_count"] ?: 0} msgs", 13f, C.TEXT, true).apply { setOnClickListener { showLoanTxns(ln) } }, 10)
-                  }
+                  for (l in loans) { val ln = l["loan_no"] ?: continue; lc.put(act.tv("$ln  •  ${l["lender"] ?: ""}  •  ${l["msg_count"] ?: 0} msgs", 13f, C.TEXT, true).apply { setOnClickListener { showLoanTxns(ln) } }, 10) }
                   if (loans.isEmpty()) lc.put(act.tv("Koi loan SMS nahi mila", 12f, C.MUTED), 6)
                   body.put(lc)
                   val d = act.card()
@@ -2487,8 +2567,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="v8.4.${{ github.run_number }}"
+          VERSION="v8.5.${{ github.run_number }}"
           gh release create "$VERSION" /tmp/proj/app/build/outputs/apk/debug/app-debug.apk \
             --repo "${{ github.repository }}" \
             --title "FinTrack Build ${{ github.run_number }}" \
-            --notes "v8.4: fix PayeesScreen setOnItemLongClickListener return labels. All v8.3 features preserved."
+            --notes "v8.5: flat duplicate list w/ checkboxes + smart selection (Unknown/short-merchant marked for deletion); map switched to OSM-FR HOT tiles + bigger cache + timeouts; AI parser swapped to Groq (llama-3.3-70b)."
