@@ -61,8 +61,8 @@ jobs:
                   applicationId = "com.example.fintrack"
                   minSdk = 30
                   targetSdk = 33
-                  versionCode = 14
-                  versionName = "8.6"
+                  versionCode = 15
+                  versionName = "8.7"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -506,16 +506,12 @@ jobs:
                   return try {
                       val url = URL("https://api.groq.com/openai/v1/chat/completions")
                       val conn = url.openConnection() as HttpURLConnection
-                      conn.requestMethod = "POST"
-                      conn.connectTimeout = 8000
-                      conn.readTimeout = 8000
+                      conn.requestMethod = "POST"; conn.connectTimeout = 8000; conn.readTimeout = 8000
                       conn.setRequestProperty("Content-Type", "application/json")
                       conn.setRequestProperty("Authorization", "Bearer $GROQ_API_KEY")
                       conn.doOutput = true
                       val payload = JSONObject().apply {
-                          put("model", "llama-3.3-70b-versatile")
-                          put("temperature", 0.0)
-                          put("max_tokens", 200)
+                          put("model", "llama-3.3-70b-versatile"); put("temperature", 0.0); put("max_tokens", 200)
                           put("messages", JSONArray().apply { put(JSONObject().apply { put("role", "user"); put("content", prompt) }) })
                       }
                       OutputStreamWriter(conn.outputStream).use { it.write(payload.toString()) }
@@ -1113,6 +1109,9 @@ jobs:
           }
           EOF_15
 
+          # ============================================================
+          # PayeeOps.kt — STRICTER duplicate grouping + smart selection
+          # ============================================================
           cat > app/src/main/java/com/example/fintrack/PayeeOps.kt <<'EOF_16'
           package com.example.fintrack
 
@@ -1169,6 +1168,18 @@ jobs:
                   val ts: Long, val ids: List<Long>, val sample: Txn
               )
 
+              /**
+               * True if two transactions differ by more than 5 minutes OR by merchant.
+               * "Duplicate" requires BOTH to be within tolerance.
+               */
+              private fun withinDuplicateTolerance(a: Txn, b: Txn): Boolean {
+                  if (Math.abs(a.ts - b.ts) > 5 * 60_000L) return false
+                  val am = Learner.norm(a.merchant)
+                  val bm = Learner.norm(b.merchant)
+                  if (am.isBlank() || bm.isBlank()) return true
+                  return am == bm
+              }
+
               private fun isJunk(t: Txn): Boolean {
                   val m = t.merchant.trim().lowercase()
                   if (m == "unknown" || m.isEmpty()) return true
@@ -1186,31 +1197,64 @@ jobs:
                   return s
               }
 
+              /**
+               * Smart delete: if the whole group is "identical" (same merchant key)
+               * → keep highest-quality and delete the rest.
+               * If merchants differ but amounts match → they are DIFFERENT transactions
+               * (user's stated intent) → return empty (nothing auto-ticked).
+               */
               fun smartDeleteIds(list: List<Txn>): List<Long> {
                   if (list.size < 2) return emptyList()
+                  // If merchant names vary across the group, treat as different transactions
+                  val keys = list.map { Learner.norm(it.merchant) }.distinct()
+                  if (keys.size > 1) return emptyList()
                   val sorted = list.sortedByDescending { qualityScore(it) }
                   return sorted.drop(1).map { it.id }
               }
 
+              /**
+               * Find duplicate groups. Two txns are duplicates iff:
+               *  - amount equal (to 2dp)
+               *  - same direction (debit/credit)
+               *  - same day
+               *  - within 5 minutes of each other
+               *  - same normalized merchant key
+               */
               fun findDuplicates(ctx: Context): List<DupGroup> {
                   val db = Db.get(ctx)
-                  val rows = db.queryTxns("1=1", emptyArray(), 5000)
+                  val rows = db.queryTxns("1=1", emptyArray(), 5000).sortedBy { it.ts }
                   val cal = java.util.Calendar.getInstance()
-                  val groups = LinkedHashMap<String, MutableList<Txn>>()
-                  for (t in rows) {
-                      cal.timeInMillis = t.ts
+                  val used = HashSet<Long>()
+                  val out = ArrayList<DupGroup>()
+
+                  for (i in rows.indices) {
+                      val a = rows[i]
+                      if (a.id in used) continue
+                      cal.timeInMillis = a.ts
                       val y = cal.get(java.util.Calendar.YEAR); val m = cal.get(java.util.Calendar.MONTH); val d = cal.get(java.util.Calendar.DAY_OF_MONTH)
                       val day = String.format(java.util.Locale.US, "%04d-%02d-%02d", y, m + 1, d)
-                      val amt = String.format(java.util.Locale.US, "%.2f", t.amount)
-                      val dir = if (t.debit) "D" else "C"
-                      val key = "$amt|$dir|$day"
-                      groups.getOrPut(key) { ArrayList() }.add(t)
-                  }
-                  val out = ArrayList<DupGroup>()
-                  for ((key, list) in groups) {
-                      if (list.size < 2) continue
-                      val f = list.first()
-                      out.add(DupGroup(key, f.amount, f.debit, f.vpa ?: "", f.ts, list.map { it.id }, f))
+                      val amtKey = String.format(java.util.Locale.US, "%.2f", a.amount)
+                      val dir = if (a.debit) "D" else "C"
+                      val group = arrayListOf(a)
+                      for (j in i + 1 until rows.size) {
+                          val b = rows[j]
+                          if (b.id in used) continue
+                          if (b.amount != a.amount) continue
+                          if (b.debit != a.debit) continue
+                          val cal2 = java.util.Calendar.getInstance().apply { timeInMillis = b.ts }
+                          val y2 = cal2.get(java.util.Calendar.YEAR); val m2 = cal2.get(java.util.Calendar.MONTH); val d2 = cal2.get(java.util.Calendar.DAY_OF_MONTH)
+                          if (y2 != y || m2 != m || d2 != d) continue
+                          if (!withinDuplicateTolerance(a, b)) continue
+                          group.add(b)
+                      }
+                      if (group.size >= 2) {
+                          group.forEach { used.add(it.id) }
+                          val first = group.first()
+                          val key = "$amtKey|$dir|$day|${Learner.norm(first.merchant)}"
+                          out.add(DupGroup(key, first.amount, first.debit, first.vpa ?: "", first.ts, group.map { it.id }, first))
+                      } else {
+                          used.add(a.id)
+                      }
                   }
                   return out
               }
@@ -1253,7 +1297,6 @@ jobs:
               private val trackP = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; color = Color.parseColor("#1F2430"); strokeCap = Paint.Cap.ROUND }
               private val progressP = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND }
               private val textP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = C.TEXT; textAlign = Paint.Align.CENTER }
-              private val captionP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = C.MUTED; textAlign = Paint.Align.CENTER }
               private val labelP = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = C.MUTED; textAlign = Paint.Align.CENTER }
               private val oval = RectF()
               fun setData(v: Float, t: Float, l: String, c: String, col: Int) {
@@ -1268,7 +1311,7 @@ jobs:
                   oval.set(cx - r, cy - r, cx + r, cy + r)
                   canvas.drawArc(oval, 0f, 360f, false, trackP)
                   canvas.drawArc(oval, -90f, 360f * animated, false, progressP)
-                  textP.textSize = r * 0.30f; labelP.textSize = r * 0.15f; captionP.textSize = r * 0.13f
+                  textP.textSize = r * 0.30f; labelP.textSize = r * 0.15f
                   canvas.drawText(label, cx, cy - r * 0.45f, labelP)
                   canvas.drawText(caption, cx, cy + r * 0.10f, textP)
               }
@@ -1312,25 +1355,6 @@ jobs:
                       p.color = col
                       canvas.drawRoundRect(i * w + 2f, 4f, (i + 1) * w - 2f, h - 4f, 4f, 4f, p)
                   }
-              }
-          }
-
-          class ConfettiView(ctx: Context) : View(ctx) {
-              private data class Bit(var x: Float, var y: Float, var vx: Float, var vy: Float, val col: Int, val size: Float, var rot: Float)
-              private val bits = ArrayList<Bit>()
-              private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-              private val colors = intArrayOf(C.ACCENT, C.GREEN, C.AMBER, C.RED, Color.parseColor("#C084FC"))
-              fun burst(cx: Float, cy: Float) {
-                  bits.clear()
-                  for (i in 0 until 80) { val angle = Math.random() * Math.PI * 2; val speed = 8f + Math.random().toFloat() * 10f; bits.add(Bit(cx, cy, Math.cos(angle).toFloat() * speed, Math.sin(angle).toFloat() * speed - 6f, colors[(Math.random() * colors.size).toInt()], 8f + Math.random().toFloat() * 8f, 0f)) }
-                  invalidate()
-              }
-              override fun onDraw(canvas: Canvas) {
-                  super.onDraw(canvas); var alive = false
-                  for (b in bits) { b.x += b.vx; b.y += b.vy; b.vy += 0.6f; b.vx *= 0.99f; b.rot += 12f
-                      if (b.y < height + 40) { alive = true; canvas.save(); canvas.rotate(b.rot, b.x, b.y); paint.color = b.col; canvas.drawRect(b.x - b.size / 2, b.y - b.size / 2, b.x + b.size / 2, b.y + b.size / 2, paint); canvas.restore() }
-                  }
-                  if (alive) postInvalidateOnAnimation()
               }
           }
           EOF_W
@@ -1402,9 +1426,6 @@ jobs:
           }
           EOF_PDF
 
-          # ============================================================
-          # MainActivity.kt — removed bad timeout props; added palette refresh on recreate
-          # ============================================================
           cat > app/src/main/java/com/example/fintrack/MainActivity.kt <<'EOF_17'
           package com.example.fintrack
 
@@ -1461,20 +1482,18 @@ jobs:
                   super.onCreate(savedInstanceState)
                   val prefs = getSharedPreferences("fin", MODE_PRIVATE)
                   val mode = prefs.getString("theme_mode", "system")
-                  // Apply delegate BEFORE colors are loaded
                   when (mode) {
                       "dark" -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES)
                       "light" -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_NO)
                       else -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM)
                   }
-                  // Refresh in-memory palette to match current configuration
                   val night = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
                   C.applyTheme(night)
 
                   window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
                   try {
                       org.osmdroid.config.Configuration.getInstance().apply {
-                          userAgentValue = "FinTrack/8.6 (com.example.fintrack; Android)"
+                          userAgentValue = "FinTrack/8.7 (com.example.fintrack; Android)"
                           tileFileSystemCacheMaxBytes = 600L * 1024 * 1024
                           tileFileSystemCacheTrimBytes = 500L * 1024 * 1024
                           load(this@MainActivity, getSharedPreferences("osmdroid", MODE_PRIVATE))
@@ -1553,7 +1572,6 @@ jobs:
                   (window.decorView as FrameLayout).addView(col, lp)
                   Handler(Looper.getMainLooper()).postDelayed({ try { (col.parent as? ViewGroup)?.removeView(col) } catch (e: Exception) {} }, 5000)
               }
-
               fun toggleTheme() {
                   val prefs = getSharedPreferences("fin", MODE_PRIVATE)
                   val cur = prefs.getString("theme_mode", "system")
@@ -1564,11 +1582,8 @@ jobs:
                       "light" -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_NO)
                       else -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM)
                   }
-                  toast("Theme: $next")
-                  // Force activity recreation so in-memory palette + all UI refresh
-                  recreate()
+                  toast("Theme: $next"); recreate()
               }
-
               private fun hasSms() = ContextCompat.checkSelfPermission(this, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED
               private fun askPermissionsAndScan() { if (hasSms()) { rescan(); return }; ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.READ_SMS, Manifest.permission.RECEIVE_SMS), 1) }
               override fun onRequestPermissionsResult(code: Int, p: Array<out String>, r: IntArray) { super.onRequestPermissionsResult(code, p, r); if (hasSms()) rescan() else toast("SMS permission zaroori hai") }
@@ -1649,9 +1664,6 @@ jobs:
           }
           EOF_17
 
-          # ============================================================
-          # Screens1.kt — home/ledger (unchanged except comments)
-          # ============================================================
           cat > app/src/main/java/com/example/fintrack/Screens1.kt <<'EOF_18'
           package com.example.fintrack
 
@@ -1700,15 +1712,6 @@ jobs:
                   val projectedTotal: Double = ((spent / elapsedDays) * daysInMonth).coerceAtLeast(1.0)
                   ring.setData(spent.toFloat(), projectedTotal.toFloat(), "Kharch · $label", inr(spent), C.RED)
                   body.put(ring)
-                  val todayCal = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }
-                  val tStart = todayCal.timeInMillis; todayCal.add(Calendar.DAY_OF_MONTH, 1); val tEnd = todayCal.timeInMillis
-                  val todaySpent = db.num("SELECT SUM(amount) FROM txn WHERE debit=1 AND ts>=? AND ts<?", tStart.toString(), tEnd.toString())
-                  val yStart = tStart - 86_400_000L
-                  val ySpent = db.num("SELECT SUM(amount) FROM txn WHERE debit=1 AND ts>=? AND ts<?", yStart.toString(), tStart.toString())
-                  val hero = act.card()
-                  hero.addView(act.tv("Aaj", 12f, C.MUTED)); hero.addView(act.tv(inr(todaySpent), 22f, C.RED, true))
-                  val delta: String = when { ySpent <= 0.0 && todaySpent > 0.0 -> "Kal se naya kharch"; ySpent <= 0.0 -> "Aaj abhi tak kuch nahi"; else -> { val pct = ((todaySpent - ySpent) / ySpent * 100).toInt(); if (pct >= 0) "+$pct% kal se" else "$pct% kal se" } }
-                  hero.addView(act.tv(delta, 12f, C.MUTED)); body.put(hero)
                   val review = db.num("SELECT COUNT(*) FROM txn WHERE review=1").toInt()
                   if (review > 0) {
                       val c = act.card()
@@ -1745,30 +1748,11 @@ jobs:
                   hm.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                   hm.values = daily; hm.maxValue = (daily.maxOrNull() ?: 1).coerceAtLeast(1)
                   hmCard.addView(hm); body.put(hmCard)
-                  val prevCal = Calendar.getInstance().apply { set(Calendar.YEAR, year); set(Calendar.MONTH, month); set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0); add(Calendar.MONTH, -1) }
-                  val pStart = prevCal.timeInMillis; prevCal.add(Calendar.MONTH, 1); val pEnd = prevCal.timeInMillis
-                  val prevSpent = db.num("SELECT SUM(amount) FROM txn WHERE debit=1 AND ts>=? AND ts<?", pStart.toString(), pEnd.toString())
-                  if (prevSpent > 0 && spent > 0) {
-                      val pct = ((spent - prevSpent) / prevSpent * 100).toInt()
-                      val ins = act.card()
-                      ins.addView(act.tv(if (pct >= 0) "📈 Is mahine ${pct}% zyada kharch" else "📉 Is mahine ${-pct}% kam kharch", 14f, if (pct >= 0) C.AMBER else C.GREEN, true))
-                      ins.addView(act.tv("Pichle mahine: ${inr(prevSpent)}", 12f, C.MUTED)); body.put(ins)
-                  }
-                  val projected = (spent / elapsedDays) * daysInMonth
-                  val proj = act.card()
-                  proj.addView(act.tv("Projected month-end total", 12f, C.MUTED))
-                  proj.addView(act.tv(inr(projected), 22f, C.AMBER, true))
-                  proj.addView(act.tv("Daily average ${inr(spent / elapsedDays)}", 12f, C.MUTED)); body.put(proj)
                   val nw = NetWorth.compute(act)
                   val n = act.card()
                   n.addView(act.tv("Net worth", 12f, C.MUTED))
                   n.addView(act.tv(inr(nw.assets - nw.liabilities), 24f, if (nw.assets >= nw.liabilities) C.GREEN else C.RED, true))
                   n.setOnClickListener { act.show(4) }; body.put(n)
-                  val pdfBtn = act.card()
-                  pdfBtn.addView(act.tv("Monthly PDF report", 15f, C.TEXT, true))
-                  pdfBtn.put(act.actionBtn("Generate & share $label report") {
-                      Thread { try { val file = PdfReport.generate(act, year, month); act.runOnUiThread { act.startActivity(android.content.Intent.createChooser(PdfReport.shareIntent(act, file), "Share PDF")) } } catch (e: Exception) { act.runOnUiThread { act.toast("PDF error: ${e.message}") } } }.start()
-                  }, 8); body.put(pdfBtn)
               }
               private fun pickMonthYear() {
                   val years = (Calendar.getInstance().get(Calendar.YEAR) - 5..Calendar.getInstance().get(Calendar.YEAR) + 1).toList()
@@ -1791,7 +1775,6 @@ jobs:
               sealed class Row {
                   data class TxnRow(val t: Txn) : Row()
                   data class GroupRow(val hash: String, val count: Int, val total: Double, val sampleMerchant: String, val sampleCategory: String, val sampleDebit: Boolean) : Row()
-                  data class DupRowItem(val t: Txn, val groupKey: String) : Row()
               }
 
               private val adapter = RowAdapter<Row>(act, emptyList()) { item, r ->
@@ -1809,13 +1792,6 @@ jobs:
                           r.sub.text = fmtDate(t.ts) + " • " + t.institution + " • " + t.category + (if (t.note != null) " • 📝" else "")
                           r.amt.text = (if (t.debit) "-" else "+") + inr(t.amount, true); r.amt.setTextColor(if (t.debit) C.RED else C.GREEN)
                       }
-                      is Row.DupRowItem -> {
-                          val t = item.t
-                          r.icon.setImageResource(iconFor(t.category)); r.icon.setColorFilter(if (t.merchant.trim().lowercase() == "unknown") C.RED else C.ACCENT)
-                          r.title.text = "${fmtDateTime(t.ts)} • ${t.institution}"
-                          r.sub.text = "${t.merchant}  •  ${if (t.vpa != null) t.vpa else "no UPI"}"
-                          r.amt.text = (if (t.debit) "-" else "+") + inr(t.amount, true); r.amt.setTextColor(if (t.debit) C.RED else C.GREEN)
-                      }
                   }
               }
               private lateinit var list: ListView
@@ -1826,7 +1802,6 @@ jobs:
                           when (val item = this@LedgerScreen.adapter.items.getOrNull(pos)) {
                               is Row.TxnRow -> { if (selectMode) { if (!selected.add(item.t.id)) selected.remove(item.t.id); this@LedgerScreen.adapter.notifyDataSetChanged() } else showTxn(item.t) }
                               is Row.GroupRow -> openGroupFix(item)
-                              is Row.DupRowItem -> { }
                               null -> {}
                           }
                       }
@@ -1835,22 +1810,6 @@ jobs:
                           selectMode = true; selected.add(item.t.id); this@LedgerScreen.adapter.notifyDataSetChanged(); true
                       }
                   }
-                  list.setOnTouchListener(object : View.OnTouchListener {
-                      private var downX = 0f; private var downY = 0f; private var rowPos = -1
-                      override fun onTouch(v: View, e: MotionEvent): Boolean {
-                          when (e.action) {
-                              MotionEvent.ACTION_DOWN -> { downX = e.x; downY = e.y; rowPos = list.pointToPosition(e.x.toInt(), e.y.toInt()) }
-                              MotionEvent.ACTION_UP -> {
-                                  val dx = e.x - downX
-                                  if (Math.abs(dx) > 220 && Math.abs(e.y - downY) < 80 && rowPos >= 0) {
-                                      val item = this@LedgerScreen.adapter.items.getOrNull(rowPos) as? Row.TxnRow
-                                      if (item != null) { quickCategorize(item.t); return true }
-                                  }
-                              }
-                          }
-                          return false
-                      }
-                  })
               }
               override val root: View = act.vbox().apply {
                   val search = EditText(act).apply {
@@ -1917,18 +1876,9 @@ jobs:
                   adapter.notifyDataSetChanged()
               }
 
-              private fun quickCategorize(t: Txn) {
-                  val choices = Categories.ALL
-                  AlertDialog.Builder(act).setTitle("Category chuno").setItems(choices.toTypedArray()) { _, i ->
-                      PayeeOps.bulkSetCategory(act, listOf(t.id), choices[i])
-                      act.undo("${t.merchant} → ${choices[i]}") { PayeeOps.bulkSetCategory(act, listOf(t.id), t.category) }
-                      refresh()
-                  }.setNegativeButton("Cancel", null).show()
-              }
-
               private fun showDuplicates() {
                   val rows = PayeeOps.flattenDuplicates(act)
-                  if (rows.isEmpty()) { act.toast("Koi duplicate nahi mila"); return }
+                  if (rows.isEmpty()) { act.toast("Koi duplicate nahi mila (5min / same payee ke andar)"); return }
                   val container = act.vbox(8)
                   container.addView(act.tv("${rows.size} rows across ${rows.map { it.groupKey }.distinct().size} groups", 12f, C.MUTED))
                   val checkboxes = LinkedHashMap<Long, CheckBox>()
@@ -1951,7 +1901,7 @@ jobs:
                       .setPositiveButton("Delete ticked") { _, _ ->
                           var n = 0
                           for ((id, cb) in checkboxes) if (cb.isChecked) { Db.get(act).deleteTxn(id); n++ }
-                          act.toast("$n deleted (smart-default = Unknown / shorter merchant)")
+                          act.toast("$n deleted")
                           act.refreshAll()
                       }
                       .setNegativeButton("Cancel", null)
@@ -2008,6 +1958,9 @@ jobs:
           }
           EOF_18
 
+          # ============================================================
+          # Screens2.kt — SPLIT into outbound + return with arrows
+          # ============================================================
           cat > app/src/main/java/com/example/fintrack/Screens2.kt <<'EOF_19'
           package com.example.fintrack
 
@@ -2049,25 +2002,123 @@ jobs:
           class RouteMapView @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? = null) : MapView(ctx, attrs) {
               class Pt(val lat: Double, val lon: Double, val label: String, val ts: Long)
               init { setTileSource(OSMFR_HOT); setMultiTouchControls(true); setBuiltInZoomControls(false); controller.setZoom(5.0); controller.setCenter(GeoPoint(22.0, 79.0)); try { overlayManager.tilesOverlay.setColorFilter(null) } catch (e: Exception) {} }
+
+              /**
+               * Draws two lines per trip:
+               *  - Outbound (green): from trip start to the furthest point
+               *  - Return (red): from furthest point back to trip start
+               * A small arrow marker shows direction at the midpoint of each leg.
+               */
               fun setTrips(trips: List<List<Pt>>) {
                   overlays.clear()
                   val allPoints = trips.flatten().filter { it.lat != 0.0 && it.lon != 0.0 }
                   if (allPoints.isEmpty()) { controller.setCenter(GeoPoint(22.0, 79.0)); controller.setZoom(5.0); invalidate(); return }
-                  val colors = intArrayOf(Color.parseColor("#5B9CFF"), Color.parseColor("#34D399"), Color.parseColor("#FBBF24"), Color.parseColor("#FF6B6B"), Color.parseColor("#C084FC"), Color.parseColor("#22D3EE"))
-                  for ((i, trip) in trips.withIndex()) {
-                      val pts = trip.filter { it.lat != 0.0 && it.lon != 0.0 }
-                      if (pts.isEmpty()) continue
-                      val color = colors[i % colors.size]
-                      if (pts.size >= 2) { val line = Polyline(); line.setPoints(pts.map { GeoPoint(it.lat, it.lon) }); line.outlinePaint.color = color; line.outlinePaint.strokeWidth = 8f; overlays.add(line) }
-                      for ((j, p) in pts.withIndex()) {
-                          val marker = Marker(this); marker.position = GeoPoint(p.lat, p.lon)
-                          val time = SimpleDateFormat("HH:mm", Locale.US).format(Date(p.ts))
-                          marker.title = p.label; marker.snippet = "$time • ${if (j == 0) "Start" else "Stop $j"}"; marker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM); overlays.add(marker)
+
+                  for ((tripIndex, rawTrip) in trips.withIndex()) {
+                      val trip = rawTrip.filter { it.lat != 0.0 && it.lon != 0.0 }.sortedBy { it.ts }
+                      if (trip.isEmpty()) continue
+                      if (trip.size == 1) {
+                          addPin(trip[0], "📍")
+                          continue
+                      }
+                      // Split into outbound + return at the *furthest* point from the start
+                      val start = trip.first()
+                      var farIdx = 0
+                      var maxDist = 0.0
+                      for (k in trip.indices) {
+                          val d = haversine(start, trip[k])
+                          if (d > maxDist) { maxDist = d; farIdx = k }
+                      }
+                      val outbound = trip.subList(0, farIdx + 1)
+                      val returning = trip.subList(farIdx, trip.size)
+                      // Fallback: if outbound has 1 point, use first half; same for return
+                      val outPts = if (outbound.size >= 2) outbound else trip.subList(0, (trip.size / 2) + 1)
+                      val retPts = if (returning.size >= 2) returning else trip.subList(trip.size / 2, trip.size)
+
+                      addPolyline(outPts, Color.parseColor("#10B981"), arrows = true, label = "Out $tripIndex")
+                      if (retPts.size >= 2 && farIdx > 0 && farIdx < trip.size - 1) {
+                          addPolyline(retPts, Color.parseColor("#DC2626"), arrows = true, label = "Return $tripIndex")
+                      }
+                      // Pins at each stop
+                      for ((i, p) in trip.withIndex()) {
+                          addPin(p, if (i == 0) "🟢 Start" else if (i == trip.size - 1) "🔴 End" else "📍")
                       }
                   }
-                  try { val bbox = BoundingBox.fromGeoPoints(allPoints.map { GeoPoint(it.lat, it.lon) }); zoomToBoundingBox(bbox, true, 80) }
-                  catch (e: Exception) { controller.setCenter(GeoPoint(allPoints.first().lat, allPoints.first().lon)); controller.setZoom(7.0) }
+
+                  try {
+                      val bbox = BoundingBox.fromGeoPoints(allPoints.map { GeoPoint(it.lat, it.lon) })
+                      zoomToBoundingBox(bbox, true, 80)
+                  } catch (e: Exception) {
+                      controller.setCenter(GeoPoint(allPoints.first().lat, allPoints.first().lon)); controller.setZoom(7.0)
+                  }
                   invalidate()
+              }
+
+              private fun haversine(a: Pt, b: Pt): Double {
+                  val R = 6371.0
+                  val dLat = Math.toRadians(b.lat - a.lat)
+                  val dLon = Math.toRadians(b.lon - a.lon)
+                  val la1 = Math.toRadians(a.lat); val la2 = Math.toRadians(b.lat)
+                  val x = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                          Math.cos(la1) * Math.cos(la2) * Math.sin(dLon / 2) * Math.sin(dLon / 2)
+                  return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x))
+              }
+
+              private fun addPolyline(points: List<Pt>, color: Int, arrows: Boolean, label: String) {
+                  val line = Polyline()
+                  line.setPoints(points.map { GeoPoint(it.lat, it.lon) })
+                  line.outlinePaint.color = color
+                  line.outlinePaint.strokeWidth = 10f
+                  line.title = label
+                  overlays.add(line)
+                  if (arrows && points.size >= 2) {
+                      // Arrow at midpoint
+                      val mid = points.size / 2
+                      val p1 = points[mid - 1]; val p2 = points[mid]
+                      val bearing = Math.toDegrees(Math.atan2(p2.lon - p1.lon, p2.lat - p1.lat))
+                      val marker = Marker(this)
+                      marker.position = GeoPoint(p2.lat, p2.lon)
+                      marker.icon = arrowDrawable(color, bearing)
+                      marker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+                      overlays.add(marker)
+                  }
+              }
+
+              private fun arrowDrawable(color: Int, bearingDeg: Double): android.graphics.drawable.Drawable {
+                  val d = object : android.graphics.drawable.Drawable() {
+                      private val p = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                          this.color = color; style = android.graphics.Paint.Style.FILL
+                      }
+                      override fun draw(canvas: android.graphics.Canvas) {
+                          val w = bounds.width().toFloat(); val h = bounds.height().toFloat()
+                          canvas.save()
+                          canvas.rotate(bearingDeg.toFloat(), w / 2, h / 2)
+                          val path = android.graphics.Path()
+                          path.moveTo(w / 2, h * 0.15f)
+                          path.lineTo(w * 0.35f, h * 0.85f)
+                          path.lineTo(w * 0.5f, h * 0.65f)
+                          path.lineTo(w * 0.65f, h * 0.85f)
+                          path.close()
+                          canvas.drawPath(path, p)
+                          canvas.restore()
+                      }
+                      override fun setAlpha(alpha: Int) {}
+                      override fun setColorFilter(cf: android.graphics.ColorFilter?) {}
+                      @Deprecated("Deprecated in Java")
+                      override fun getOpacity(): Int = android.graphics.PixelFormat.TRANSLUCENT
+                  }
+                  d.setBounds(0, 0, 28, 28)
+                  return d
+              }
+
+              private fun addPin(p: Pt, labelPrefix: String) {
+                  val m = Marker(this)
+                  m.position = GeoPoint(p.lat, p.lon)
+                  val time = SimpleDateFormat("HH:mm", Locale.US).format(Date(p.ts))
+                  m.title = "$labelPrefix ${p.label}"
+                  m.snippet = time
+                  m.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                  overlays.add(m)
               }
           }
 
@@ -2081,7 +2132,7 @@ jobs:
               override val root: View = act.vbox().apply {
                   put(summary, 0)
                   put(HorizontalScrollView(act).apply { isHorizontalScrollBarEnabled = false; addView(chips) }, 2)
-                  put(map, 4); (getChildAt(childCount - 1).layoutParams as LinearLayout.LayoutParams).height = act.dp(300)
+                  put(map, 4); (getChildAt(childCount - 1).layoutParams as LinearLayout.LayoutParams).height = act.dp(340)
                   put(ScrollView(act).apply { addView(detail) }, 4, 1f)
               }
               override fun refresh() {
@@ -2090,7 +2141,7 @@ jobs:
                   val byDate = LinkedHashMap<String, MutableList<Map<String, String?>>>()
                   for (r in rows) { val ts = r["ts"]?.toLongOrNull() ?: 0L; byDate.getOrPut(dateFmt.format(Date(ts))) { ArrayList() }.add(r) }
                   val total = rows.sumOf { it["amount"]?.toDoubleOrNull() ?: 0.0 }
-                  summary.text = "${byDate.size} din  •  ${rows.size} tolls  •  Total ${inr(total)}"
+                  summary.text = "${byDate.size} din  •  ${rows.size} tolls  •  Total ${inr(total)}\n🟢 green = going, 🔴 red = return"
                   chips.removeAllViews()
                   chips.addView(act.pill("All", selDate == null) { selDate = null; refresh() })
                   for (d in byDate.keys.toList().reversed().take(30)) chips.addView(act.pill(d, selDate == d) { selDate = d; refresh() })
@@ -2286,9 +2337,6 @@ jobs:
           }
           EOF_20
 
-          # ============================================================
-          # Ui.kt — palette is now a set of MUTABLE vars refreshed by C.applyTheme(isNight)
-          # ============================================================
           cat > app/src/main/java/com/example/fintrack/Ui.kt <<'EOF_21'
           package com.example.fintrack
 
@@ -2313,10 +2361,6 @@ jobs:
           import java.util.Date
           import java.util.Locale
 
-          /**
-           * Runtime theme palette. `applyTheme(isNight)` flips these vars.
-           * Call once at the top of Activity.onCreate BEFORE building any UI.
-           */
           object C {
               var BG: Int = Color.parseColor("#0E1014"); private set
               var CARD: Int = Color.parseColor("#181B22"); private set
@@ -2327,7 +2371,6 @@ jobs:
               var GREEN: Int = Color.parseColor("#34D399"); private set
               var RED: Int = Color.parseColor("#FF6B6B"); private set
               var AMBER: Int = Color.parseColor("#FBBF24"); private set
-
               fun applyTheme(isNight: Boolean) {
                   if (isNight) {
                       BG = Color.parseColor("#0E1014"); CARD = Color.parseColor("#181B22"); CARD2 = Color.parseColor("#262B38")
@@ -2504,8 +2547,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="v8.6.${{ github.run_number }}"
+          VERSION="v8.7.${{ github.run_number }}"
           gh release create "$VERSION" /tmp/proj/app/build/outputs/apk/debug/app-debug.apk \
             --repo "${{ github.repository }}" \
             --title "FinTrack Build ${{ github.run_number }}" \
-            --notes "v8.6: fixed OSMDroid timeout property errors; theme switching now actually flips colors via C.applyTheme() + recreate()."
+            --notes "v8.7: map splits outbound (green) vs return (red) trips with arrow markers; duplicate finder now requires same amount+day+5min+sender; if merchants differ they are NOT flagged as duplicates."
