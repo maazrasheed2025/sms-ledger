@@ -61,8 +61,8 @@ jobs:
                   applicationId = "com.example.fintrack"
                   minSdk = 30
                   targetSdk = 33
-                  versionCode = 17
-                  versionName = "9.1"
+                  versionCode = 18
+                  versionName = "10.0"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -159,7 +159,7 @@ jobs:
 
           object Backup {
               val CANONICAL = listOf("Bank", "Account_No", "Txn_Date", "Description", "Ref_No", "Withdrawal", "Deposit", "Category", "UPI_ID")
-              private val tables = listOf("txn","payees","net_items","senders","merchant_rules","parse_patterns","nb_words","toll_trips","toll_plazas","payee_tags","loans")
+              private val tables = listOf("txn","payees","net_items","senders","merchant_rules","parse_patterns","nb_words","toll_trips","toll_plazas","payee_tags","loans","payee_merges")
               private val dateFmt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
 
               private fun q(s: String): String {
@@ -274,7 +274,7 @@ jobs:
               var note: String? = null, var voicePath: String? = null
           )
 
-          class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "fintrack.db", null, 6) {
+          class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "fintrack.db", null, 7) {
               companion object {
                   @Volatile private var inst: Db? = null
                   fun get(ctx: Context): Db = inst ?: synchronized(this) { inst ?: Db(ctx.applicationContext).also { inst = it } }
@@ -299,6 +299,8 @@ jobs:
                   db.execSQL("CREATE TABLE payee_tags (merchant_key TEXT, tag TEXT, note TEXT, PRIMARY KEY(merchant_key, tag))")
                   db.execSQL("CREATE TABLE txn_skipped (id INTEGER PRIMARY KEY AUTOINCREMENT, reason TEXT, ref TEXT, body TEXT, ts INTEGER)")
                   db.execSQL("CREATE TABLE subs_detected (merchant_key TEXT PRIMARY KEY, avg_amt REAL, last_ts INTEGER, count INTEGER)")
+                  // NEW: payee_merges logs every merge for undo
+                  db.execSQL("CREATE TABLE payee_merges (id INTEGER PRIMARY KEY AUTOINCREMENT, survivor_key TEXT, merged_keys TEXT, survivor_name TEXT, merged_at INTEGER, undone INTEGER DEFAULT 0)")
               }
               override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
                   if (oldVersion < 2) db.execSQL("CREATE TABLE IF NOT EXISTS toll_plazas (plaza_id INTEGER PRIMARY KEY, name TEXT, state TEXT, nh TEXT, lat REAL, lon REAL, car_fare REAL)")
@@ -322,6 +324,9 @@ jobs:
                   if (oldVersion < 6) {
                       runCatching { db.execSQL("ALTER TABLE txn ADD COLUMN note TEXT") }
                       runCatching { db.execSQL("ALTER TABLE txn ADD COLUMN voice_path TEXT") }
+                  }
+                  if (oldVersion < 7) {
+                      db.execSQL("CREATE TABLE IF NOT EXISTS payee_merges (id INTEGER PRIMARY KEY AUTOINCREMENT, survivor_key TEXT, merged_keys TEXT, survivor_name TEXT, merged_at INTEGER, undone INTEGER DEFAULT 0)")
                   }
               }
               fun rows(sql: String, vararg args: String): List<Map<String, String?>> {
@@ -958,25 +963,35 @@ jobs:
               }
           }
 
+          // NEW: scan report with counters
+          data class ScanReport(val scanned: Int, val imported: Int, val duplicates: Int, val ignored: Int, val maxTs: Long)
+
           object SmsImport {
-              fun run(ctx: Context): Int {
+              fun run(ctx: Context): ScanReport {
                   val db = Db.get(ctx); val prefs = ctx.getSharedPreferences("fin", Context.MODE_PRIVATE)
-                  val last = prefs.getLong("last_sms_date", 0L); var maxDate = last; var count = 0
-                  val cur = ctx.contentResolver.query(Uri.parse("content://sms/inbox"), arrayOf("address", "body", "date"), "date > ?", arrayOf(last.toString()), "date ASC") ?: return 0
+                  val last = prefs.getLong("last_sms_date", 0L); var maxDate = last
+                  var scanned = 0; var imported = 0; var duplicates = 0; var ignored = 0
+                  val cur = ctx.contentResolver.query(Uri.parse("content://sms/inbox"), arrayOf("address", "body", "date"), "date > ?", arrayOf(last.toString()), "date ASC") ?: return ScanReport(0,0,0,0,maxDate)
                   val w = db.writableDatabase; w.beginTransaction()
                   try {
                       cur.use { c ->
                           val iA = c.getColumnIndex("address"); val iB = c.getColumnIndex("body"); val iD = c.getColumnIndex("date")
                           while (c.moveToNext()) {
+                              scanned++
                               val date = c.getLong(iD); if (date > maxDate) maxDate = date
-                              val t = SmsEngine.build(ctx, db, c.getString(iA) ?: "", c.getString(iB) ?: "", date)
-                              if (t != null && Repo.save(ctx, t) > 0) count++
+                              val body = c.getString(iB) ?: ""
+                              val sender = c.getString(iA) ?: ""
+                              val t = SmsEngine.build(ctx, db, sender, body, date)
+                              if (t == null) { ignored++; continue }
+                              val existing = db.one("SELECT id FROM txn WHERE sms_key=?", t.smsKey ?: "")
+                              if (existing != null) { duplicates++; continue }
+                              if (Repo.save(ctx, t) > 0) imported++ else duplicates++
                           }
                       }
                       w.setTransactionSuccessful()
                   } finally { w.endTransaction() }
                   prefs.edit().putLong("last_sms_date", maxDate).apply()
-                  return count
+                  return ScanReport(scanned, imported, duplicates, ignored, maxDate)
               }
           }
           EOF_12
@@ -1154,6 +1169,7 @@ jobs:
           import android.content.Context
 
           object PayeeOps {
+              // MERGE — now logs to payee_merges for undo
               fun merge(ctx: Context, keys: List<String>, survivorKey: String, survivorName: String) {
                   if (keys.size < 2) return
                   val db = Db.get(ctx); val w = db.writableDatabase
@@ -1175,9 +1191,51 @@ jobs:
                       w.execSQL("INSERT OR REPLACE INTO payees(merchant_key, display, upi_id, alt_upis) VALUES(?,?,?,?)",
                           arrayOf(survivorKey, survivorName, survivorUpi ?: "", allAlt))
                       w.delete("payees", "merchant_key IN ($marks) AND merchant_key != ?", (keys + survivorKey).toTypedArray())
+                      // NEW: log the merge
+                      w.execSQL("INSERT INTO payee_merges(survivor_key, merged_keys, survivor_name, merged_at, undone) VALUES(?,?,?,?,0)",
+                          arrayOf(survivorKey, keys.joinToString("\u0001"), survivorName, System.currentTimeMillis()))
                       w.setTransactionSuccessful()
                   } finally { w.endTransaction() }
               }
+
+              // NEW: unmerge last merge (or all undos)
+              fun undoLastMerge(ctx: Context): Boolean {
+                  val db = Db.get(ctx); val w = db.writableDatabase
+                  val row = db.rows("SELECT id, survivor_key, merged_keys, survivor_name FROM payee_merges WHERE undone=0 ORDER BY id DESC LIMIT 1").firstOrNull() ?: return false
+                  val mergeId = row["id"]?.toLongOrNull() ?: return false
+                  val survivorKey = row["survivor_key"] ?: return false
+                  val survivorName = row["survivor_name"] ?: survivorKey
+                  val mergedKeys = (row["merged_keys"] ?: "").split("\u0001").filter { it.isNotBlank() }
+                  w.beginTransaction()
+                  try {
+                      // Best-effort: we can only restore the display name back to original merchant text
+                      // For each merged key, restore its own payee row and re-point txn rows whose merchant matches the survivor display
+                      for (k in mergedKeys) {
+                          w.execSQL("INSERT OR IGNORE INTO payees(merchant_key, display) VALUES(?,?)", arrayOf(k, k))
+                          w.execSQL("UPDATE txn SET merchant_key=? WHERE merchant_key=? AND merchant=?", arrayOf(k, survivorKey, survivorName))
+                      }
+                      w.execSQL("UPDATE payee_merges SET undone=1 WHERE id=?", arrayOf(mergeId))
+                      w.setTransactionSuccessful()
+                  } finally { w.endTransaction() }
+                  return true
+              }
+
+              // NEW: bulk-reassign all txns of a set of merchant keys into a new payee
+              fun reassignToPayee(ctx: Context, fromKeys: List<String>, newKey: String, newName: String) {
+                  if (fromKeys.isEmpty()) return
+                  val db = Db.get(ctx); val w = db.writableDatabase
+                  w.beginTransaction()
+                  try {
+                      val marks = fromKeys.joinToString(",") { "?" }
+                      val cv = ContentValues().apply { put("merchant_key", newKey); put("merchant", newName); put("status", "USER"); put("review", 0); putNull("review_hash") }
+                      w.update("txn", cv, "merchant_key IN ($marks)", fromKeys.toTypedArray())
+                      w.execSQL("INSERT OR IGNORE INTO payees(merchant_key, display) VALUES(?,?)", arrayOf(newKey, newName))
+                      // If user typed the name of an existing payee, migrate their other txns onto the new name/key too
+                      w.execSQL("UPDATE txn SET merchant=? WHERE merchant_key=?", arrayOf(newName, newKey))
+                      w.setTransactionSuccessful()
+                  } finally { w.endTransaction() }
+              }
+
               fun applyGroupFix(ctx: Context, hash: String, merchant: String, category: String, debit: Boolean, newStatus: String = "USER") {
                   val db = Db.get(ctx); val w = db.writableDatabase; w.beginTransaction()
                   try {
@@ -1231,17 +1289,22 @@ jobs:
                   return s
               }
 
+              private fun dayKey(ts: Long): String {
+                  val cal = java.util.Calendar.getInstance(); cal.timeInMillis = ts
+                  return String.format(java.util.Locale.US, "%04d-%02d-%02d",
+                      cal.get(java.util.Calendar.YEAR), cal.get(java.util.Calendar.MONTH) + 1, cal.get(java.util.Calendar.DAY_OF_MONTH))
+              }
+
+              private fun isMidnight(ts: Long): Boolean {
+                  val cal = java.util.Calendar.getInstance(); cal.timeInMillis = ts
+                  return cal.get(java.util.Calendar.HOUR_OF_DAY) == 0 && cal.get(java.util.Calendar.MINUTE) == 0
+              }
+
               private fun isDuplicate(a: Txn, b: Txn): Boolean {
                   if (Math.abs(a.ts - b.ts) > 5 * 60_000L) return false
                   if (Math.abs(a.amount - b.amount) > 0.01) return false
                   if (a.debit != b.debit) return false
-                  val cal = java.util.Calendar.getInstance()
-                  fun dayOf(t: Txn): String {
-                      cal.timeInMillis = t.ts
-                      return String.format(java.util.Locale.US, "%04d-%02d-%02d",
-                          cal.get(java.util.Calendar.YEAR), cal.get(java.util.Calendar.MONTH) + 1, cal.get(java.util.Calendar.DAY_OF_MONTH))
-                  }
-                  if (dayOf(a) != dayOf(b)) return false
+                  if (dayKey(a.ts) != dayKey(b.ts)) return false
 
                   val ma = a.merchant.trim().lowercase()
                   val mb = b.merchant.trim().lowercase()
@@ -1272,6 +1335,27 @@ jobs:
                   if (real.size >= 2 && realNames.size > 1) return emptyList()
                   val sorted = list.sortedByDescending { qualityScore(it) }
                   return sorted.drop(1).map { it.id }
+              }
+
+              // NEW: smart filter just for a single payee's transaction list.
+              // Rule: same date + same amount + same direction + one has 00:00, other has real time.
+              // Auto-tick the 00:00 one for deletion.
+              fun smartMidnightDeleteIds(txns: List<Txn>): Set<Long> {
+                  val toDelete = HashSet<Long>()
+                  val buckets = LinkedHashMap<String, MutableList<Txn>>()
+                  for (t in txns) {
+                      val key = dayKey(t.ts) + "|" + String.format(java.util.Locale.US, "%.2f", t.amount) + "|" + (if (t.debit) "D" else "C")
+                      buckets.getOrPut(key) { ArrayList() }.add(t)
+                  }
+                  for ((_, list) in buckets) {
+                      if (list.size < 2) continue
+                      val midnight = list.filter { isMidnight(it.ts) }
+                      val timed = list.filter { !isMidnight(it.ts) }
+                      if (midnight.isNotEmpty() && timed.isNotEmpty()) {
+                          for (m in midnight) toDelete.add(m.id)
+                      }
+                  }
+                  return toDelete
               }
 
               fun findDuplicates(ctx: Context): List<DupGroup> {
@@ -1674,6 +1758,7 @@ jobs:
               private val openTollJson = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> if (uri != null) doImportTolls(uri) }
               private val openCsvStmt = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> if (uri != null) showCsvImportDialog(uri) }
               private val openBackupRestore = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> if (uri != null) doCleanRestore(uri) }
+              private val openFirstRunRestore = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> if (uri != null) doFirstRunRestore(uri) }
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
@@ -1690,7 +1775,7 @@ jobs:
                   window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
                   try {
                       org.osmdroid.config.Configuration.getInstance().apply {
-                          userAgentValue = "FinTrack/9.1 (com.example.fintrack; Android)"
+                          userAgentValue = "FinTrack/10.0 (com.example.fintrack; Android)"
                           tileFileSystemCacheMaxBytes = 600L * 1024 * 1024
                           tileFileSystemCacheTrimBytes = 500L * 1024 * 1024
                           load(this@MainActivity, getSharedPreferences("osmdroid", MODE_PRIVATE))
@@ -1738,7 +1823,17 @@ jobs:
               override fun onStop() { super.onStop(); stopAt = System.currentTimeMillis() }
               override fun onStart() { super.onStart(); if (unlocked && stopAt > 0 && System.currentTimeMillis() - stopAt > 60_000) { lock(); authenticate() } }
               private fun lock() { unlocked = false; lockView.visibility = View.VISIBLE }
-              private fun unlock() { unlocked = true; lockView.visibility = View.GONE; refreshAll(); askPermissionsAndScan() }
+              private fun unlock() {
+                  unlocked = true; lockView.visibility = View.GONE; refreshAll()
+                  // NEW: first-run onboarding
+                  val prefs = getSharedPreferences("fin", MODE_PRIVATE)
+                  if (!prefs.getBoolean("onboarded_v10", false)) {
+                      prefs.edit().putBoolean("onboarded_v10", true).apply()
+                      showFirstRunOnboarding()
+                  } else {
+                      askPermissionsAndScan()
+                  }
+              }
               private fun authenticate() {
                   if (authBusy) return
                   val auth = BiometricManager.Authenticators.BIOMETRIC_STRONG or BiometricManager.Authenticators.DEVICE_CREDENTIAL
@@ -1789,9 +1884,24 @@ jobs:
                   if (!hasSms()) { askPermissionsAndScan(); return }
                   toast("SMS scan ho raha hai...")
                   Thread {
-                      var n = 0; var err: String? = null
-                      try { n = SmsImport.run(applicationContext) } catch (e: Exception) { err = e.message }
-                      runOnUiThread { toast(if (err != null) "Scan error: $err" else "$n naye transactions mile"); refreshAll() }
+                      var report: ScanReport? = null; var err: String? = null
+                      try { report = SmsImport.run(applicationContext) } catch (e: Exception) { err = e.message }
+                      runOnUiThread {
+                          refreshAll()
+                          if (err != null) { toast("Scan error: $err"); return@runOnUiThread }
+                          val r = report ?: return@runOnUiThread
+                          AlertDialog.Builder(this)
+                              .setTitle("SMS scan complete")
+                              .setMessage(
+                                  "Scanned: ${r.scanned}\n" +
+                                  "Imported: ${r.imported}\n" +
+                                  "Skipped (already in DB): ${r.duplicates}\n" +
+                                  "Ignored (not a txn): ${r.ignored}\n" +
+                                  "\nNext scan will start after: " + SimpleDateFormat("dd MMM yyyy HH:mm", Locale.US).format(Date(r.maxTs))
+                              )
+                              .setPositiveButton("OK", null)
+                              .show()
+                      }
                   }.start()
               }
               fun backup() {
@@ -1820,12 +1930,26 @@ jobs:
                   }.start()
               }
               fun pickRestore() { openDoc.launch(arrayOf("text/*", "application/csv", "application/vnd.ms-excel", "*/*")) }
+
+              // Restore, then set the SMS cutoff to the max restored timestamp
+              private fun afterRestore(text: String) {
+                  val n = Backup.restore(applicationContext, text)
+                  val maxTs = Db.get(applicationContext).one("SELECT MAX(ts) FROM txn")?.toLongOrNull() ?: 0L
+                  if (maxTs > 0) {
+                      getSharedPreferences("fin", MODE_PRIVATE).edit().putLong("last_sms_date", maxTs).apply()
+                  }
+                  runOnUiThread {
+                      toast("$n rows restore • SMS cutoff = " + SimpleDateFormat("dd MMM yyyy HH:mm", Locale.US).format(Date(maxTs)))
+                      refreshAll()
+                  }
+              }
+
               private fun doRestore(uri: Uri) {
                   Thread {
-                      var msg: String
-                      try { val text = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""; msg = "${Backup.restore(applicationContext, text)} rows restore hue" }
-                      catch (e: Exception) { msg = "Restore error: ${e.message}" }
-                      runOnUiThread { toast(msg); refreshAll() }
+                      try {
+                          val text = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""
+                          afterRestore(text)
+                      } catch (e: Exception) { runOnUiThread { toast("Restore error: ${e.message}") } }
                   }.start()
               }
               fun cleanAndRestore() {
@@ -1839,16 +1963,38 @@ jobs:
               }
               private fun doCleanRestore(uri: Uri) {
                   Thread {
-                      var msg: String
                       try {
                           val text = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""
                           Backup.cleanAll(applicationContext)
-                          val n = Backup.restore(applicationContext, text)
-                          msg = "Clean + restored $n rows"
-                      } catch (e: Exception) { msg = "Clean+restore error: ${e.message}" }
-                      runOnUiThread { toast(msg); refreshAll() }
+                          afterRestore(text)
+                      } catch (e: Exception) { runOnUiThread { toast("Clean+restore error: ${e.message}") } }
                   }.start()
               }
+
+              // NEW: first-run restore path — sets cutoff on the restored txns
+              private fun doFirstRunRestore(uri: Uri) {
+                  Thread {
+                      try {
+                          val text = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""
+                          afterRestore(text)
+                          runOnUiThread { show(0) }
+                      } catch (e: Exception) { runOnUiThread { toast("Restore error: ${e.message}") } }
+                  }.start()
+              }
+
+              private fun showFirstRunOnboarding() {
+                  AlertDialog.Builder(this)
+                      .setTitle("FinTrack me swagat")
+                      .setMessage("Pehle kya karna hai?\n\n" +
+                          "• Scan SMS — inbox se bank SMS padhke transactions import karega\n" +
+                          "• Restore backup — pehle liya hua CSV restore karega; uske baad older SMS re-import nahi honge")
+                      .setPositiveButton("Scan SMS") { _, _ -> askPermissionsAndScan() }
+                      .setNeutralButton("Restore backup") { _, _ -> openFirstRunRestore.launch(arrayOf("text/*", "application/csv", "application/vnd.ms-excel", "*/*")) }
+                      .setNegativeButton("Baad me", null)
+                      .setCancelable(false)
+                      .show()
+              }
+
               fun pickTollJson() { openTollJson.launch(arrayOf("application/json", "*/*")) }
               private fun doImportTolls(uri: Uri) {
                   Thread {
@@ -1882,7 +2028,8 @@ jobs:
               }
               fun bulkDelete(ids: List<Long>) {
                   if (ids.isEmpty()) { toast("Pehle transactions chuno"); return }
-                  AlertDialog.Builder(this).setTitle("Delete ${ids.size} transactions?")
+                  AlertDialog.Builder(this)
+                      .setTitle("Delete ${ids.size} transactions?")
                       .setPositiveButton("Haan, delete") { _, _ -> PayeeOps.bulkDelete(this, ids); toast("${ids.size} deleted"); refreshAll() }
                       .setNegativeButton("Nahi", null).show()
               }
@@ -1894,7 +2041,10 @@ jobs:
           EOF_19
 
           # ============================================================
-          # Screens1.kt — FIXED showTxn (use .create() + setOnShowListener + show)
+          # Screens1.kt
+          # NEW:
+          #  - Ledger "Merge to payee" chip when query active
+          #  - Payee detail: smart midnight dedupe button
           # ============================================================
           cat > app/src/main/java/com/example/fintrack/Screens1.kt <<'EOF_20'
           package com.example.fintrack
@@ -2062,11 +2212,30 @@ jobs:
                       chips.addView(act.pill(label, true) { filter = filter.copy(year = null, month = null); refresh() })
                   }
                   chips.addView(act.pill("Scan duplicates", false) { showDuplicates() })
+                  // NEW: bulk-merge chip appears when a query is typed
+                  if (query.isNotBlank()) chips.addView(act.pill("Merge to payee", false) { askBulkMerge() })
                   if (selectMode) {
                       chips.addView(act.pill("Delete (${selected.size})", true) { act.bulkDelete(selected.toList()); selectMode = false; selected.clear(); refresh() })
                       chips.addView(act.pill("Categorize (${selected.size})", true) { act.bulkCategory(selected.toList()); selectMode = false; selected.clear(); refresh() })
                       chips.addView(act.pill("Cancel", false) { selectMode = false; selected.clear(); refresh() })
                   }
+                  val all = currentRows()
+                  if (filter.mode == "review") {
+                      val groups = LinkedHashMap<String, MutableList<Txn>>()
+                      for (t in all) { if (!t.review) continue; val h = t.reviewHash ?: Db.get(act).computeReviewHash(t); groups.getOrPut(h) { ArrayList() }.add(t) }
+                      val rows = ArrayList<Row>()
+                      for ((h, list) in groups) { val sample = list.first(); rows.add(Row.GroupRow(h, list.size, list.sumOf { it.amount }, sample.merchant, sample.category, sample.debit)) }
+                      adapter.items = rows; summary.text = "${all.count { it.review }} entries in ${groups.size} groups"
+                  } else {
+                      adapter.items = all.map { Row.TxnRow(it) }
+                      val out = all.filter { it.debit }.sumOf { it.amount }; val inn = all.filter { !it.debit }.sumOf { it.amount }
+                      summary.text = "${all.size} entries  •  Kharch ${inr(out)}  •  Mila ${inr(inn)}"
+                  }
+                  adapter.notifyDataSetChanged()
+              }
+
+              // returns the same list that drives the adapter, useful for merge
+              private fun currentRows(): List<Txn> {
                   val where = StringBuilder("1=1"); val args = ArrayList<String>()
                   when (filter.mode) { "debit" -> where.append(" AND debit=1"); "credit" -> where.append(" AND debit=0"); "cat" -> { where.append(" AND category=?"); args.add(filter.category ?: "") } }
                   if (filter.year != null && filter.month != null) {
@@ -2091,19 +2260,40 @@ jobs:
                       }
                       if (plain.isNotEmpty()) { where.append(" AND (merchant LIKE ? OR body LIKE ? OR ref LIKE ? OR vpa LIKE ?)"); repeat(4) { args.add("%$plain%") } }
                   }
-                  val all = Db.get(act).queryTxns(where.toString(), args.toTypedArray(), 1000)
-                  if (filter.mode == "review") {
-                      val groups = LinkedHashMap<String, MutableList<Txn>>()
-                      for (t in all) { if (!t.review) continue; val h = t.reviewHash ?: Db.get(act).computeReviewHash(t); groups.getOrPut(h) { ArrayList() }.add(t) }
-                      val rows = ArrayList<Row>()
-                      for ((h, list) in groups) { val sample = list.first(); rows.add(Row.GroupRow(h, list.size, list.sumOf { it.amount }, sample.merchant, sample.category, sample.debit)) }
-                      adapter.items = rows; summary.text = "${all.count { it.review }} entries in ${groups.size} groups"
-                  } else {
-                      adapter.items = all.map { Row.TxnRow(it) }
-                      val out = all.filter { it.debit }.sumOf { it.amount }; val inn = all.filter { !it.debit }.sumOf { it.amount }
-                      summary.text = "${all.size} entries  •  Kharch ${inr(out)}  •  Mila ${inr(inn)}"
-                  }
-                  adapter.notifyDataSetChanged()
+                  return Db.get(act).queryTxns(where.toString(), args.toTypedArray(), 1000)
+              }
+
+              // NEW: bulk-merge from a search
+              private fun askBulkMerge() {
+                  val rows = currentRows()
+                  if (rows.isEmpty()) { act.toast("Is search me kuch nahi mila"); return }
+                  val keys = rows.map { Learner.norm(it.merchant) }.filter { it.isNotBlank() && it != "unknown" }.distinct()
+                  if (keys.isEmpty()) { act.toast("In txns me koi payee nahi hai"); return }
+                  val existing = Db.get(act).rows("SELECT merchant_key, display FROM payees WHERE merchant_key IN (" + keys.joinToString(",") { "?" } + ") ORDER BY display", *keys.toTypedArray())
+                  val names = existing.map { it["display"] ?: it["merchant_key"] ?: "" }.toMutableList()
+                  names.add("✏ Custom name…")
+                  AlertDialog.Builder(act).setTitle("In ${rows.size} txns ko kis payee me bhejein?")
+                      .setItems(names.toTypedArray()) { _, which ->
+                          if (which == names.size - 1) {
+                              act.showForm("Custom payee name", listOf(Field("Naam", keys.first()))) { v -> doBulkReassign(keys, v[0]) }
+                          } else {
+                              val newName = names[which]; doBulkReassign(keys, newName)
+                          }
+                      }
+                      .setNegativeButton("Cancel", null)
+                      .show()
+              }
+
+              private fun doBulkReassign(fromKeys: List<String>, newName: String) {
+                  val target = newName.trim()
+                  if (target.isBlank()) { act.toast("Naam khali nahi ho sakta"); return }
+                  Thread {
+                      PayeeOps.reassignToPayee(act, fromKeys, Learner.norm(target), target)
+                      act.runOnUiThread {
+                          act.toast("Merged ${fromKeys.size} payees → $target")
+                          act.refreshAll()
+                      }
+                  }.start()
               }
 
               private fun showDuplicates() {
@@ -2153,7 +2343,6 @@ jobs:
                   }
               }
 
-              // FIXED: use create() + setOnShowListener + show()
               private fun showTxn(t: Txn) {
                   val msg = fmtDateTime(t.ts) + "  •  " + t.institution + "\n" + (if (t.debit) "Kharch " else "Mila ") + inr(t.amount, true) + "  •  " + t.category +
                       (if (t.balance != null) "\nBalance: " + inr(t.balance ?: 0.0, true) else "") + "\nSource: ${t.source}  •  Parse: ${t.status}" +
@@ -2200,7 +2389,10 @@ jobs:
           EOF_20
 
           # ============================================================
-          # Screens2.kt — FIXED: import android.view.Gravity
+          # Screens2.kt
+          # NEW:
+          #  - Payee detail: "Auto-tick 00:00 dups" button
+          #  - Payee screen: "Unmerge last" chip
           # ============================================================
           cat > app/src/main/java/com/example/fintrack/Screens2.kt <<'EOF_21'
           package com.example.fintrack
@@ -2381,6 +2573,11 @@ jobs:
                   sortChips.addView(act.pill("Name", sortMode == "name") { sortMode = "name"; refresh() })
                   sortChips.addView(act.pill("Recent", sortMode == "recent") { sortMode = "recent"; refresh() })
                   sortChips.addView(act.pill("Total", sortMode == "total") { sortMode = "total"; refresh() })
+                  // NEW: unmerge chip
+                  sortChips.addView(act.pill("Unmerge last", false) {
+                      val ok = PayeeOps.undoLastMerge(act)
+                      if (ok) { act.toast("Last merge undone"); refresh() } else act.toast("Koi merge history nahi mili")
+                  })
                   if (selectMode) {
                       sortChips.addView(act.pill("Merge (${selected.size})", true) { if (selected.size < 2) { act.toast("Kam se kam 2 chuno"); return@pill }; askMerge(selected.toList()) })
                       sortChips.addView(act.pill("Cancel", false) { selectMode = false; selected.clear(); refresh() })
@@ -2414,11 +2611,18 @@ jobs:
                   val col = act.vbox(10)
                   col.addView(act.tv("Out: ${inr(spent)}  •  In: ${inr(recv)}  •  Net: ${inr(recv - spent)}", 13f, C.TEXT, true))
                   if (!p["upi_id"].isNullOrBlank()) col.addView(act.tv("UPI: ${p["upi_id"]}", 12f, C.MUTED))
-                  val selectedIds = LinkedHashSet<Long>()
+
+                  // NEW: smart 00:00 dedupe button
+                  val autoIds = PayeeOps.smartMidnightDeleteIds(all)
+                  if (autoIds.isNotEmpty()) {
+                      col.addView(act.tv("💡 ${autoIds.size} duplicate entries mile (same date+amount+type, 00:00 timestamp) — auto-tick ho gaye hain", 12f, C.AMBER))
+                  }
+
+                  val selectedIds = LinkedHashSet<Long>(autoIds)
                   val historyContainer = act.vbox(6)
                   for (t in all) {
                       val line = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-                      val cb = CheckBox(act)
+                      val cb = CheckBox(act).apply { isChecked = autoIds.contains(t.id) }
                       cb.setOnCheckedChangeListener { _, isChecked -> if (isChecked) selectedIds.add(t.id) else selectedIds.remove(t.id) }
                       line.addView(cb)
                       val info = act.vbox(2)
@@ -2431,7 +2635,7 @@ jobs:
                   val dlg = AlertDialog.Builder(act).setTitle(name).setView(ScrollView(act).apply { addView(col) })
                       .setPositiveButton("UPI se pay") { _, _ -> pay(key, name, p["upi_id"]) }
                       .setNegativeButton("Band karo", null)
-                      .setNeutralButton("Delete selected", null)
+                      .setNeutralButton("Delete selected (${selectedIds.size})", null)
                       .create()
                   dlg.setOnShowListener {
                       dlg.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
@@ -2696,8 +2900,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="v9.1.${{ github.run_number }}"
+          VERSION="v10.0.${{ github.run_number }}"
           gh release create "$VERSION" /tmp/proj/app/build/outputs/apk/debug/app-debug.apk \
             --repo "${{ github.repository }}" \
             --title "FinTrack Build ${{ github.run_number }}" \
-            --notes "v9.1: fixed setOnShowListener chain (use .create() + setOnShowListener + show()); added import android.view.Gravity in Screens2.kt."
+            --notes "v10.0: (1) smart 00:00 midnight dedupe inside payee detail, (2) 'Merge to payee' bulk action in Ledger search, (3) unmerge support via payee_merges table, (4) first-run onboarding: Scan SMS vs Restore backup, (5) restore sets last_sms_date cutoff so old SMS never re-import; scan report popup shows scanned/imported/duplicates/ignored."
