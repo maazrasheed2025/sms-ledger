@@ -1,4 +1,29 @@
-name: Build and Release FinTrack APK
+      - name: Apply compile fixes
+        run: |
+          python3 - <<'PY'
+          import pathlib, re
+          d = pathlib.Path('/tmp/proj/app/src/main/java/com/example/fintrack')
+          def sub(fn, old, new):
+              p = d / fn
+              s = p.read_text()
+              if old not in s:
+                  print('MISSING', fn, old)
+                  return
+              p.write_text(s.replace(old, new, 1))
+          sub('Screens1.kt', 'list.pointToPosition(', '(v as ListView).pointToPosition(')
+          sub('Widgets.kt', '(dp(34)).toInt()', 'context.dp(34)')
+          sub('Tolls.kt', 'fun count(ctx: Context): Int {', '@Synchronized fun invalidate() { loaded = false }\n    fun count(ctx: Context): Int {')
+          sub('MainActivity.kt', 'val count = Importer.importTollJson(applicationContext, uri)', 'val count = Importer.importTollJson(applicationContext, uri)\n                      Tolls.invalidate()')
+          sub('Importer.kt', '} finally { db.endTransaction() }', '} finally { if (db.inTransaction()) db.endTransaction() }')
+          p = d / 'Tolls.kt'
+          s = p.read_text()
+          guard = '        if (!Regex("""(?i)\\b(fastag|netc|toll|plaza|nhai|ihmcl)\\b""").containsMatchIn(t.body + " " + t.merchant)) return\n'
+          s2 = re.sub(r'(if \(!t\.debit\) return\n)(\s*val p = match\(ctx, t\.merchant)', lambda m: m.group(1) + guard + m.group(2), s, count=1)
+          print('toll guard', 'applied' if s2 != s else 'MISSING')
+          p.write_text(s2)
+          PY
+          
+          name: Build and Release FinTrack APK
 
 on:
   workflow_dispatch:
