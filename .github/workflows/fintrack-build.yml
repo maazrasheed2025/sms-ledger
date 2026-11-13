@@ -29,6 +29,10 @@ jobs:
         run: |
           mkdir -p /tmp/proj/app/src/main/java/com/example/fintrack /tmp/proj/app/src/main/res/drawable /tmp/proj/app/src/main/res/values /tmp/proj/app/src/main/res/xml
           cd /tmp/proj
+# auto-fix: broken merge_sel string interpolation in Screens2.kt
+find app/src/main/java/com/example/fintrack -name 'Screens2.kt' -exec sed -i 's|sortChips.addView(act.pill("${Str.s("merge_sel")}.*|sortChips.addView(act.pill("Merge (${selected.size})", true) { if (selected.size < 2) { act.toast(Str.s("select_two")); return@pill }; askMerge(selected.toList()) })|' {} \;
+# auto-fix: broken theme button in Screens3.kt
+find app/src/main/java/com/example/fintrack -name 'Screens3.kt' -exec sed -i 's|th.put(act.actionBtn(Str.s("theme")) + ": cycle.*|th.put(act.actionBtn(Str.s("theme") + ": cycle") { act.toggleTheme() }, 10)|' {} \;
 
           if [ -d "$GITHUB_WORKSPACE/app/src/main/res/drawable-nodpi" ]; then
             mkdir -p app/src/main/res/drawable-nodpi
