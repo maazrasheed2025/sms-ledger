@@ -83,7 +83,7 @@ jobs:
           plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
           android {
               namespace = "com.example.fintrack"; compileSdk = 34
-              defaultConfig { applicationId = "com.example.fintrack"; minSdk = 30; targetSdk = 33; versionCode = 42; versionName = "12.0.2" }
+              defaultConfig { applicationId = "com.example.fintrack"; minSdk = 30; targetSdk = 33; versionCode = 43; versionName = "12.0.3" }
               compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
               kotlinOptions { jvmTarget = "17" }
               androidResources { noCompress += "png" }
@@ -251,9 +251,51 @@ jobs:
                   out.add(if (!quoted && sb.isEmpty()) null else sb.toString()); return out
               }
               fun restore(ctx: Context, text: String): Int {
-                  val db = Db.get(ctx).writableDatabase; var n = 0; var table: String? = null; var cols: List<String>? = null
+                  val db = Db.get(ctx).writableDatabase
+                  var n = 0
+                  var table: String? = null
+                  var cols: List<String>? = null
+                  val notNull: Map<String, Set<String>> = mapOf(
+                      "txn" to setOf("ts", "amount", "debit"),
+                      "payees" to setOf("merchant_key")
+                  )
                   db.beginTransaction()
-                  try { for (line in text.lines()) { if (line.isBlank()) continue; if (line.startsWith("## ")) { table = line.substring(3).trim(); cols = null; continue }; val tb = table ?: continue; if (tb == "CANONICAL") continue; if (tb !in tables) continue; val cells = parseLine(line); val cs = cols; if (cs == null) { cols = cells.map { it ?: "" }; continue }; val cv = ContentValues(); for (i in cs.indices) { val v = cells.getOrNull(i); if (v == null) cv.putNull(cs[i]) else cv.put(cs[i], v) }; val rowId = db.insertWithOnConflict(tb, null, cv, SQLiteDatabase.CONFLICT_REPLACE); if (rowId >= 0) n++ }; db.setTransactionSuccessful() } finally { db.endTransaction() }
+                  try {
+                      for (line in text.lines()) {
+                          if (line.isBlank()) continue
+                          if (line.startsWith("## ")) { table = line.substring(3).trim(); cols = null; continue }
+                          val tb = table ?: continue
+                          if (tb == "CANONICAL") continue
+                          if (tb !in tables) continue
+                          val cells = parseLine(line)
+                          val cs = cols
+                          if (cs == null) {
+                              val hdr = cells.map { it ?: "" }.toMutableList()
+                              if (tb == "txn" && "msg_no" !in hdr) hdr.add(1, "msg_no")
+                              cols = hdr
+                              continue
+                          }
+                          val nn = notNull[tb] ?: emptySet<String>()
+                          var bad = false
+                          for (i in cs.indices) {
+                              val col = cs[i]
+                              val v = cells.getOrNull(i)
+                              if (col in nn && (v == null || v.isBlank())) { bad = true; break }
+                          }
+                          if (bad) continue
+                          val cv = ContentValues()
+                          for (i in cs.indices) {
+                              val col = cs[i]
+                              val v = cells.getOrNull(i)
+                              if (v == null) cv.putNull(col) else cv.put(col, v)
+                          }
+                          try {
+                              val rowId = db.insertWithOnConflict(tb, null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+                              if (rowId >= 0) n++
+                          } catch (_: Exception) {}
+                      }
+                      db.setTransactionSuccessful()
+                  } finally { db.endTransaction() }
                   return n
               }
               fun cleanAll(ctx: Context) { val db = Db.get(ctx).writableDatabase; db.beginTransaction(); try { for (t in tables) runCatching { db.delete(t, null, null) }; runCatching { db.delete("txn_skipped", null, null) }; db.setTransactionSuccessful() } finally { db.endTransaction() } }
@@ -542,7 +584,7 @@ jobs:
               fun rematchAll(ctx: Context): Int { try { load(ctx); val list = Db.get(ctx).queryTxns("category='Travel' AND debit=1", emptyArray(), 5000); var n = 0; for (t in list) { record(ctx, t); n++ }; return n } catch (_: Exception) { return 0 } }
               private val dayFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
               private fun plazaCoord(name: String): DoubleArray? { TOLL_SEED[name]?.let { return it }; for ((k, v) in TOLL_SEED) if (k.equals(name, ignoreCase = true)) return v; return null }
-              fun fetchRoadRoute(wps: List<DoubleArray>): List<DoubleArray> { if (wps.size < 2) return wps.map { doubleArrayOf(it[1], it[0]) }; return try { val coords = wps.joinToString(";") { "${it[0]},${it[1]}" }; val url = URL("https://router.project-osrm.org/route/v1/driving/$coords?overview=full&geometries=polyline"); val conn = url.openConnection() as HttpURLConnection; conn.requestMethod = "GET"; conn.connectTimeout = 8000; conn.readTimeout = 8000; conn.setRequestProperty("User-Agent", "ImransFinances/12.0.2"); if (conn.responseCode != 200) throw RuntimeException("OSRM ${conn.responseCode}"); val txt = conn.inputStream.bufferedReader().use { it.readText() }; val json = org.json.JSONObject(txt); if (json.optString("code") != "Ok") throw RuntimeException("not Ok"); val routes = json.optJSONArray("routes") ?: throw RuntimeException("no routes"); if (routes.length() == 0) throw RuntimeException("no routes"); val geom = routes.getJSONObject(0).optString("geometry", ""); if (geom.isBlank()) throw RuntimeException("no geom"); decodePolyline(geom) } catch (_: Exception) { wps.map { doubleArrayOf(it[1], it[0]) } } }
+              fun fetchRoadRoute(wps: List<DoubleArray>): List<DoubleArray> { if (wps.size < 2) return wps.map { doubleArrayOf(it[1], it[0]) }; return try { val coords = wps.joinToString(";") { "${it[0]},${it[1]}" }; val url = URL("https://router.project-osrm.org/route/v1/driving/$coords?overview=full&geometries=polyline"); val conn = url.openConnection() as HttpURLConnection; conn.requestMethod = "GET"; conn.connectTimeout = 8000; conn.readTimeout = 8000; conn.setRequestProperty("User-Agent", "ImransFinances/12.0.3"); if (conn.responseCode != 200) throw RuntimeException("OSRM ${conn.responseCode}"); val txt = conn.inputStream.bufferedReader().use { it.readText() }; val json = org.json.JSONObject(txt); if (json.optString("code") != "Ok") throw RuntimeException("not Ok"); val routes = json.optJSONArray("routes") ?: throw RuntimeException("no routes"); if (routes.length() == 0) throw RuntimeException("no routes"); val geom = routes.getJSONObject(0).optString("geometry", ""); if (geom.isBlank()) throw RuntimeException("no geom"); decodePolyline(geom) } catch (_: Exception) { wps.map { doubleArrayOf(it[1], it[0]) } } }
               fun decodePolyline(encoded: String): List<DoubleArray> { val points = ArrayList<DoubleArray>(); var index = 0; val len = encoded.length; var lat = 0; var lng = 0; while (index < len) { var b: Int; var shift = 0; var result = 0; do { b = encoded[index++].code - 63; result = result or ((b and 0x1f) shl shift); shift += 5 } while (b >= 0x20); val dlat = if (result and 1 != 0) (result shr 1).inv() else (result shr 1); lat += dlat; shift = 0; result = 0; do { b = encoded[index++].code - 63; result = result or ((b and 0x1f) shl shift); shift += 5 } while (b >= 0x20); val dlng = if (result and 1 != 0) (result shr 1).inv() else (result shr 1); lng += dlng; points.add(doubleArrayOf(lat * 1e-5, lng * 1e-5)) }; return points }
               fun buildTrips(ctx: Context): Pair<List<TollTrip>, Double> { try { val prefs = ctx.getSharedPreferences("fin", Context.MODE_PRIVATE); val cached = prefs.getBoolean("map_cached", false); val rows = Db.get(ctx).rows("SELECT plaza, lat, lon, ts, amount FROM toll_trips ORDER BY ts ASC"); val events = rows.mapNotNull { r -> val name = r["plaza"] ?: return@mapNotNull null; val ts = r["ts"]?.toLongOrNull() ?: return@mapNotNull null; val amt = r["amount"]?.toDoubleOrNull() ?: return@mapNotNull null; val seed = plazaCoord(name); val lat = seed?.get(1) ?: r["lat"]?.toDoubleOrNull() ?: 0.0; val lon = seed?.get(0) ?: r["lon"]?.toDoubleOrNull() ?: 0.0; if (lat == 0.0 || lon == 0.0) return@mapNotNull null; TollCheckpoint(name, ts, amt, lat, lon) }.sortedBy { it.ts }; if (events.isEmpty()) return emptyList<TollTrip>() to 0.0; val legs = ArrayList<MutableList<TollCheckpoint>>(); var cur = ArrayList<TollCheckpoint>(); for (ev in events) { if (cur.isEmpty()) { cur.add(ev); continue }; val prev = cur.last(); val gapMs = ev.ts - prev.ts; val samePlaza = ev.plaza.equals(prev.plaza, ignoreCase = true); val sameDay = dayFmt.format(Date(ev.ts)) == dayFmt.format(Date(prev.ts)); if (samePlaza || gapMs > 6L * 60 * 60 * 1000 || !sameDay) { legs.add(cur); cur = ArrayList() }; cur.add(ev) }; if (cur.isNotEmpty()) legs.add(cur); val cache = ConcurrentHashMap<String, List<DoubleArray>>(); val trips = ArrayList<TollTrip>(); var total = 0.0; for ((i, leg) in legs.withIndex()) { val direction = if (i % 2 == 0) "Going" else "Returning"; val wps = leg.map { doubleArrayOf(it.lon, it.lat) }; val key = wps.joinToString("|") { "${it[0]},${it[1]}" }; val route = if (cached) wps.map { doubleArrayOf(it[1], it[0]) } else cache.getOrPut(key) { fetchRoadRoute(wps) }; val legTotal = leg.sumOf { it.amount }; total += legTotal; val title = leg.joinToString(" → ") { it.plaza }; trips.add(TollTrip(i + 1, direction, dayFmt.format(Date(leg.first().ts)), title, legTotal, leg.toList(), route)) }; if (!cached) prefs.edit().putBoolean("map_cached", true).apply(); return trips to total } catch (_: Exception) { return emptyList<TollTrip>() to 0.0 } }
           }
@@ -1028,7 +1070,7 @@ jobs:
                       val night = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
                       C.applyTheme(night)
                       window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
-                      try { org.osmdroid.config.Configuration.getInstance().apply { userAgentValue = "ImransFinances/12.0.2"; tileFileSystemCacheMaxBytes = 600L*1024*1024; tileFileSystemCacheTrimBytes = 500L*1024*1024; load(this@MainActivity, getSharedPreferences("osmdroid", MODE_PRIVATE)) } } catch (_: Exception) {}
+                      try { org.osmdroid.config.Configuration.getInstance().apply { userAgentValue = "ImransFinances/12.0.3"; tileFileSystemCacheMaxBytes = 600L*1024*1024; tileFileSystemCacheTrimBytes = 500L*1024*1024; load(this@MainActivity, getSharedPreferences("osmdroid", MODE_PRIVATE)) } } catch (_: Exception) {}
                       try { ForegroundHelper.start(this) } catch (_: Exception) {}
                       home = HomeScreen(this); ledger = LedgerScreen(this)
                       screens.addAll(listOf(home, ledger, TravelScreen(this), PayeesScreen(this), ChartsScreen(this), DataBackupScreen(this), AccountsScreen(this), BillsScreen(this), BudgetsScreen(this), CategoriesScreen(this), SearchScreen(this), RulesScreen(this), LoansScreen(this)))
@@ -1086,27 +1128,9 @@ jobs:
                           val csvName = "imrans_finances_$ts.csv"
                           val jsonName = "imrans_finances_$ts.rules.json"
                           var savedPath = ""
-                          // Try MediaStore Downloads/ImransFinances/ first so the user can actually see the file
-                          try {
-                              val values = ContentValues().apply { put(MediaStore.Downloads.DISPLAY_NAME, csvName); put(MediaStore.Downloads.MIME_TYPE, "text/csv"); put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/ImransFinances") }
-                              val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                              if (uri != null) { contentResolver.openOutputStream(uri)?.use { it.write(csv.toByteArray()) }; savedPath = "Downloads/ImransFinances/$csvName" }
-                          } catch (_: Exception) {}
-                          // Also write rules JSON next to it
-                          try {
-                              val rulesJson = Backup.exportRulesJson(this)
-                              val values = ContentValues().apply { put(MediaStore.Downloads.DISPLAY_NAME, jsonName); put(MediaStore.Downloads.MIME_TYPE, "application/json"); put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/ImransFinances") }
-                              val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                              if (uri != null) { contentResolver.openOutputStream(uri)?.use { it.write(rulesJson.toByteArray()) } }
-                          } catch (_: Exception) {}
-                          // Also keep a copy in private app folder
-                          try {
-                              val dir = File(getExternalFilesDir(null), "backups"); dir.mkdirs()
-                              File(dir, csvName).writeText(csv)
-                              File(dir, jsonName).writeText(Backup.exportRulesJson(this))
-                              if (savedPath.isEmpty()) savedPath = dir.absolutePath + "/" + csvName
-                              try { val files = dir.listFiles { _, n -> n.endsWith(".csv") }?.sortedBy { it.name } ?: emptyList(); if (files.size > 20) for (i in 0 until files.size - 20) files[i].delete() } catch (_: Exception) {}
-                          } catch (_: Exception) {}
+                          try { val values = ContentValues().apply { put(MediaStore.Downloads.DISPLAY_NAME, csvName); put(MediaStore.Downloads.MIME_TYPE, "text/csv"); put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/ImransFinances") }; val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values); if (uri != null) { contentResolver.openOutputStream(uri)?.use { it.write(csv.toByteArray()) }; savedPath = "Downloads/ImransFinances/$csvName" } } catch (_: Exception) {}
+                          try { val rulesJson = Backup.exportRulesJson(this); val values = ContentValues().apply { put(MediaStore.Downloads.DISPLAY_NAME, jsonName); put(MediaStore.Downloads.MIME_TYPE, "application/json"); put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/ImransFinances") }; val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values); if (uri != null) { contentResolver.openOutputStream(uri)?.use { it.write(rulesJson.toByteArray()) } } } catch (_: Exception) {}
+                          try { val dir = File(getExternalFilesDir(null), "backups"); dir.mkdirs(); File(dir, csvName).writeText(csv); File(dir, jsonName).writeText(Backup.exportRulesJson(this)); if (savedPath.isEmpty()) savedPath = dir.absolutePath + "/" + csvName; try { val files = dir.listFiles { _, n -> n.endsWith(".csv") }?.sortedBy { it.name } ?: emptyList(); if (files.size > 20) for (i in 0 until files.size - 20) files[i].delete() } catch (_: Exception) {} } catch (_: Exception) {}
                           if (savedPath.isEmpty()) throw RuntimeException("All write paths failed — check storage permission")
                           runOnUiThread { toast(Str.s("backup_saved_to") + " " + savedPath) }
                       } catch (ex: Exception) { runOnUiThread { toast(Str.s("backup_failed") + " " + (ex.message ?: "unknown")) } }
@@ -1146,8 +1170,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="v12.0.2.${{ github.run_number }}"
+          VERSION="v12.0.3.${{ github.run_number }}"
           gh release create "$VERSION" /tmp/proj/app/build/outputs/apk/debug/app-debug.apk \
             --repo "${{ github.repository }}" \
-            --title "Imran's Finances v12.0.2 Build ${{ github.run_number }}" \
-            --notes "v12.0.2: 9 fixes — FAB only on Dashboard; backup writes to Downloads/ImransFinances + app-private, includes rules JSON, shows exact save path or error; restore tolerant of v11 CSV and separate rules JSON; Tolls tab is a tap-to-expand date grid; accounts can be reclassified (Bank/Wallet/Card/FASTag/Loan/Policy) via tap; LOAN accounts auto-create loans row and future SMS with that loan_no link; heatmap has hour labels; category rows have icons and larger text; TEXT/ICON colors adjusted for white background."
+            --title "Imran's Finances v12.0.3 Build ${{ github.run_number }}" \
+            --notes "v12.0.3 restore fix: Backup.restore() now skips malformed rows individually (per-row try/catch) instead of aborting the whole transaction, so a single bad row from an old backup no longer rolls back the entire restore. Handles old ## txn headers missing msg_no (injects it), enforces NOT NULL checks for ts/amount/debit before insert, and keeps unknown/legacy table blocks (payee_aliases, payee_tags) safely skipped. Old v11/fintrack backups now restore all recoverable rows."
