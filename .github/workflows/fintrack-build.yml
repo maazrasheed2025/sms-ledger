@@ -1400,21 +1400,21 @@ jobs:
                           val similar = Learner.similarCandidates(Db.get(this), n)
                           if (similar.isEmpty()) { done(); refreshAll() }
                           else {
-                              val col = act.vbox(8)
-                              col.addView(act.tv("${Str.s("similar_found")} (${similar.size})", 13f, C.TEXT, true))
+                              val col = vbox(8)
+                              col.addView(tv("${Str.s("similar_found")} (${similar.size})", 13f, C.TEXT, true))
                               val boxes = LinkedHashMap<Long, android.widget.CheckBox>()
                               for (s in similar.take(50)) {
-                                  val row = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, act.dp(6), 0, act.dp(6)) }
-                                  val cb = android.widget.CheckBox(act).apply { isChecked = true }
+                                  val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(6), 0, dp(6)) }
+                                  val cb = android.widget.CheckBox(this).apply { isChecked = true }
                                   boxes[s.id] = cb
                                   row.addView(cb)
-                                  row.addView(act.tv("${fmtDateTime(s.ts)} • ${s.merchant} • ${inr(s.amount, true)}", 12f, C.MUTED), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                                  row.addView(tv("${fmtDateTime(s.ts)} • ${s.merchant} • ${inr(s.amount, true)}", 12f, C.MUTED), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                                   col.addView(row)
                               }
-                              AlertDialog.Builder(act).setTitle(Str.s("apply_similar")).setView(ScrollView(act).apply { addView(col) }).setPositiveButton(Str.s("done")) { _, _ ->
+                              AlertDialog.Builder(this).setTitle(Str.s("apply_similar")).setView(ScrollView(this).apply { addView(col) }).setPositiveButton(Str.s("done")) { _, _ ->
                                   val ids = boxes.filter { it.value.isChecked }.keys.toList()
-                                  Learner.applySimilar(Db.get(act), ids, cat)
-                                  done(); act.refreshAll(); act.toast("${ids.size} updated")
+                                  Learner.applySimilar(Db.get(this), ids, cat)
+                                  done(); refreshAll(); toast("${ids.size} updated")
                               }.setNegativeButton(Str.s("cancel")) { _, _ -> done(); refreshAll() }.show()
                           }
                       } catch (_: Exception) {}
@@ -1452,8 +1452,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="v12.2.0.${{ github.run_number }}"
+          VERSION="v12.2.1.${{ github.run_number }}"
           gh release create "$VERSION" /tmp/proj/app/build/outputs/apk/debug/app-debug.apk \
             --repo "${{ github.repository }}" \
-            --title "Imran's Finances v12.2.0 Build ${{ github.run_number }}" \
-            --notes "v12.2.0: Material 3 UI overhaul + feature pack. (1) Toll tab: long-press a row to remove from tolls, or use select mode for bulk removal. (2) Accounts screen now shows bank/wallet/insurer/lender icons via Icons.policy()/Icons.loan()/Icons.forAccount(). (3) Loans screen: tap any loan card to list all its linked transactions in a dialog. (4) Charts removed from hamburger drawer (still reachable in dashboard). (5) Smarter rule learning: after changing a category, app shows matching transactions (same payee/UPI/exact name) with checkboxes so you confirm before applying; rules are grouped by category with per-rule delete and a Clear-all-rules button. Plus: M3 shape/card/ripple/typography, squircle FAB, active-tab pill in bottom nav, 7 color palettes (purple/teal/amber/indigo/rose/green/navy) selectable in Settings alongside Light/Dark/System."
+            --title "Imran's Finances v12.2.1 Build ${{ github.run_number }}" \
+            --notes "v12.2.1: Fixed changeTxnCategory() in MainActivity (act.* refs replaced with direct this-scoped calls) so the compile error is resolved. Same feature set as v12.2.0: M3 UI, toll remove, loan drill-down, grouped rules with confirm-similar dialog, 7 color palettes, Charts removed from drawer."
