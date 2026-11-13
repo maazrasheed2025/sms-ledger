@@ -25,10 +25,19 @@ jobs:
         with:
           gradle-version: 8.9
 
-      - name: Generate complete project structure & files
+      - name: Generate project files (keep user PNGs in place)
         run: |
           mkdir -p /tmp/proj/app/src/main/java/com/example/fintrack /tmp/proj/app/src/main/res/drawable /tmp/proj/app/src/main/res/values /tmp/proj/app/src/main/res/xml
           cd /tmp/proj
+
+          # --- copy the user-committed icon pack into the generated tree ---
+          if [ -d "$GITHUB_WORKSPACE/app/src/main/res/drawable-nodpi" ]; then
+            mkdir -p app/src/main/res/drawable-nodpi
+            cp -r "$GITHUB_WORKSPACE/app/src/main/res/drawable-nodpi/." app/src/main/res/drawable-nodpi/
+            echo "Icons copied: $(ls app/src/main/res/drawable-nodpi | wc -l) PNGs"
+          else
+            echo "WARN: drawable-nodpi not found in repo — icons will fall back to vectors"
+          fi
 
           cat > settings.gradle.kts <<'EOF_0'
           pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
@@ -61,14 +70,16 @@ jobs:
                   applicationId = "com.example.fintrack"
                   minSdk = 30
                   targetSdk = 33
-                  versionCode = 19
-                  versionName = "10.1"
+                  versionCode = 20
+                  versionName = "10.2"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
                   targetCompatibility = JavaVersion.VERSION_17
               }
               kotlinOptions { jvmTarget = "17" }
+              // Prevent PNG compression from mangleing icons
+              androidResources { noCompress += "png" }
           }
           dependencies {
               implementation("androidx.appcompat:appcompat:1.7.0")
@@ -146,6 +157,188 @@ jobs:
               <string name="notif_channel_desc">Reads payment app notifications to auto-log transactions (stays on device only)</string>
           </resources>
           EOF_STR
+
+          cat > app/src/main/java/com/example/fintrack/Icons.kt <<'EOF_ICONS'
+          package com.example.fintrack
+
+          import android.content.Context
+          import android.content.res.Resources
+
+          object Icons {
+              private val CAT_MAP: Map<String, String> = mapOf(
+                  "grocery" to "cat_groceries", "groceries" to "cat_groceries",
+                  "fuel" to "cat_fuel",
+                  "food" to "cat_dining", "dining" to "cat_dining",
+                  "travel" to "cat_transport", "transport" to "cat_transport",
+                  "shopping" to "cat_shopping",
+                  "bills & recharge" to "cat_bills", "bills" to "cat_bills", "recharge" to "cat_bills",
+                  "entertainment" to "cat_leisure", "leisure" to "cat_leisure",
+                  "health" to "cat_health",
+                  "cash" to "cat_cash",
+                  "emi/loan" to "cat_emi", "emi" to "cat_emi", "loan" to "cat_emi",
+                  "transfer" to "cat_cash_debit",
+                  "salary/income" to "cat_business", "salary" to "cat_business", "income" to "cat_business",
+                  "received" to "cat_cash_credit",
+                  "investment" to "cat_investment",
+                  "business" to "cat_business",
+                  "education" to "cat_education",
+                  "house" to "cat_house",
+                  "household" to "cat_household",
+                  "kids" to "cat_kids",
+                  "grooming" to "cat_grooming",
+                  "gadgets" to "cat_gadgets",
+                  "credit card" to "cat_credit_card",
+                  "other" to "cat_misc", "misc" to "cat_misc"
+              )
+
+              fun category(ctx: Context, displayName: String, fallback: Int = R.drawable.ic_bank): Int {
+                  val slug = CAT_MAP[displayName.trim().lowercase()] ?: return fallback
+                  return lookup(ctx, slug, fallback)
+              }
+
+              private val BANK_PATTERNS: List<Pair<Regex, String>> = listOf(
+                  Regex("(?i)\\bhdfc\\b") to "bank_hdfc",
+                  Regex("(?i)\\bsbi\\b|state bank of india") to "bank_sbi",
+                  Regex("(?i)\\bicici\\b") to "bank_icici",
+                  Regex("(?i)\\baxis\\b") to "bank_axis",
+                  Regex("(?i)\\bkotak\\b") to "bank_kotak",
+                  Regex("(?i)\\bidfc\\b") to "bank_idfc",
+                  Regex("(?i)\\bpnb\\b|punjab national") to "bank_pnb",
+                  Regex("(?i)\\bbank of baroda\\b|\\bbob\\b") to "bank_bank_of_baroda",
+                  Regex("(?i)\\bbank of india\\b") to "bank_bank_of_india",
+                  Regex("(?i)\\bcanara\\b") to "bank_canara",
+                  Regex("(?i)\\bunion bank") to "bank_union_bank",
+                  Regex("(?i)\\bindus(ind)?\\b") to "bank_indus_ind",
+                  Regex("(?i)\\bfederal\\b") to "bank_federal",
+                  Regex("(?i)\\brbl\\b") to "bank_rbl",
+                  Regex("(?i)\\bidbi\\b") to "bank_idbi",
+                  Regex("(?i)\\bindian bank\\b") to "bank_indian_bank",
+                  Regex("(?i)\\bcentral bank\\b") to "bank_cbi",
+                  Regex("(?i)\\buco\\b") to "bank_uco",
+                  Regex("(?i)\\bobc\\b|oriental bank") to "bank_obc",
+                  Regex("(?i)\\bjk bank\\b|jammu") to "bank_jk",
+                  Regex("(?i)\\bbandhan\\b") to "bank_bandhan",
+                  Regex("(?i)\\bau small finance\\b|\\baubank\\b") to "bank_aubank",
+                  Regex("(?i)\\bequitas\\b") to "bank_equtas",
+                  Regex("(?i)\\besaf\\b") to "bank_esaf",
+                  Regex("(?i)\\bkarnataka\\b") to "bank_karnataka",
+                  Regex("(?i)\\bsaraswat\\b") to "bank_saraswat",
+                  Regex("(?i)\\bdcb\\b") to "bank_dcb",
+                  Regex("(?i)\\bbajaj\\b") to "bank_bajajfinance",
+                  Regex("(?i)\\bindiapost\\b") to "bank_indiapost",
+                  Regex("(?i)\\bpaytm payments? bank\\b") to "biller_paytm",
+                  Regex("(?i)\\bairtel payments? bank\\b") to "biller_airtel",
+                  Regex("(?i)\\bjio payments? bank\\b") to "biller_jio",
+                  Regex("(?i)\\bhsbc\\b") to "bank_hsbc",
+                  Regex("(?i)\\bciti\\b") to "bank_citi",
+                  Regex("(?i)\\bstandard chartered\\b") to "bank_standard_chartered",
+                  Regex("(?i)\\bemirates nbd\\b") to "bank_emiratesnbd",
+                  Regex("(?i)\\badcb\\b") to "bank_adcb",
+                  Regex("(?i)\\bqnb\\b") to "bank_qnb",
+                  Regex("(?i)\\bsamba\\b") to "bank_samba",
+                  Regex("(?i)\\bal ?rajhi\\b") to "bank_al_rajhi",
+                  Regex("(?i)\\briyad\\b") to "bank_riyad",
+                  Regex("(?i)\\bmeezan\\b") to "bank_meezan"
+              )
+
+              fun bank(ctx: Context, institution: String, fallback: Int = R.drawable.ic_bank): Int {
+                  if (institution.isBlank()) return fallback
+                  for ((re, slug) in BANK_PATTERNS) {
+                      if (re.containsMatchIn(institution)) {
+                          val id = lookup(ctx, slug, 0)
+                          if (id != 0) return id
+                      }
+                  }
+                  return fallback
+              }
+
+              private val WALLET_PATTERNS: List<Pair<Regex, String>> = listOf(
+                  Regex("(?i)\\bphonepe\\b") to "wallet_phonepe",
+                  Regex("(?i)\\bgoogle ?pay\\b|\\bgpay\\b") to "wallet_phonepe",
+                  Regex("(?i)\\bpaytm\\b") to "biller_paytm",
+                  Regex("(?i)\\bmobikwik\\b") to "wallet_mobikwik",
+                  Regex("(?i)\\bfreecharge\\b") to "wallet_freecharge",
+                  Regex("(?i)\\bpaypal\\b") to "wallet_paypal",
+                  Regex("(?i)\\bamazon ?pay\\b") to "biller_amazon",
+                  Regex("(?i)\\bcred\\b") to "wallet_cred",
+                  Regex("(?i)\\bwise\\b") to "wallet_wise",
+                  Regex("(?i)\\brevolut\\b") to "wallet_revolut",
+                  Regex("(?i)\\bicici ?pockets?\\b") to "wallet_icicipockets",
+                  Regex("(?i)\\bpayzapp\\b") to "wallet_hdfcpayzapp",
+                  Regex("(?i)\\bsbi ?buddy\\b") to "wallet_sbibuddy",
+                  Regex("(?i)\\bola ?money\\b") to "wallet_ola_money",
+                  Regex("(?i)\\bjio ?money\\b") to "wallet_jio_money",
+                  Regex("(?i)\\bamex\\b|american express") to "wallet_american_express",
+                  Regex("(?i)\\bdiscover\\b") to "wallet_discover",
+                  Regex("(?i)\\bmpesa\\b|m-pesa") to "wallet_mpesa"
+              )
+
+              fun wallet(ctx: Context, name: String, fallback: Int = R.drawable.ic_transfer): Int {
+                  if (name.isBlank()) return fallback
+                  for ((re, slug) in WALLET_PATTERNS) {
+                      if (re.containsMatchIn(name)) {
+                          val id = lookup(ctx, slug, 0)
+                          if (id != 0) return id
+                      }
+                  }
+                  return fallback
+              }
+
+              private val BILLER_PATTERNS: List<Pair<Regex, String>> = listOf(
+                  Regex("(?i)\\bnetflix\\b") to "biller_subs_netflix",
+                  Regex("(?i)\\bspotify\\b") to "biller_subs_spotify",
+                  Regex("(?i)\\bhotstar\\b|disney") to "biller_subs_hotstar",
+                  Regex("(?i)\\byoutube ?premium\\b") to "biller_subs_youtube_premium",
+                  Regex("(?i)\\byoutube ?music\\b") to "biller_subs_youtube_music",
+                  Regex("(?i)\\bamazon ?prime\\b") to "biller_subs_amazon_prime",
+                  Regex("(?i)\\bgoogle ?play\\b") to "biller_google_play",
+                  Regex("(?i)\\bgoogle\\b") to "biller_google",
+                  Regex("(?i)\\bmicrosoft ?office\\b") to "biller_subs_microsoft_office",
+                  Regex("(?i)\\bdropbox\\b") to "biller_subs_dropbox",
+                  Regex("(?i)\\bopenai\\b|chatgpt") to "biller_subs_openai",
+                  Regex("(?i)\\bsonyliv\\b") to "biller_subs_sonyliv",
+                  Regex("(?i)\\bgaana\\b") to "biller_subs_gaana",
+                  Regex("(?i)\\bjio ?saavn\\b") to "biller_subs_jio_saavn",
+                  Regex("(?i)\\bairtel\\b") to "biller_airtel",
+                  Regex("(?i)\\bjio\\b") to "biller_jio",
+                  Regex("(?i)\\bbsnl\\b") to "biller_bsnl",
+                  Regex("(?i)\\bvodafone\\b|\\bvi\\b") to "biller_vodafone",
+                  Regex("(?i)\\bidea\\b") to "biller_idea",
+                  Regex("(?i)\\bpaytm\\b") to "biller_paytm",
+                  Regex("(?i)\\bbescom\\b") to "biller_bescom",
+                  Regex("(?i)\\bpspcl\\b") to "biller_pspcl",
+                  Regex("(?i)\\btata ?sky\\b|\\btata ?play\\b") to "biller_tata_sky",
+                  Regex("(?i)\\bvideocon\\b") to "biller_videocon",
+                  Regex("(?i)\\bbookmyshow\\b") to "biller_bookmyshow",
+                  Regex("(?i)\\bflipkart\\b") to "biller_flipkart",
+                  Regex("(?i)\\bamazon\\b") to "biller_amazon",
+                  Regex("(?i)\\betisalat\\b") to "biller_etisalat",
+                  Regex("(?i)\\booredoo\\b") to "biller_ooredoo",
+                  Regex("(?i)\\btelenor\\b") to "biller_telenor",
+                  Regex("(?i)\\bverizon\\b") to "biller_verizon",
+                  Regex("(?i)\\batt\\b|at&t") to "biller_att",
+                  Regex("(?i)\\btmobile\\b") to "biller_tmobile"
+              )
+
+              fun biller(ctx: Context, name: String, fallback: Int = R.drawable.ic_bank): Int {
+                  if (name.isBlank()) return fallback
+                  for ((re, slug) in BILLER_PATTERNS) {
+                      if (re.containsMatchIn(name)) {
+                          val id = lookup(ctx, slug, 0)
+                          if (id != 0) return id
+                      }
+                  }
+                  return fallback
+              }
+
+              private fun lookup(ctx: Context, slug: String, fallback: Int): Int {
+                  val id = try {
+                      ctx.resources.getIdentifier(slug, "drawable", ctx.packageName)
+                  } catch (e: Resources.NotFoundException) { 0 }
+                  return if (id != 0) id else fallback
+              }
+          }
+          EOF_ICONS
 
           cat > app/src/main/java/com/example/fintrack/Backup.kt <<'EOF_5'
           package com.example.fintrack
@@ -1239,7 +1432,7 @@ jobs:
                       conn.requestMethod = "GET"
                       conn.connectTimeout = 8000
                       conn.readTimeout = 8000
-                      conn.setRequestProperty("User-Agent", "FinTrack/10.1")
+                      conn.setRequestProperty("User-Agent", "FinTrack/10.2")
                       if (conn.responseCode != 200) throw RuntimeException("OSRM HTTP ${conn.responseCode}")
                       val txt = conn.inputStream.bufferedReader().use { it.readText() }
                       val json = org.json.JSONObject(txt)
@@ -1460,26 +1653,20 @@ jobs:
                   if (Math.abs(a.amount - b.amount) > 0.01) return false
                   if (a.debit != b.debit) return false
                   if (dayKey(a.ts) != dayKey(b.ts)) return false
-
                   val ma = a.merchant.trim().lowercase()
                   val mb = b.merchant.trim().lowercase()
                   val na = Learner.norm(a.merchant)
                   val nb = Learner.norm(b.merchant)
-
                   if (ma == "atm withdrawal" && mb == "atm withdrawal") return false
-
                   val aReal = ma.isNotEmpty() && ma != "unknown" && !a.merchant.matches(Regex("[A-Z]{5,8}"))
                   val bReal = mb.isNotEmpty() && mb != "unknown" && !b.merchant.matches(Regex("[A-Z]{5,8}"))
-
                   if (aReal && bReal && na != nb) return false
                   if (aReal && bReal && na == nb) return true
-
                   val va = a.vpa?.lowercase()
                   val vb = b.vpa?.lowercase()
                   if (!va.isNullOrBlank() && !vb.isNullOrBlank() && va != vb) return false
                   if (!va.isNullOrBlank() && vb.isNullOrBlank() && !aReal) return false
                   if (va.isNullOrBlank() && !vb.isNullOrBlank() && !bReal) return false
-
                   return true
               }
 
@@ -1515,7 +1702,6 @@ jobs:
                   val rows = db.queryTxns("1=1", emptyArray(), 5000).sortedBy { it.ts }
                   val used = HashSet<Long>()
                   val out = ArrayList<DupGroup>()
-
                   for (i in rows.indices) {
                       val a = rows[i]
                       if (a.id in used) continue
@@ -1600,18 +1786,15 @@ jobs:
                   val big = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString() ?: ""
                   val full = (title + " " + text + " " + big).trim()
                   if (full.length < 5) return
-
                   val amountRe = Regex("""(?:₹|rs\.?|inr)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)""", RegexOption.IGNORE_CASE)
                   val amount = amountRe.find(full)?.groupValues?.get(1)?.replace(",", "")?.toDoubleOrNull() ?: return
                   if (amount <= 0) return
-
                   val l = full.lowercase()
                   val debit = when {
                       "debited" in l || "paid" in l || "sent" in l || "spent" in l || "withdrawn" in l || "purchase" in l -> true
                       "credited" in l || "received" in l || "refund" in l || "cashback" in l -> false
                       else -> true
                   }
-
                   val vendor = NAME_MAP[sbn.packageName] ?: sbn.packageName
                   val merchant = when {
                       "to " in l -> {
@@ -1624,38 +1807,15 @@ jobs:
                       }
                       else -> vendor
                   }.ifBlank { vendor }.take(40)
-
                   val db = Db.get(ctx)
                   val now = sbn.postTime
                   val tenMin = 10 * 60_000L
-                  val hit = db.queryTxns(
-                      "source='SMS' AND debit=? AND amount=? AND ts BETWEEN ? AND ?",
-                      arrayOf((if (debit) 1 else 0).toString(), amount.toString(), (now - tenMin).toString(), (now + tenMin).toString()), 1
-                  )
+                  val hit = db.queryTxns("source='SMS' AND debit=? AND amount=? AND ts BETWEEN ? AND ?", arrayOf((if (debit) 1 else 0).toString(), amount.toString(), (now - tenMin).toString(), (now + tenMin).toString()), 1)
                   if (hit.isNotEmpty()) return
-                  val hit2 = db.queryTxns(
-                      "source='NOTIF' AND debit=? AND amount=? AND ts BETWEEN ? AND ?",
-                      arrayOf((if (debit) 1 else 0).toString(), amount.toString(), (now - 30_000L).toString(), (now + 30_000L).toString()), 1
-                  )
+                  val hit2 = db.queryTxns("source='NOTIF' AND debit=? AND amount=? AND ts BETWEEN ? AND ?", arrayOf((if (debit) 1 else 0).toString(), amount.toString(), (now - 30_000L).toString(), (now + 30_000L).toString()), 1)
                   if (hit2.isNotEmpty()) return
-
                   val key = "NOTIF|" + sbn.packageName + "|" + full.hashCode()
-                  val t = Txn(
-                      smsKey = key,
-                      ts = now,
-                      amount = amount,
-                      debit = debit,
-                      merchant = merchant,
-                      category = Categories.classify(merchant, full, debit),
-                      institution = vendor,
-                      channel = "APP",
-                      sender = sbn.packageName,
-                      body = full,
-                      source = "NOTIF",
-                      status = "NOTIF",
-                      tpl = "",
-                      review = false
-                  )
+                  val t = Txn(smsKey = key, ts = now, amount = amount, debit = debit, merchant = merchant, category = Categories.classify(merchant, full, debit), institution = vendor, channel = "APP", sender = sbn.packageName, body = full, source = "NOTIF", status = "NOTIF", tpl = "", review = false)
                   Repo.save(ctx, t)
               }
           }
@@ -1927,7 +2087,7 @@ jobs:
                   window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
                   try {
                       org.osmdroid.config.Configuration.getInstance().apply {
-                          userAgentValue = "FinTrack/10.1 (com.example.fintrack; Android)"
+                          userAgentValue = "FinTrack/10.2 (com.example.fintrack; Android)"
                           tileFileSystemCacheMaxBytes = 600L * 1024 * 1024
                           tileFileSystemCacheTrimBytes = 500L * 1024 * 1024
                           load(this@MainActivity, getSharedPreferences("osmdroid", MODE_PRIVATE))
@@ -2043,15 +2203,8 @@ jobs:
                           val r = report ?: return@runOnUiThread
                           AlertDialog.Builder(this)
                               .setTitle("SMS scan complete")
-                              .setMessage(
-                                  "Scanned: ${r.scanned}\n" +
-                                  "Imported: ${r.imported}\n" +
-                                  "Skipped (already in DB): ${r.duplicates}\n" +
-                                  "Ignored (not a txn): ${r.ignored}\n" +
-                                  "\nNext scan will start after: " + SimpleDateFormat("dd MMM yyyy HH:mm", Locale.US).format(Date(r.maxTs))
-                              )
-                              .setPositiveButton("OK", null)
-                              .show()
+                              .setMessage("Scanned: ${r.scanned}\nImported: ${r.imported}\nSkipped (already in DB): ${r.duplicates}\nIgnored (not a txn): ${r.ignored}\n\nNext scan will start after: " + SimpleDateFormat("dd MMM yyyy HH:mm", Locale.US).format(Date(r.maxTs)))
+                              .setPositiveButton("OK", null).show()
                       }
                   }.start()
               }
@@ -2081,19 +2234,15 @@ jobs:
                   }.start()
               }
               fun pickRestore() { openDoc.launch(arrayOf("text/*", "application/csv", "application/vnd.ms-excel", "*/*")) }
-
               private fun afterRestore(text: String) {
                   val n = Backup.restore(applicationContext, text)
                   val maxTs = Db.get(applicationContext).one("SELECT MAX(ts) FROM txn")?.toLongOrNull() ?: 0L
-                  if (maxTs > 0) {
-                      getSharedPreferences("fin", MODE_PRIVATE).edit().putLong("last_sms_date", maxTs).apply()
-                  }
+                  if (maxTs > 0) getSharedPreferences("fin", MODE_PRIVATE).edit().putLong("last_sms_date", maxTs).apply()
                   runOnUiThread {
                       toast("$n rows restore • SMS cutoff = " + SimpleDateFormat("dd MMM yyyy HH:mm", Locale.US).format(Date(maxTs)))
                       refreshAll()
                   }
               }
-
               private fun doRestore(uri: Uri) {
                   Thread {
                       try {
@@ -2103,13 +2252,11 @@ jobs:
                   }.start()
               }
               fun cleanAndRestore() {
-                  AlertDialog.Builder(this)
-                      .setTitle("Clean database")
+                  AlertDialog.Builder(this).setTitle("Clean database")
                       .setMessage("Saare transactions, payees, rules, loans hata do? Toll plazas safe rahenge.\n\nIske baad aap backup CSV pick kar sakte ho, ya empty DB start kar sakte ho.")
                       .setPositiveButton("Clean + Restore backup") { _, _ -> openBackupRestore.launch(arrayOf("text/*", "application/csv", "application/vnd.ms-excel", "*/*")) }
                       .setNeutralButton("Clean only (empty)") { _, _ -> Thread { Backup.cleanAll(applicationContext); runOnUiThread { toast("DB clean ho gaya"); refreshAll() } }.start() }
-                      .setNegativeButton("Cancel", null)
-                      .show()
+                      .setNegativeButton("Cancel", null).show()
               }
               private fun doCleanRestore(uri: Uri) {
                   Thread {
@@ -2120,7 +2267,6 @@ jobs:
                       } catch (e: Exception) { runOnUiThread { toast("Clean+restore error: ${e.message}") } }
                   }.start()
               }
-
               private fun doFirstRunRestore(uri: Uri) {
                   Thread {
                       try {
@@ -2130,20 +2276,13 @@ jobs:
                       } catch (e: Exception) { runOnUiThread { toast("Restore error: ${e.message}") } }
                   }.start()
               }
-
               private fun showFirstRunOnboarding() {
-                  AlertDialog.Builder(this)
-                      .setTitle("FinTrack me swagat")
-                      .setMessage("Pehle kya karna hai?\n\n" +
-                          "• Scan SMS — inbox se bank SMS padhke transactions import karega\n" +
-                          "• Restore backup — pehle liya hua CSV restore karega; uske baad older SMS re-import nahi honge")
+                  AlertDialog.Builder(this).setTitle("FinTrack me swagat")
+                      .setMessage("Pehle kya karna hai?\n\n• Scan SMS — inbox se bank SMS padhke transactions import karega\n• Restore backup — pehle liya hua CSV restore karega; uske baad older SMS re-import nahi honge")
                       .setPositiveButton("Scan SMS") { _, _ -> askPermissionsAndScan() }
                       .setNeutralButton("Restore backup") { _, _ -> openFirstRunRestore.launch(arrayOf("text/*", "application/csv", "application/vnd.ms-excel", "*/*")) }
-                      .setNegativeButton("Baad me", null)
-                      .setCancelable(false)
-                      .show()
+                      .setNegativeButton("Baad me", null).setCancelable(false).show()
               }
-
               fun pickTollJson() { openTollJson.launch(arrayOf("application/json", "*/*")) }
               private fun doImportTolls(uri: Uri) {
                   Thread {
@@ -2177,8 +2316,7 @@ jobs:
               }
               fun bulkDelete(ids: List<Long>) {
                   if (ids.isEmpty()) { toast("Pehle transactions chuno"); return }
-                  AlertDialog.Builder(this)
-                      .setTitle("Delete ${ids.size} transactions?")
+                  AlertDialog.Builder(this).setTitle("Delete ${ids.size} transactions?")
                       .setPositiveButton("Haan, delete") { _, _ -> PayeeOps.bulkDelete(this, ids); toast("${ids.size} deleted"); refreshAll() }
                       .setNegativeButton("Nahi", null).show()
               }
@@ -2195,7 +2333,6 @@ jobs:
           import android.content.Context
           import android.graphics.Color
           import android.view.Gravity
-          import android.view.MotionEvent
           import android.view.View
           import android.view.ViewGroup
           import android.widget.CheckBox
@@ -2214,28 +2351,48 @@ jobs:
 
           class HomeScreen(act: MainActivity) : Screen(act) {
               private val body = act.vbox(14)
-              override val root: View = ScrollView(act).apply { addView(body) }
               private var year = Calendar.getInstance().get(Calendar.YEAR)
               private var month = Calendar.getInstance().get(Calendar.MONTH)
+              override val root: View = ScrollView(act).apply { addView(body) }
+
+              // NEW: FinArt-style toolbar at the top
+              private fun buildToolbar(): View {
+                  val bar = LinearLayout(act).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                      setPadding(act.dp(6), act.dp(6), act.dp(6), act.dp(6))
+                      setBackgroundColor(C.CARD)
+                  }
+                  val prev = act.tv("◀", 20f, C.TEXT).apply { gravity = Gravity.CENTER; setPadding(act.dp(10), act.dp(6), act.dp(10), act.dp(6)) }
+                  prev.setOnClickListener { month--; if (month < 0) { month = 11; year-- }; refresh() }
+                  bar.addView(prev)
+                  val label = act.tv(SimpleDateFormat("MMM yyyy", Locale.getDefault()).format(Date(Calendar.getInstance().apply { set(Calendar.YEAR, year); set(Calendar.MONTH, month); set(Calendar.DAY_OF_MONTH, 1) }.timeInMillis)), 16f, C.TEXT, true)
+                  label.gravity = Gravity.CENTER
+                  bar.addView(label, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                  val next = act.tv("▶", 20f, C.TEXT).apply { gravity = Gravity.CENTER; setPadding(act.dp(10), act.dp(6), act.dp(10), act.dp(6)) }
+                  next.setOnClickListener { month++; if (month > 11) { month = 0; year++ }; refresh() }
+                  bar.addView(next)
+                  // Right-side action icons
+                  bar.addView(act.icon(R.drawable.ic_categories_grid, C.TEXT, 22).apply { setPadding(act.dp(8), act.dp(8), act.dp(8), act.dp(8)); setOnClickListener { showCategoriesStub() } })
+                  bar.addView(act.icon(R.drawable.ic_fastag, C.TEXT, 22).apply { setPadding(act.dp(8), act.dp(8), act.dp(8), act.dp(8)); setOnClickListener { showBillsStub() } })
+                  bar.addView(act.icon(R.drawable.ic_refresh_24, C.TEXT, 22).apply { setPadding(act.dp(8), act.dp(8), act.dp(8), act.dp(8)); setOnClickListener { act.rescan() } })
+                  bar.addView(act.icon(R.drawable.ic_settings_24dp, C.TEXT, 22).apply { setPadding(act.dp(8), act.dp(8), act.dp(8), act.dp(8)); setOnClickListener { act.show(4) } })
+                  return bar
+              }
+
               override fun refresh() {
                   body.removeAllViews()
+                  body.addView(buildToolbar(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
                   val db = Db.get(act)
                   val cal = Calendar.getInstance().apply { set(Calendar.YEAR, year); set(Calendar.MONTH, month); set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }
                   val start = cal.timeInMillis; val daysInMonth = cal.getActualMaximum(Calendar.DAY_OF_MONTH); cal.add(Calendar.MONTH, 1); val end = cal.timeInMillis
-                  val label = SimpleDateFormat("MMMM yyyy", Locale.getDefault()).format(Date(start))
-                  val head = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-                  head.put(act.pill("◀", false) { month--; if (month < 0) { month = 11; year-- }; refresh() }, 0)
-                  head.put(act.tv(label, 20f, C.TEXT, true).apply { gravity = Gravity.CENTER; setPadding(0, act.dp(6), 0, act.dp(6)); setOnClickListener { pickMonthYear() } }, 0, 1f)
-                  head.put(act.pill("▶", false) { month++; if (month > 11) { month = 0; year++ }; refresh() }, 0)
-                  head.put(act.pill("🌓", false) { act.toggleTheme() }, 8)
-                  body.put(head, 0)
                   val spent = db.num("SELECT SUM(amount) FROM txn WHERE debit=1 AND ts>=? AND ts<?", start.toString(), end.toString())
                   val now = System.currentTimeMillis()
                   val elapsedDays = (((now - start).toFloat() / 86_400_000f).coerceIn(1f, daysInMonth.toFloat()))
                   val ring = SpendRingView(act)
                   ring.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, act.dp(220))
                   val projectedTotal: Double = ((spent / elapsedDays) * daysInMonth).coerceAtLeast(1.0)
-                  ring.setData(spent.toFloat(), projectedTotal.toFloat(), "Kharch · $label", inr(spent), C.RED)
+                  ring.setData(spent.toFloat(), projectedTotal.toFloat(), "Kharch", inr(spent), C.RED)
                   body.put(ring)
                   val review = db.num("SELECT COUNT(*) FROM txn WHERE review=1").toInt()
                   if (review > 0) {
@@ -2257,7 +2414,8 @@ jobs:
                   for (r in cats) {
                       val cat = r["category"] ?: "Other"; val v = r["s"]?.toDoubleOrNull() ?: 0.0
                       val line = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setOnClickListener { act.openLedger(LedgerScreen.Filter(mode = "cat", category = cat, year = year, month = month)) } }
-                      line.addView(act.icon(iconFor(cat), C.ACCENT, 20)); line.put(act.tv(cat, 14f), 10, 1f); line.put(act.tv(inr(v), 14f, C.TEXT, true), 8)
+                      line.addView(act.icon(Icons.category(act, cat, R.drawable.ic_bank), C.ACCENT, 22))
+                      line.put(act.tv(cat, 14f), 10, 1f); line.put(act.tv(inr(v), 14f, C.TEXT, true), 8)
                       cc.put(line, 10)
                   }
                   body.put(cc)
@@ -2267,14 +2425,16 @@ jobs:
                   n.addView(act.tv(inr(nw.assets - nw.liabilities), 24f, if (nw.assets >= nw.liabilities) C.GREEN else C.RED, true))
                   n.setOnClickListener { act.show(4) }; body.put(n)
               }
-              private fun pickMonthYear() {
-                  val years = (Calendar.getInstance().get(Calendar.YEAR) - 5..Calendar.getInstance().get(Calendar.YEAR) + 1).toList()
-                  val yearLabels = years.map { it.toString() }
-                  AlertDialog.Builder(act).setTitle("Year chuno")
-                      .setItems(yearLabels.toTypedArray()) { _, yi ->
-                          val chosenYear = years[yi]; val months = listOf("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec")
-                          AlertDialog.Builder(act).setTitle("Month chuno ($chosenYear)").setItems(months.toTypedArray()) { _, mi -> year = chosenYear; month = mi; refresh() }.show()
-                      }.show()
+
+              private fun showCategoriesStub() {
+                  AlertDialog.Builder(act).setTitle("Categories")
+                      .setMessage("Category picker coming in v10.3.\n\nFor now, use Ledger → tap a txn → Edit → Category.")
+                      .setPositiveButton("OK", null).show()
+              }
+              private fun showBillsStub() {
+                  AlertDialog.Builder(act).setTitle("Bills")
+                      .setMessage("Bills & subscriptions tracker coming in v10.3.")
+                      .setPositiveButton("OK", null).show()
               }
           }
 
@@ -2300,7 +2460,8 @@ jobs:
                       }
                       is Row.TxnRow -> {
                           val t = item.t
-                          r.icon.setImageResource(iconFor(t.category)); r.icon.setColorFilter(if (t.debit) C.RED else C.GREEN)
+                          r.icon.setImageResource(Icons.category(act, t.category, R.drawable.ic_bank))
+                          r.icon.clearColorFilter()
                           r.title.text = (if (selectMode && selected.contains(t.id)) "☑ " else "") + t.merchant
                           r.sub.text = fmtDate(t.ts) + " • " + t.institution + " • " + t.category + (if (t.source == "NOTIF") " • 🔔" else "")
                           r.amt.text = (if (t.debit) "-" else "+") + inr(t.amount, true); r.amt.setTextColor(if (t.debit) C.RED else C.GREEN)
@@ -2414,14 +2575,10 @@ jobs:
                   names.add("✏ Custom name…")
                   AlertDialog.Builder(act).setTitle("In ${rows.size} txns ko kis payee me bhejein?")
                       .setItems(names.toTypedArray()) { _, which ->
-                          if (which == names.size - 1) {
-                              act.showForm("Custom payee name", listOf(Field("Naam", keys.first()))) { v -> doBulkReassign(keys, v[0]) }
-                          } else {
-                              val newName = names[which]; doBulkReassign(keys, newName)
-                          }
+                          if (which == names.size - 1) act.showForm("Custom payee name", listOf(Field("Naam", keys.first()))) { v -> doBulkReassign(keys, v[0]) }
+                          else doBulkReassign(keys, names[which])
                       }
-                      .setNegativeButton("Cancel", null)
-                      .show()
+                      .setNegativeButton("Cancel", null).show()
               }
 
               private fun doBulkReassign(fromKeys: List<String>, newName: String) {
@@ -2429,10 +2586,7 @@ jobs:
                   if (target.isBlank()) { act.toast("Naam khali nahi ho sakta"); return }
                   Thread {
                       PayeeOps.reassignToPayee(act, fromKeys, Learner.norm(target), target)
-                      act.runOnUiThread {
-                          act.toast("Merged ${fromKeys.size} payees → $target")
-                          act.refreshAll()
-                      }
+                      act.runOnUiThread { act.toast("Merged ${fromKeys.size} payees → $target"); act.refreshAll() }
                   }.start()
               }
 
@@ -2461,8 +2615,7 @@ jobs:
                       .setPositiveButton("Delete ticked") { _, _ ->
                           var n = 0
                           for ((id, cb) in checkboxes) if (cb.isChecked) { Db.get(act).deleteTxn(id); n++ }
-                          act.toast("$n deleted")
-                          act.refreshAll()
+                          act.toast("$n deleted"); act.refreshAll()
                       }
                       .setNegativeButton("Cancel", null)
                       .setNeutralButton("Smart select") { _, _ ->
@@ -2488,19 +2641,14 @@ jobs:
                       (if (t.balance != null) "\nBalance: " + inr(t.balance ?: 0.0, true) else "") + "\nSource: ${t.source}  •  Parse: ${t.status}" +
                       (if (t.vpa != null) "  •  UPI: ${t.vpa}" else "") + (if (t.ref != null) "  •  Ref: ${t.ref}" else "") +
                       (if (t.body.isNotEmpty()) "\n\n" + t.body else "")
-                  val builder = AlertDialog.Builder(act)
-                      .setTitle(t.merchant)
-                      .setMessage(msg)
+                  val builder = AlertDialog.Builder(act).setTitle(t.merchant).setMessage(msg)
                       .setPositiveButton("Edit / Sahi karo") { _, _ -> editTxn(t) }
                       .setNeutralButton("Delete", null)
                       .setNegativeButton("Band karo", null)
                   val ad = builder.create()
                   ad.setOnShowListener {
                       ad.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
-                          PayeeOps.bulkDelete(act, listOf(t.id))
-                          act.toast("Deleted")
-                          act.refreshAll()
-                          ad.dismiss()
+                          PayeeOps.bulkDelete(act, listOf(t.id)); act.toast("Deleted"); act.refreshAll(); ad.dismiss()
                       }
                   }
                   ad.show()
@@ -2559,9 +2707,7 @@ jobs:
 
           private val OSMFR_HOT = object : OnlineTileSourceBase(
               "OSM-FR-HOT", 0, 19, 256, ".png",
-              arrayOf("https://a.tile.openstreetmap.fr/hot/",
-                      "https://b.tile.openstreetmap.fr/hot/",
-                      "https://c.tile.openstreetmap.fr/hot/"),
+              arrayOf("https://a.tile.openstreetmap.fr/hot/", "https://b.tile.openstreetmap.fr/hot/", "https://c.tile.openstreetmap.fr/hot/"),
               "© OpenStreetMap contributors, Tiles: OSM-FR"
           ) {
               override fun getTileURLString(pMapTileIndex: Long): String =
@@ -2571,16 +2717,11 @@ jobs:
           class RouteMapView @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? = null) : MapView(ctx, attrs) {
               class Pt(val lat: Double, val lon: Double, val label: String, val ts: Long)
               class Trip(val direction: String, val checkpoints: List<Pt>, val roadPolyline: List<DoubleArray>)
-
               init {
-                  setTileSource(OSMFR_HOT)
-                  setMultiTouchControls(true)
-                  setBuiltInZoomControls(false)
-                  controller.setZoom(5.0)
-                  controller.setCenter(GeoPoint(22.0, 79.0))
+                  setTileSource(OSMFR_HOT); setMultiTouchControls(true); setBuiltInZoomControls(false)
+                  controller.setZoom(5.0); controller.setCenter(GeoPoint(22.0, 79.0))
                   try { overlayManager.tilesOverlay.setColorFilter(null) } catch (_: Exception) {}
               }
-
               fun setTrips(trips: List<Trip>) {
                   overlays.clear()
                   val allPts = ArrayList<GeoPoint>()
@@ -2592,30 +2733,18 @@ jobs:
                           polyline.setPoints(trip.roadPolyline.map { GeoPoint(it[0], it[1]) })
                           polyline.outlinePaint.color = color
                           polyline.outlinePaint.strokeWidth = if (isGoing) 12f else 8f
-                          if (!isGoing) {
-                              val dash = Polyline()
-                              dash.setPoints(trip.roadPolyline.map { GeoPoint(it[0], it[1]) })
-                              dash.outlinePaint.color = Color.argb(120, 255, 255, 255)
-                              dash.outlinePaint.strokeWidth = 3f
-                              overlays.add(dash)
-                          }
                           overlays.add(polyline)
                       }
                       for (cp in trip.checkpoints) {
                           allPts.add(GeoPoint(cp.lat, cp.lon))
-                          val m = Marker(this)
-                          m.position = GeoPoint(cp.lat, cp.lon)
+                          val m = Marker(this); m.position = GeoPoint(cp.lat, cp.lon)
                           m.title = "${if (isGoing) "🟢" else "🔴"} ${cp.label}"
                           m.snippet = SimpleDateFormat("HH:mm", Locale.US).format(Date(cp.ts))
-                          m.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-                          overlays.add(m)
+                          m.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM); overlays.add(m)
                       }
                   }
                   if (allPts.isNotEmpty()) {
-                      try {
-                          val bbox = BoundingBox.fromGeoPoints(allPts)
-                          zoomToBoundingBox(bbox, true, 80)
-                      } catch (_: Exception) {}
+                      try { zoomToBoundingBox(BoundingBox.fromGeoPoints(allPts), true, 80) } catch (_: Exception) {}
                   }
                   invalidate()
               }
@@ -2629,53 +2758,36 @@ jobs:
               private val chips = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; setPadding(act.dp(8), 0, act.dp(8), 0) }
               private val map = RouteMapView(act)
               private val detail = act.vbox(10)
-
               override val root: View = act.vbox().apply {
                   put(summary, 0)
                   put(HorizontalScrollView(act).apply { isHorizontalScrollBarEnabled = false; addView(chips) }, 2)
                   put(map, 4); (getChildAt(childCount - 1).layoutParams as LinearLayout.LayoutParams).height = act.dp(360)
                   put(ScrollView(act).apply { addView(detail) }, 4, 1f)
               }
-
               override fun refresh() {
                   Thread {
                       val (built, sum) = Tolls.buildTrips(act)
-                      act.runOnUiThread {
-                          trips = built; total = sum
-                          render()
-                      }
+                      act.runOnUiThread { trips = built; total = sum; render() }
                   }.start()
               }
-
               private fun render() {
-                  summary.text = "${trips.size} trips  •  Total toll ${inr(total)}\nSolid blue = Going, dashed red = Returning"
+                  summary.text = "${trips.size} trips  •  Total toll ${inr(total)}\nSolid blue = Going, red = Returning"
                   chips.removeAllViews()
                   chips.addView(act.pill("All", selDay == null) { selDay = null; render() })
                   val days = trips.map { it.dayKey }.distinct().reversed()
                   for (d in days.take(30)) chips.addView(act.pill(d, selDay == d) { selDay = d; render() })
-                  chips.addView(act.pill("Fix Toll SMS", false) {
-                      Thread { val n = Tolls.rematchAll(act); act.runOnUiThread { act.toast("$n toll txns re-matched"); refresh() } }.start()
-                  })
+                  chips.addView(act.pill("Fix Toll SMS", false) { Thread { val n = Tolls.rematchAll(act); act.runOnUiThread { act.toast("$n toll txns re-matched"); refresh() } }.start() })
                   chips.addView(act.pill("Reload tiles", false) { map.invalidate(); act.toast("Tile cache reloaded") })
-
                   val visible = if (selDay == null) trips else trips.filter { it.dayKey == selDay }
-
-                  val tripsForMap = visible.map { t ->
-                      RouteMapView.Trip(t.direction, t.checkpoints.map { RouteMapView.Pt(it.lat, it.lon, it.plaza, it.ts) }, t.roadPolyline)
-                  }
+                  val tripsForMap = visible.map { t -> RouteMapView.Trip(t.direction, t.checkpoints.map { RouteMapView.Pt(it.lat, it.lon, it.plaza, it.ts) }, t.roadPolyline) }
                   map.setTrips(tripsForMap)
-
                   detail.removeAllViews()
-                  if (visible.isEmpty()) {
-                      detail.addView(act.tv("FASTag toll SMS milte hi yahan trips dikhengi.", 12f, C.MUTED))
-                      return
-                  }
+                  if (visible.isEmpty()) { detail.addView(act.tv("FASTag toll SMS milte hi yahan trips dikhengi.", 12f, C.MUTED)); return }
                   for (t in visible) {
                       val card = act.card()
                       val head = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
                       head.put(act.tv(t.dayKey, 14f, C.TEXT, true), 0, 1f)
-                      val badge = act.tv(t.direction, 11f, if (t.direction == "Going") C.ACCENT else C.RED, true)
-                      head.put(badge, 0)
+                      head.put(act.tv(t.direction, 11f, if (t.direction == "Going") C.ACCENT else C.RED, true), 0)
                       card.addView(head)
                       card.addView(act.tv("📍 ${t.title}", 12f, C.MUTED))
                       card.addView(act.tv("Total toll: ${inr(t.total, true)}", 14f, C.TEXT, true))
@@ -2700,13 +2812,10 @@ jobs:
               }
               private val adapter = RowAdapter<Map<String, String?>>(act, emptyList()) { p, r ->
                   val key = p["k"] ?: ""; val name = p["display"] ?: ""
-                  val hash = name.hashCode()
-                  val colors = intArrayOf(Color.parseColor("#5B9CFF"), Color.parseColor("#34D399"), Color.parseColor("#FBBF24"), Color.parseColor("#C084FC"), Color.parseColor("#22D3EE"))
-                  val avatarCol = colors[Math.abs(hash) % colors.size]
-                  val parent = r.view.getChildAt(0) as? android.widget.ImageView
-                  parent?.setImageDrawable(null); parent?.setColorFilter(avatarCol); parent?.setImageResource(R.drawable.ic_contacts)
-                  r.title.text = (if (selectMode && key in selected) "☑ " else "") + name
                   val upi = p["upi_id"]
+                  r.icon.setImageResource(Icons.wallet(act, upi ?: name, R.drawable.ic_contacts))
+                  r.icon.clearColorFilter()
+                  r.title.text = (if (selectMode && key in selected) "☑ " else "") + name
                   r.sub.text = "${p["n"]} txns • ${if (upi.isNullOrBlank()) "no UPI" else upi}"
                   val spent = p["spent"]?.toDoubleOrNull() ?: 0.0; val recv = p["recv"]?.toDoubleOrNull() ?: 0.0
                   val sign: String = if (recv > 0 && spent == 0.0) "+" else if (spent > 0 && recv == 0.0) "-" else ""
@@ -2774,12 +2883,8 @@ jobs:
                   val col = act.vbox(10)
                   col.addView(act.tv("Out: ${inr(spent)}  •  In: ${inr(recv)}  •  Net: ${inr(recv - spent)}", 13f, C.TEXT, true))
                   if (!p["upi_id"].isNullOrBlank()) col.addView(act.tv("UPI: ${p["upi_id"]}", 12f, C.MUTED))
-
                   val autoIds = PayeeOps.smartMidnightDeleteIds(all)
-                  if (autoIds.isNotEmpty()) {
-                      col.addView(act.tv("💡 ${autoIds.size} duplicate entries mile (same date+amount+type, 00:00 timestamp) — auto-tick ho gaye hain", 12f, C.AMBER))
-                  }
-
+                  if (autoIds.isNotEmpty()) col.addView(act.tv("💡 ${autoIds.size} duplicate entries mile (same date+amount+type, 00:00 timestamp) — auto-tick ho gaye hain", 12f, C.AMBER))
                   val selectedIds = LinkedHashSet<Long>(autoIds)
                   val historyContainer = act.vbox(6)
                   for (t in all) {
@@ -2823,9 +2928,7 @@ jobs:
           package com.example.fintrack
 
           import android.view.View
-          import android.widget.LinearLayout
           import android.widget.ScrollView
-          import androidx.appcompat.app.AlertDialog
 
           class MoneyScreen(act: MainActivity) : Screen(act) {
               private val body = act.vbox(14)
@@ -2835,8 +2938,24 @@ jobs:
                   val db = Db.get(act)
                   val nw = NetWorth.compute(act)
                   val c = act.card()
-                  c.addView(act.icon(R.drawable.ic_networth, C.GREEN, 26)); c.addView(act.tv("Net worth", 12f, C.MUTED)); c.addView(act.tv(inr(nw.assets), 28f, C.GREEN, true))
+                  c.addView(act.icon(R.drawable.ic_networth, C.GREEN, 26))
+                  c.addView(act.tv("Net worth", 12f, C.MUTED))
+                  c.addView(act.tv(inr(nw.assets), 28f, C.GREEN, true))
                   body.put(c, 0)
+                  val banks = act.card()
+                  banks.addView(act.tv("Accounts", 15f, C.TEXT, true))
+                  if (nw.bank.isEmpty()) banks.addView(act.tv("SMS scan hone par yahan banks dikhenge.", 12f, C.MUTED))
+                  for ((inst, acct, bal) in nw.bank) {
+                      val row = android.widget.LinearLayout(act).apply { orientation = android.widget.LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL; setPadding(0, act.dp(6), 0, act.dp(6)) }
+                      row.addView(act.icon(Icons.bank(act, inst, R.drawable.ic_bank), C.TEXT, 26))
+                      val mid = act.vbox(2)
+                      mid.addView(act.tv(inst, 13f, C.TEXT, true))
+                      if (acct.isNotBlank()) mid.addView(act.tv("A/c $acct", 11f, C.MUTED))
+                      row.addView(mid, android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = act.dp(10) })
+                      row.addView(act.tv(inr(bal, true), 14f, C.TEXT, true))
+                      banks.put(row, 6)
+                  }
+                  body.put(banks)
                   val d = act.card()
                   d.addView(act.tv("Data, backup & imports", 15f, C.TEXT, true))
                   d.put(act.actionBtn("Upload Toll Data JSON") { act.pickTollJson() }, 10)
@@ -2979,6 +3098,8 @@ jobs:
           }
           EOF_23
 
+          # Copy the user's existing UI vector icons (ic_*.xml) so Icons.kt fallbacks resolve
+          # These files are already in the repo but the generated tree needs them fresh.
           cat > app/src/main/res/drawable/ic_bank.xml <<'EOF_D0'
           <?xml version="1.0" encoding="utf-8"?>
           <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
@@ -3054,6 +3175,32 @@ jobs:
           </vector>
           EOF_D7
 
+          cat > app/src/main/res/drawable/ic_categories_grid.xml <<'EOF_D8'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+              <path android:pathData="M3,3h7v7h-7z" android:strokeColor="#FFFFFFFF" android:strokeWidth="2" android:fillColor="#00000000"/>
+              <path android:pathData="M14,3h7v7h-7z" android:strokeColor="#FFFFFFFF" android:strokeWidth="2" android:fillColor="#00000000"/>
+              <path android:pathData="M3,14h7v7h-7z" android:strokeColor="#FFFFFFFF" android:strokeWidth="2" android:fillColor="#00000000"/>
+              <path android:pathData="M14,14h7v7h-7z" android:strokeColor="#FFFFFFFF" android:strokeWidth="2" android:fillColor="#00000000"/>
+          </vector>
+          EOF_D8
+
+          cat > app/src/main/res/drawable/ic_refresh_24.xml <<'EOF_D9'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+              <path android:pathData="M21,12a9,9 0 1,1 -3,-6.7" android:strokeColor="#FFFFFFFF" android:strokeWidth="2" android:fillColor="#00000000"/>
+              <path android:pathData="M21,3v6h-6" android:strokeColor="#FFFFFFFF" android:strokeWidth="2" android:fillColor="#00000000"/>
+          </vector>
+          EOF_D9
+
+          cat > app/src/main/res/drawable/ic_settings_24dp.xml <<'EOF_D10'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+              <path android:pathData="M12,15a3,3 0 1,0 0,-6a3,3 0 0,0 0,6z" android:strokeColor="#FFFFFFFF" android:strokeWidth="2" android:fillColor="#00000000"/>
+              <path android:pathData="M19.4,15a1.65,1.65 0 0,0 .33,1.82l.06,.06a2,2 0 0,1 -2.83,2.83l-.06,-.06a1.65,1.65 0 0,0 -1.82,-.33a1.65,1.65 0 0,0 -1,1.51v.17a2,2 0 0,1 -4,0v-.09a1.65,1.65 0 0,0 -1.08,-1.51a1.65,1.65 0 0,0 -1.82,.33l-.06,.06a2,2 0 0,1 -2.83,-2.83l.06,-.06a1.65,1.65 0 0,0 .33,-1.82a1.65,1.65 0 0,0 -1.51,-1H3a2,2 0 0,1 0,-4h.09a1.65,1.65 0 0,0 1.51,-1.08a1.65,1.65 0 0,0 -.33,-1.82l-.06,-.06a2,2 0 0,1 2.83,-2.83l.06,.06a1.65,1.65 0 0,0 1.82,.33h.08a1.65,1.65 0 0,0 1,-1.51V3a2,2 0 0,1 4,0v.09a1.65,1.65 0 0,0 1,1.51a1.65,1.65 0 0,0 1.82,-.33l.06,-.06a2,2 0 0,1 2.83,2.83l-.06,.06a1.65,1.65 0 0,0 -.33,1.82V9a1.65,1.65 0 0,0 1.51,1H21a2,2 0 0,1 0,4h-.09a1.65,1.65 0 0,0 -1.51,1z" android:strokeColor="#FFFFFFFF" android:strokeWidth="2" android:fillColor="#00000000"/>
+          </vector>
+          EOF_D10
+
       - name: Build Debug APK
         working-directory: /tmp/proj
         run: gradle assembleDebug --no-daemon
@@ -3062,8 +3209,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="v10.1.${{ github.run_number }}"
+          VERSION="v10.2.${{ github.run_number }}"
           gh release create "$VERSION" /tmp/proj/app/build/outputs/apk/debug/app-debug.apk \
             --repo "${{ github.repository }}" \
             --title "FinTrack Build ${{ github.run_number }}" \
-            --notes "v10.1: OSRM road-snapped travel map. Trip legs auto-grouped on U-turn / >6h gap / new day. Direction badges Going (solid blue) / Returning (dashed red). Polyline decoder ported from Python. 6 default toll plazas seeded so travel map works on first launch."
+            --notes "v10.2 Stage 1: Icons.kt wired into Ledger, Payees, Home, Money. Home now has a FinArt-style toolbar: month prev/next + Categories / Bills / Rescan / Settings icons. Money tab shows real bank logos per account. All 281 user PNGs included via drawable-nodpi copy step. Everything from 10.1 still works."
