@@ -69,8 +69,8 @@ jobs:
                   applicationId = "com.example.fintrack"
                   minSdk = 30
                   targetSdk = 33
-                  versionCode = 21
-                  versionName = "10.3"
+                  versionCode = 22
+                  versionName = "10.4"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -315,11 +315,9 @@ jobs:
 
           object Backup {
               val CANONICAL = listOf("Bank", "Account_No", "Txn_Date", "Description", "Ref_No", "Withdrawal", "Deposit", "Category", "UPI_ID")
-              private val tables = listOf("txn","payees","net_items","senders","merchant_rules","parse_patterns","nb_words","toll_trips","toll_plazas","payee_tags","loans","payee_merges")
+              private val tables = listOf("txn","payees","net_items","senders","merchant_rules","parse_patterns","nb_words","toll_trips","toll_plazas","payee_tags","loans","payee_merges","accounts")
               private val dateFmt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
-
               private fun q(s: String): String = "\"" + s.replace("\r", " ").replace("\n", " ").replace("\"", "\"\"") + "\""
-
               fun export(ctx: Context): String {
                   val db = Db.get(ctx).readableDatabase
                   val sb = StringBuilder()
@@ -356,7 +354,6 @@ jobs:
                   }
                   return sb.toString()
               }
-
               private fun parseLine(line: String): List<String?> {
                   val out = ArrayList<String?>(); val sb = StringBuilder()
                   var inQ = false; var quoted = false; var i = 0
@@ -371,7 +368,6 @@ jobs:
                   out.add(if (!quoted && sb.isEmpty()) null else sb.toString())
                   return out
               }
-
               fun restore(ctx: Context, text: String): Int {
                   val db = Db.get(ctx).writableDatabase
                   var n = 0; var table: String? = null; var cols: List<String>? = null
@@ -394,7 +390,6 @@ jobs:
                   } finally { db.endTransaction() }
                   return n
               }
-
               fun cleanAll(ctx: Context) {
                   val db = Db.get(ctx).writableDatabase
                   db.beginTransaction()
@@ -423,22 +418,23 @@ jobs:
               var balance: Double? = null, var channel: String = "OTHER", var ref: String? = null, var vpa: String? = null,
               var sender: String = "", var body: String = "", var source: String = "SMS", var status: String = "REGEX",
               var tpl: String = "", var review: Boolean = false, var reviewHash: String? = null, var loanNo: String? = null,
-              var note: String? = null, var voicePath: String? = null
+              var note: String? = null, var voicePath: String? = null, var msgNo: Long = 0
           )
 
-          class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "fintrack.db", null, 8) {
+          class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "fintrack.db", null, 9) {
               companion object {
                   @Volatile private var inst: Db? = null
                   fun get(ctx: Context): Db = inst ?: synchronized(this) { inst ?: Db(ctx.applicationContext).also { inst = it } }
               }
               override fun onCreate(db: SQLiteDatabase) {
-                  db.execSQL("CREATE TABLE txn (id INTEGER PRIMARY KEY AUTOINCREMENT, sms_key TEXT UNIQUE, ts INTEGER NOT NULL, amount REAL NOT NULL, debit INTEGER NOT NULL, merchant TEXT, merchant_key TEXT, category TEXT, institution TEXT, account TEXT, balance REAL, channel TEXT, ref TEXT, vpa TEXT, sender TEXT, body TEXT, source TEXT, status TEXT, tpl TEXT, review INTEGER DEFAULT 0, review_hash TEXT, loan_no TEXT, note TEXT, voice_path TEXT)")
+                  db.execSQL("CREATE TABLE txn (id INTEGER PRIMARY KEY AUTOINCREMENT, msg_no INTEGER DEFAULT 0, sms_key TEXT UNIQUE, ts INTEGER NOT NULL, amount REAL NOT NULL, debit INTEGER NOT NULL, merchant TEXT, merchant_key TEXT, category TEXT, institution TEXT, account TEXT, balance REAL, channel TEXT, ref TEXT, vpa TEXT, sender TEXT, body TEXT, source TEXT, status TEXT, tpl TEXT, review INTEGER DEFAULT 0, review_hash TEXT, loan_no TEXT, note TEXT, voice_path TEXT)")
                   db.execSQL("CREATE INDEX idx_txn_ts ON txn(ts)")
                   db.execSQL("CREATE INDEX idx_txn_tpl ON txn(tpl)")
                   db.execSQL("CREATE INDEX idx_txn_mk ON txn(merchant_key)")
                   db.execSQL("CREATE INDEX idx_txn_rh ON txn(review_hash)")
                   db.execSQL("CREATE INDEX idx_txn_ref ON txn(ref)")
                   db.execSQL("CREATE INDEX idx_txn_loan ON txn(loan_no)")
+                  db.execSQL("CREATE INDEX idx_txn_msgn ON txn(msg_no)")
                   db.execSQL("CREATE TABLE senders (core TEXT PRIMARY KEY, institution TEXT, kind TEXT, user_defined INTEGER DEFAULT 0)")
                   db.execSQL("CREATE TABLE merchant_rules (merchant_key TEXT PRIMARY KEY, display TEXT, category TEXT, weight REAL DEFAULT 1)")
                   db.execSQL("CREATE TABLE parse_patterns (id INTEGER PRIMARY KEY AUTOINCREMENT, sender_core TEXT, tpl TEXT, field TEXT, left_ctx TEXT, right_ctx TEXT, weight REAL DEFAULT 1, UNIQUE(sender_core, tpl, field, left_ctx, right_ctx))")
@@ -452,6 +448,7 @@ jobs:
                   db.execSQL("CREATE TABLE txn_skipped (id INTEGER PRIMARY KEY AUTOINCREMENT, reason TEXT, ref TEXT, body TEXT, ts INTEGER)")
                   db.execSQL("CREATE TABLE subs_detected (merchant_key TEXT PRIMARY KEY, avg_amt REAL, last_ts INTEGER, count INTEGER)")
                   db.execSQL("CREATE TABLE payee_merges (id INTEGER PRIMARY KEY AUTOINCREMENT, survivor_key TEXT, merged_keys TEXT, survivor_name TEXT, merged_at INTEGER, undone INTEGER DEFAULT 0)")
+                  db.execSQL("CREATE TABLE accounts (id INTEGER PRIMARY KEY AUTOINCREMENT, institution TEXT, account TEXT, balance REAL, last_ts INTEGER, excluded INTEGER DEFAULT 0, UNIQUE(institution, account))")
                   seedTollPlazas(db)
               }
               private fun seedTollPlazas(db: SQLiteDatabase) {
@@ -477,7 +474,6 @@ jobs:
                       db.execSQL("CREATE TABLE IF NOT EXISTS loans (loan_no TEXT PRIMARY KEY, lender TEXT, first_seen INTEGER, last_seen INTEGER, msg_count INTEGER DEFAULT 0)")
                       runCatching { db.execSQL("ALTER TABLE txn ADD COLUMN loan_no TEXT") }
                       runCatching { db.execSQL("CREATE INDEX IF NOT EXISTS idx_txn_loan ON txn(loan_no)") }
-                      runCatching { db.execSQL("DROP TABLE IF EXISTS budgets") }
                   }
                   if (oldVersion < 5) runCatching { db.execSQL("ALTER TABLE payees ADD COLUMN alt_upis TEXT") }
                   if (oldVersion < 6) {
@@ -490,6 +486,12 @@ jobs:
                   if (oldVersion < 8) {
                       val hasAny = db.rawQuery("SELECT COUNT(*) FROM toll_plazas", null).use { c -> c.moveToFirst(); c.getLong(0) }
                       if (hasAny == 0L) seedTollPlazas(db)
+                  }
+                  if (oldVersion < 9) {
+                      runCatching { db.execSQL("ALTER TABLE txn ADD COLUMN msg_no INTEGER DEFAULT 0") }
+                      runCatching { db.execSQL("CREATE INDEX IF NOT EXISTS idx_txn_msgn ON txn(msg_no)") }
+                      db.execSQL("CREATE TABLE IF NOT EXISTS accounts (id INTEGER PRIMARY KEY AUTOINCREMENT, institution TEXT, account TEXT, balance REAL, last_ts INTEGER, excluded INTEGER DEFAULT 0, UNIQUE(institution, account))")
+                      db.execSQL("UPDATE txn SET msg_no = id WHERE msg_no = 0")
                   }
               }
               fun rows(sql: String, vararg args: String): List<Map<String, String?>> {
@@ -513,6 +515,7 @@ jobs:
                   put("channel", t.channel); put("ref", t.ref); put("vpa", t.vpa); put("sender", t.sender); put("body", t.body)
                   put("source", t.source); put("status", t.status); put("tpl", t.tpl); put("review", if (t.review) 1 else 0)
                   put("review_hash", t.reviewHash); put("loan_no", t.loanNo); put("note", t.note); put("voice_path", t.voicePath)
+                  if (t.msgNo > 0) put("msg_no", t.msgNo)
               }
               fun insertTxn(t: Txn): Long {
                   val existing = t.smsKey?.let { one("SELECT id FROM txn WHERE sms_key=?", it)?.toLongOrNull() }
@@ -525,7 +528,15 @@ jobs:
                   val id = writableDatabase.insertWithOnConflict("txn", null, values(t), SQLiteDatabase.CONFLICT_IGNORE)
                   if (id > 0) {
                       t.id = id
+                      if (t.msgNo == 0L) {
+                          writableDatabase.execSQL("UPDATE txn SET msg_no=? WHERE id=?", arrayOf(id, id))
+                          t.msgNo = id
+                      }
                       if (t.review) writableDatabase.update("txn", ContentValues().apply { put("review_hash", computeReviewHash(t)) }, "id=?", arrayOf(id.toString()))
+                      runCatching {
+                          writableDatabase.execSQL("INSERT INTO accounts(institution, account, balance, last_ts, excluded) VALUES(?,?,?,?,0) ON CONFLICT(institution, account) DO UPDATE SET balance=COALESCE(excluded.balance, accounts.balance), last_ts=MAX(accounts.last_ts, excluded.last_ts)",
+                              arrayOf(t.institution, t.account ?: "", t.balance, t.ts))
+                      }
                   }
                   return id
               }
@@ -543,10 +554,11 @@ jobs:
                       account = s("account"), balance = d("balance"), channel = s("channel") ?: "OTHER", ref = s("ref"), vpa = s("vpa"),
                       sender = s("sender") ?: "", body = s("body") ?: "", source = s("source") ?: "SMS", status = s("status") ?: "REGEX",
                       tpl = s("tpl") ?: "", review = c.getInt(c.getColumnIndexOrThrow("review")) == 1, reviewHash = s("review_hash"),
-                      loanNo = s("loan_no"), note = s("note"), voicePath = s("voice_path")
+                      loanNo = s("loan_no"), note = s("note"), voicePath = s("voice_path"),
+                      msgNo = runCatching { c.getLong(c.getColumnIndexOrThrow("msg_no")) }.getOrDefault(0L)
                   )
               }
-              fun queryTxns(where: String = "1=1", args: Array<String> = emptyArray(), limit: Int = 500): List<Txn> {
+              fun queryTxns(where: String = "1=1", args: Array<String> = emptyArray(), limit: Int = 100000): List<Txn> {
                   val out = ArrayList<Txn>()
                   readableDatabase.rawQuery("SELECT * FROM txn WHERE $where ORDER BY ts DESC LIMIT $limit", args).use { c -> while (c.moveToNext()) out.add(toTxn(c)) }
                   return out
@@ -577,11 +589,9 @@ jobs:
               data class Result(val assets: Double, val liabilities: Double, val bank: List<Triple<String, String, Double>>)
               fun compute(ctx: Context): Result {
                   val db = Db.get(ctx)
-                  val bank = db.rows("SELECT institution, account, balance FROM txn t WHERE balance IS NOT NULL AND source='SMS' AND ts = (SELECT MAX(ts) FROM txn WHERE institution=t.institution AND IFNULL(account,'')=IFNULL(t.account,'') AND balance IS NOT NULL)").map { Triple(it["institution"] ?: "", it["account"] ?: "", it["balance"]?.toDoubleOrNull() ?: 0.0) }
-                  val seen = HashSet<String>()
-                  val bankUnique = bank.filter { seen.add(it.first + "|" + it.second) }
+                  val bank = db.rows("SELECT institution, account, balance FROM accounts WHERE excluded=0 AND balance IS NOT NULL").map { Triple(it["institution"] ?: "", it["account"] ?: "", it["balance"]?.toDoubleOrNull() ?: 0.0) }
                   val manualAssets = db.num("SELECT SUM(amount) FROM net_items WHERE kind='ASSET'")
-                  return Result(bankUnique.sumOf { it.third } + manualAssets, 0.0, bankUnique)
+                  return Result(bank.sumOf { it.third } + manualAssets, 0.0, bank)
               }
           }
           EOF_6
@@ -1251,7 +1261,6 @@ jobs:
               private val splitRe = Regex("""[^a-z0-9]+""")
               private val aliases = mapOf("anantram" to "anatram")
               private fun toks(s: String): Set<String> = s.lowercase().split(splitRe).filter { it.length >= 3 && it !in stop }.toSet()
-
               @Synchronized
               fun load(ctx: Context) {
                   if (loaded) return
@@ -1269,9 +1278,7 @@ jobs:
                   } catch (_: Exception) {}
                   index = idx; loaded = true
               }
-
               fun count(ctx: Context): Int { load(ctx); return index.values.flatten().toSet().size }
-
               fun match(ctx: Context, text: String, amount: Double): Plaza? {
                   load(ctx)
                   val raw = toks(text); if (raw.isEmpty()) return null
@@ -1290,10 +1297,8 @@ jobs:
                   }
                   return best
               }
-
               private val vehicleRe = Regex("""\b([A-Z]{2}[\s\-]?\d{1,2}[\s\-]?[A-Z]{1,3}[\s\-]?\d{4})\b""")
               private val plazaNameRe = Regex("""(?i)(?:at|for)\s+([A-Z][A-Za-z .\-]{2,40}?)(?:\s*\(|\s+on\b|$)""")
-
               fun record(ctx: Context, t: Txn) {
                   val db = Db.get(ctx)
                   db.exec("DELETE FROM toll_trips WHERE txn_id=?", t.id)
@@ -1306,7 +1311,6 @@ jobs:
                       db.exec("INSERT OR REPLACE INTO toll_trips(txn_id, plaza_id, plaza, state, lat, lon, ts, amount, vehicle) VALUES(?,?,?,?,?,?,?,?,?)", t.id, 0, plazaFromBody, "", 0.0, 0.0, t.ts, t.amount, veh)
                   }
               }
-
               fun rematchAll(ctx: Context): Int {
                   load(ctx)
                   val db = Db.get(ctx)
@@ -1315,15 +1319,12 @@ jobs:
                   for (t in list) { record(ctx, t); n++ }
                   return n
               }
-
               private val dayFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-
               private fun plazaCoord(name: String): DoubleArray? {
                   TOLL_SEED[name]?.let { return it }
                   for ((k, v) in TOLL_SEED) if (k.equals(name, ignoreCase = true)) return v
                   return null
               }
-
               fun fetchRoadRoute(waypoints: List<DoubleArray>): List<DoubleArray> {
                   if (waypoints.size < 2) return waypoints.map { doubleArrayOf(it[1], it[0]) }
                   return try {
@@ -1331,7 +1332,7 @@ jobs:
                       val url = URL("https://router.project-osrm.org/route/v1/driving/$coords?overview=full&geometries=polyline")
                       val conn = url.openConnection() as HttpURLConnection
                       conn.requestMethod = "GET"; conn.connectTimeout = 8000; conn.readTimeout = 8000
-                      conn.setRequestProperty("User-Agent", "FinTrack/10.3")
+                      conn.setRequestProperty("User-Agent", "FinTrack/10.4")
                       if (conn.responseCode != 200) throw RuntimeException("OSRM HTTP ${conn.responseCode}")
                       val txt = conn.inputStream.bufferedReader().use { it.readText() }
                       val json = org.json.JSONObject(txt)
@@ -1343,7 +1344,6 @@ jobs:
                       decodePolyline(geom)
                   } catch (_: Exception) { waypoints.map { doubleArrayOf(it[1], it[0]) } }
               }
-
               fun decodePolyline(encoded: String): List<DoubleArray> {
                   val points = ArrayList<DoubleArray>()
                   var index = 0; val len = encoded.length
@@ -1361,7 +1361,6 @@ jobs:
                   }
                   return points
               }
-
               fun buildTrips(ctx: Context): Pair<List<TollTrip>, Double> {
                   val db = Db.get(ctx)
                   val rows = db.rows("SELECT plaza, lat, lon, ts, amount FROM toll_trips ORDER BY ts ASC")
@@ -1568,7 +1567,7 @@ jobs:
               }
               fun findDuplicates(ctx: Context): List<DupGroup> {
                   val db = Db.get(ctx)
-                  val rows = db.queryTxns("1=1", emptyArray(), 5000).sortedBy { it.ts }
+                  val rows = db.queryTxns("1=1", emptyArray(), 100000).sortedBy { it.ts }
                   val used = HashSet<Long>()
                   val out = ArrayList<DupGroup>()
                   for (i in rows.indices) {
@@ -1599,6 +1598,10 @@ jobs:
                       for (t in txns) out.add(DupRow(t, g.key, deleteSet.contains(t.id)))
                   }
                   return out
+              }
+              fun cleanupOrphanPayees(ctx: Context) {
+                  val db = Db.get(ctx)
+                  db.exec("DELETE FROM payees WHERE merchant_key NOT IN (SELECT DISTINCT merchant_key FROM txn WHERE merchant_key IS NOT NULL)")
               }
           }
           EOF_16
@@ -1885,24 +1888,27 @@ jobs:
           import java.util.Locale
 
           object C {
-              var BG: Int = Color.parseColor("#0E1014"); private set
-              var CARD: Int = Color.parseColor("#181B22"); private set
-              var CARD2: Int = Color.parseColor("#262B38"); private set
-              var TEXT: Int = Color.parseColor("#ECEFF4"); private set
-              var MUTED: Int = Color.parseColor("#8B93A3"); private set
-              var ACCENT: Int = Color.parseColor("#5B9CFF"); private set
-              var GREEN: Int = Color.parseColor("#34D399"); private set
-              var RED: Int = Color.parseColor("#FF6B6B"); private set
-              var AMBER: Int = Color.parseColor("#FBBF24"); private set
+              var BG: Int = Color.parseColor("#F5F5F5"); private set
+              var CARD: Int = Color.parseColor("#FFFFFF"); private set
+              var CARD2: Int = Color.parseColor("#EDE7F6"); private set
+              var TEXT: Int = Color.parseColor("#1A1A1A"); private set
+              var MUTED: Int = Color.parseColor("#7A7A7A"); private set
+              var ACCENT: Int = Color.parseColor("#673AB7"); private set
+              var ACCENT2: Int = Color.parseColor("#512DA8"); private set
+              var GREEN: Int = Color.parseColor("#10B981"); private set
+              var RED: Int = Color.parseColor("#FF4081"); private set
+              var AMBER: Int = Color.parseColor("#D97706"); private set
               fun applyTheme(isNight: Boolean) {
                   if (isNight) {
-                      BG = Color.parseColor("#0E1014"); CARD = Color.parseColor("#181B22"); CARD2 = Color.parseColor("#262B38")
-                      TEXT = Color.parseColor("#ECEFF4"); MUTED = Color.parseColor("#8B93A3")
-                      ACCENT = Color.parseColor("#5B9CFF"); GREEN = Color.parseColor("#34D399"); RED = Color.parseColor("#FF6B6B"); AMBER = Color.parseColor("#FBBF24")
+                      BG = Color.parseColor("#121212"); CARD = Color.parseColor("#1E1E1E"); CARD2 = Color.parseColor("#2A2438")
+                      TEXT = Color.parseColor("#ECEFF4"); MUTED = Color.parseColor("#9E9E9E")
+                      ACCENT = Color.parseColor("#B39DDB"); ACCENT2 = Color.parseColor("#9575CD")
+                      GREEN = Color.parseColor("#34D399"); RED = Color.parseColor("#FF4081"); AMBER = Color.parseColor("#FBBF24")
                   } else {
-                      BG = Color.parseColor("#F6F7FB"); CARD = Color.parseColor("#FFFFFF"); CARD2 = Color.parseColor("#E8EAF2")
-                      TEXT = Color.parseColor("#10131A"); MUTED = Color.parseColor("#5F6675")
-                      ACCENT = Color.parseColor("#2563EB"); GREEN = Color.parseColor("#10B981"); RED = Color.parseColor("#DC2626"); AMBER = Color.parseColor("#D97706")
+                      BG = Color.parseColor("#F5F5F5"); CARD = Color.parseColor("#FFFFFF"); CARD2 = Color.parseColor("#EDE7F6")
+                      TEXT = Color.parseColor("#1A1A1A"); MUTED = Color.parseColor("#7A7A7A")
+                      ACCENT = Color.parseColor("#673AB7"); ACCENT2 = Color.parseColor("#512DA8")
+                      GREEN = Color.parseColor("#10B981"); RED = Color.parseColor("#FF4081"); AMBER = Color.parseColor("#D97706")
                   }
               }
           }
@@ -1911,7 +1917,7 @@ jobs:
           fun Context.tv(s: CharSequence, size: Float = 14f, color: Int = C.TEXT, bold: Boolean = false): TextView = TextView(this).apply { text = s; textSize = size; setTextColor(color); if (bold) setTypeface(null, Typeface.BOLD) }
           fun Context.shape(fill: Int, radius: Int = 14): GradientDrawable = GradientDrawable().apply { setColor(fill); cornerRadius = dp(radius).toFloat() }
           fun Context.vbox(pad: Int = 0): LinearLayout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(pad), dp(pad), dp(pad), dp(pad)) }
-          fun Context.card(): LinearLayout = vbox(14).apply { background = shape(C.CARD) }
+          fun Context.card(): LinearLayout = vbox(14).apply { background = shape(C.CARD); elevation = dp(2).toFloat() }
           fun Context.icon(res: Int, tint: Int = C.TEXT, sizeDp: Int = 22): ImageView = ImageView(this).apply { setImageResource(res); setColorFilter(tint); layoutParams = LinearLayout.LayoutParams(dp(sizeDp), dp(sizeDp)) }
           fun Context.pill(label: String, selected: Boolean, onClick: () -> Unit): TextView =
               tv(label, 13f, if (selected) Color.WHITE else C.TEXT).apply {
@@ -1987,723 +1993,6 @@ jobs:
           }
           EOF_23
 
-          cat > app/src/main/java/com/example/fintrack/Screens1.kt <<'EOF_20'
-          package com.example.fintrack
-
-          import android.content.Context
-          import android.graphics.Color
-          import android.view.Gravity
-          import android.view.View
-          import android.view.ViewGroup
-          import android.widget.CheckBox
-          import android.widget.EditText
-          import android.widget.HorizontalScrollView
-          import android.widget.LinearLayout
-          import android.widget.ListView
-          import android.widget.ScrollView
-          import androidx.appcompat.app.AlertDialog
-          import java.text.SimpleDateFormat
-          import java.util.Calendar
-          import java.util.Date
-          import java.util.Locale
-
-          abstract class Screen(val act: MainActivity) { abstract val root: View; abstract fun refresh() }
-
-          class LedgerScreen(act: MainActivity) : Screen(act) {
-              data class Filter(val mode: String = "all", val category: String? = null, val year: Int? = null, val month: Int? = null)
-              private var filter = Filter(); private var query = ""; private var selectMode = false
-              private val selected = LinkedHashSet<Long>()
-              private val summary = act.tv("", 12f, C.MUTED).apply { setPadding(act.dp(14), act.dp(4), act.dp(14), act.dp(4)) }
-              private val chips = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; setPadding(act.dp(8), 0, act.dp(8), 0) }
-              sealed class Row {
-                  data class TxnRow(val t: Txn) : Row()
-                  data class GroupRow(val hash: String, val count: Int, val total: Double, val sampleMerchant: String, val sampleCategory: String, val sampleDebit: Boolean) : Row()
-              }
-              private val adapter = RowAdapter<Row>(act, emptyList()) { item, r ->
-                  when (item) {
-                      is Row.GroupRow -> {
-                          r.icon.setImageResource(R.drawable.ic_bank); r.icon.setColorFilter(C.AMBER)
-                          r.title.text = "⚠ ${item.count} txns · ${inr(item.total, true)} · ${item.sampleMerchant}"
-                          r.sub.text = "Group · ${item.sampleCategory} · tap to fix all"
-                          r.amt.text = "Fix all"; r.amt.setTextColor(C.AMBER)
-                      }
-                      is Row.TxnRow -> {
-                          val t = item.t
-                          r.icon.setImageResource(Icons.category(act, t.category, R.drawable.ic_bank)); r.icon.clearColorFilter()
-                          r.title.text = (if (selectMode && selected.contains(t.id)) "☑ " else "") + t.merchant
-                          r.sub.text = fmtDate(t.ts) + " • " + t.institution + " • " + t.category + (if (t.source == "NOTIF") " • 🔔" else "")
-                          r.amt.text = (if (t.debit) "-" else "+") + inr(t.amount, true); r.amt.setTextColor(if (t.debit) C.RED else C.GREEN)
-                      }
-                  }
-              }
-              private lateinit var list: ListView
-              init {
-                  list = ListView(act).apply {
-                      divider = null; adapter = this@LedgerScreen.adapter
-                      setOnItemClickListener { _, _, pos, _ ->
-                          when (val item = this@LedgerScreen.adapter.items.getOrNull(pos)) {
-                              is Row.TxnRow -> { if (selectMode) { if (!selected.add(item.t.id)) selected.remove(item.t.id); this@LedgerScreen.adapter.notifyDataSetChanged() } else showTxn(item.t) }
-                              is Row.GroupRow -> openGroupFix(item)
-                              null -> {}
-                          }
-                      }
-                      setOnItemLongClickListener { _, _, pos, _ ->
-                          val item = this@LedgerScreen.adapter.items.getOrNull(pos) as? Row.TxnRow ?: return@setOnItemLongClickListener false
-                          AlertDialog.Builder(act)
-                              .setItems(arrayOf("Delete this transaction", "Edit", "Enter select mode")) { _, which ->
-                                  when (which) {
-                                      0 -> { PayeeOps.bulkDelete(act, listOf(item.t.id)); act.toast("Deleted"); act.refreshAll() }
-                                      1 -> showTxn(item.t)
-                                      2 -> { selectMode = true; selected.add(item.t.id); refresh() }
-                                  }
-                              }
-                              .setNegativeButton("Cancel", null).show()
-                          true
-                      }
-                  }
-              }
-              override val root: View = act.vbox().apply {
-                  val search = EditText(act).apply {
-                      hint = "Search · #cat · >500 · <2024-06"; setHintTextColor(C.MUTED); setTextColor(C.TEXT); setSingleLine()
-                      setPadding(act.dp(14), act.dp(10), act.dp(14), act.dp(10)); background = act.shape(C.CARD, 12)
-                      addTextChangedListener(object : android.text.TextWatcher {
-                          override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                          override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                          override fun afterTextChanged(s: android.text.Editable?) { query = s?.toString()?.trim() ?: ""; refresh() }
-                      })
-                  }
-                  put(search, 8); put(HorizontalScrollView(act).apply { isHorizontalScrollBarEnabled = false; addView(chips) }, 4); put(summary, 0); put(list, 0, 1f)
-              }
-              fun setFilter(f: Filter) { filter = f; refresh() }
-              override fun refresh() {
-                  chips.removeAllViews()
-                  for ((k, label) in listOf("all" to "All", "review" to "⚠ Review", "debit" to "Kharch", "credit" to "Mila")) chips.addView(act.pill(label, filter.mode == k) { filter = Filter(mode = k); refresh() })
-                  if (filter.mode == "cat" && filter.category != null) chips.addView(act.pill("Cat: ${filter.category} ✕", true) { filter = Filter(); refresh() })
-                  if (filter.year != null && filter.month != null) {
-                      val label = "${filter.year}-${String.format("%02d", filter.month!! + 1)} ✕"
-                      chips.addView(act.pill(label, true) { filter = filter.copy(year = null, month = null); refresh() })
-                  }
-                  chips.addView(act.pill("Scan duplicates", false) { showDuplicates() })
-                  if (query.isNotBlank()) chips.addView(act.pill("Merge to payee", false) { askBulkMerge() })
-                  if (selectMode) {
-                      chips.addView(act.pill("Delete (${selected.size})", true) { act.bulkDelete(selected.toList()); selectMode = false; selected.clear(); refresh() })
-                      chips.addView(act.pill("Categorize (${selected.size})", true) { act.bulkCategory(selected.toList()); selectMode = false; selected.clear(); refresh() })
-                      chips.addView(act.pill("Cancel", false) { selectMode = false; selected.clear(); refresh() })
-                  }
-                  val all = currentRows()
-                  if (filter.mode == "review") {
-                      val groups = LinkedHashMap<String, MutableList<Txn>>()
-                      for (t in all) { if (!t.review) continue; val h = t.reviewHash ?: Db.get(act).computeReviewHash(t); groups.getOrPut(h) { ArrayList() }.add(t) }
-                      val rows = ArrayList<Row>()
-                      for ((h, list) in groups) { val sample = list.first(); rows.add(Row.GroupRow(h, list.size, list.sumOf { it.amount }, sample.merchant, sample.category, sample.debit)) }
-                      adapter.items = rows; summary.text = "${all.count { it.review }} entries in ${groups.size} groups"
-                  } else {
-                      adapter.items = all.map { Row.TxnRow(it) }
-                      val out = all.filter { it.debit }.sumOf { it.amount }; val inn = all.filter { !it.debit }.sumOf { it.amount }
-                      summary.text = "${all.size} entries  •  Kharch ${inr(out)}  •  Mila ${inr(inn)}"
-                  }
-                  adapter.notifyDataSetChanged()
-              }
-
-              private fun currentRows(): List<Txn> {
-                  val where = StringBuilder("1=1"); val args = ArrayList<String>()
-                  when (filter.mode) { "debit" -> where.append(" AND debit=1"); "credit" -> where.append(" AND debit=0"); "cat" -> { where.append(" AND category=?"); args.add(filter.category ?: "") } }
-                  if (filter.year != null && filter.month != null) {
-                      val cal = Calendar.getInstance().apply { set(Calendar.YEAR, filter.year!!); set(Calendar.MONTH, filter.month!!); set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }
-                      val start = cal.timeInMillis; cal.add(Calendar.MONTH, 1)
-                      where.append(" AND ts>=? AND ts<?"); args.add(start.toString()); args.add(cal.timeInMillis.toString())
-                  }
-                  val q = query
-                  if (q.isNotEmpty()) {
-                      val tokens = q.split(" "); val plain = StringBuilder()
-                      for (t in tokens) {
-                          when {
-                              t.startsWith("#") -> { where.append(" AND category=?"); args.add(t.substring(1).replaceFirstChar { it.uppercase() }) }
-                              t.startsWith(">") && t.substring(1).toDoubleOrNull() != null -> { where.append(" AND amount>?"); args.add(t.substring(1)) }
-                              t.startsWith("<") && t.length > 7 && t.matches(Regex("<\\d{4}-\\d{2}")) -> {
-                                  val parts = t.substring(1).split("-"); val y = parts[0].toInt(); val m = parts[1].toInt() - 1
-                                  val c = Calendar.getInstance().apply { set(Calendar.YEAR, y); set(Calendar.MONTH, m); set(Calendar.DAY_OF_MONTH, 1) }
-                                  where.append(" AND ts<?"); args.add(c.timeInMillis.toString())
-                              }
-                              else -> { if (plain.isNotEmpty()) plain.append(" "); plain.append(t) }
-                          }
-                      }
-                      if (plain.isNotEmpty()) { where.append(" AND (merchant LIKE ? OR body LIKE ? OR ref LIKE ? OR vpa LIKE ?)"); repeat(4) { args.add("%$plain%") } }
-                  }
-                  return Db.get(act).queryTxns(where.toString(), args.toTypedArray(), 1000)
-              }
-
-              private fun askBulkMerge() {
-                  val rows = currentRows()
-                  if (rows.isEmpty()) { act.toast("Is search me kuch nahi mila"); return }
-                  val keys = rows.map { Learner.norm(it.merchant) }.filter { it.isNotBlank() && it != "unknown" }.distinct()
-                  if (keys.isEmpty()) { act.toast("In txns me koi payee nahi hai"); return }
-                  val existing = Db.get(act).rows("SELECT merchant_key, display FROM payees WHERE merchant_key IN (" + keys.joinToString(",") { "?" } + ") ORDER BY display", *keys.toTypedArray())
-                  val names = existing.map { it["display"] ?: it["merchant_key"] ?: "" }.toMutableList()
-                  names.add("✏ Custom name…")
-                  AlertDialog.Builder(act).setTitle("In ${rows.size} txns ko kis payee me bhejein?")
-                      .setItems(names.toTypedArray()) { _, which ->
-                          if (which == names.size - 1) act.showForm("Custom payee name", listOf(Field("Naam", keys.first()))) { v -> doBulkReassign(keys, v[0]) }
-                          else doBulkReassign(keys, names[which])
-                      }
-                      .setNegativeButton("Cancel", null).show()
-              }
-
-              private fun doBulkReassign(fromKeys: List<String>, newName: String) {
-                  val target = newName.trim()
-                  if (target.isBlank()) { act.toast("Naam khali nahi ho sakta"); return }
-                  Thread { PayeeOps.reassignToPayee(act, fromKeys, Learner.norm(target), target); act.runOnUiThread { act.toast("Merged ${fromKeys.size} payees → $target"); act.refreshAll() } }.start()
-              }
-
-              private fun showDuplicates() {
-                  val rows = PayeeOps.flattenDuplicates(act)
-                  if (rows.isEmpty()) { act.toast("Koi duplicate nahi mila"); return }
-                  val container = act.vbox(8)
-                  container.addView(act.tv("${rows.size} rows in ${rows.map { it.groupKey }.distinct().size} groups", 12f, C.MUTED))
-                  val checkboxes = LinkedHashMap<Long, CheckBox>()
-                  for (row in rows) {
-                      val t = row.txn
-                      val line = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, act.dp(6), 0, act.dp(6)) }
-                      val cb = CheckBox(act).apply { isChecked = row.defaultDelete }
-                      checkboxes[t.id] = cb
-                      line.addView(cb)
-                      val info = act.vbox(4)
-                      info.addView(act.tv("${fmtDateTime(t.ts)}  •  ${t.institution}", 12f, C.TEXT, true))
-                      val upi = if (!t.vpa.isNullOrBlank()) "  •  ${t.vpa}" else ""
-                      info.addView(act.tv("${t.merchant}$upi", 12f, if (t.merchant.trim().lowercase() == "unknown") C.RED else C.MUTED))
-                      info.addView(act.tv((if (t.debit) "-" else "+") + inr(t.amount, true), 13f, if (t.debit) C.RED else C.GREEN, true))
-                      line.addView(info, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-                      container.addView(line)
-                  }
-                  AlertDialog.Builder(act).setTitle("Duplicates — tick to delete")
-                      .setView(ScrollView(act).apply { addView(container) })
-                      .setPositiveButton("Delete ticked") { _, _ ->
-                          var n = 0
-                          for ((id, cb) in checkboxes) if (cb.isChecked) { Db.get(act).deleteTxn(id); n++ }
-                          act.toast("$n deleted"); act.refreshAll()
-                      }
-                      .setNegativeButton("Cancel", null)
-                      .setNeutralButton("Smart select") { _, _ ->
-                          val fresh = PayeeOps.flattenDuplicates(act)
-                          for (r in fresh) checkboxes[r.txn.id]?.isChecked = r.defaultDelete
-                      }
-                      .show()
-              }
-
-              private fun openGroupFix(g: Row.GroupRow) {
-                  act.showForm("Fix group (${g.count} txns)",
-                      listOf(Field("Kisko / dukaan", g.sampleMerchant), Field("Type", if (g.sampleDebit) "Debit (kharch)" else "Credit (mila)", options = listOf("Debit (kharch)", "Credit (mila)")), Field("Category", g.sampleCategory, options = Categories.ALL)),
-                      okLabel = "Apply to all"
-                  ) { v ->
-                      AlertDialog.Builder(act).setMessage("Apply to all ${g.count} transactions in this group?")
-                          .setPositiveButton("Haan") { _, _ -> PayeeOps.applyGroupFix(act, g.hash, v[0].ifBlank { g.sampleMerchant }, v[2], v[1].startsWith("Debit")); act.refreshAll() }
-                          .setNegativeButton("Nahi", null).show()
-                  }
-              }
-
-              private fun showTxn(t: Txn) {
-                  val msg = fmtDateTime(t.ts) + "  •  " + t.institution + "\n" + (if (t.debit) "Kharch " else "Mila ") + inr(t.amount, true) + "  •  " + t.category +
-                      (if (t.balance != null) "\nBalance: " + inr(t.balance ?: 0.0, true) else "") + "\nSource: ${t.source}  •  Parse: ${t.status}" +
-                      (if (t.vpa != null) "  •  UPI: ${t.vpa}" else "") + (if (t.ref != null) "  •  Ref: ${t.ref}" else "") +
-                      (if (t.body.isNotEmpty()) "\n\n" + t.body else "")
-                  val builder = AlertDialog.Builder(act).setTitle(t.merchant).setMessage(msg)
-                      .setPositiveButton("Edit / Sahi karo") { _, _ -> editTxn(t) }
-                      .setNeutralButton("Delete", null)
-                      .setNegativeButton("Band karo", null)
-                  val ad = builder.create()
-                  ad.setOnShowListener {
-                      ad.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
-                          PayeeOps.bulkDelete(act, listOf(t.id)); act.toast("Deleted"); act.refreshAll(); ad.dismiss()
-                      }
-                  }
-                  ad.show()
-              }
-
-              private fun editTxn(t: Txn) {
-                  act.showForm("Sahi karo (app seekhegi)",
-                      listOf(Field("Kisko / dukaan", t.merchant), Field("Amount", t.amount.toString(), true), Field("Type", if (t.debit) "Debit (kharch)" else "Credit (mila)", options = listOf("Debit (kharch)", "Credit (mila)")), Field("Category", t.category, options = Categories.ALL))
-                  ) { v ->
-                      val n = t.copy(merchant = v[0].ifBlank { t.merchant }, amount = v[1].toDoubleOrNull() ?: t.amount, debit = v[2].startsWith("Debit"), category = v[3], status = "USER", review = false, reviewHash = null)
-                      val db = Db.get(act); db.updateTxn(n); Repo.ensurePayee(act, n)
-                      if (n.category == "Travel" || n.channel == "FASTAG") Tolls.record(act, n) else db.exec("DELETE FROM toll_trips WHERE txn_id=?", n.id)
-                      Learner.learnFromCorrection(act, t, n); act.refreshAll()
-                  }
-              }
-              fun addCash() {
-                  act.showForm("Cash entry",
-                      listOf(Field("Amount", "", true), Field("Type", "Spent (kharch)", options = listOf("Spent (kharch)", "Received (mila)")), Field("Kis kaam / naam", ""), Field("Category", "Other", options = Categories.ALL))
-                  ) { v ->
-                      val amt = v[0].toDoubleOrNull(); if (amt == null || amt <= 0) { act.toast("Amount sahi daalo"); return@showForm }
-                      val t = Txn(ts = System.currentTimeMillis(), amount = amt, debit = v[1].startsWith("Spent"), merchant = v[2].ifBlank { "Cash" }, category = v[3], institution = "Cash", channel = "CASH", source = "CASH", status = "USER")
-                      Repo.save(act, t); act.refreshAll()
-                  }
-              }
-          }
-          EOF_20
-
-          cat > app/src/main/java/com/example/fintrack/Screens2.kt <<'EOF_21'
-          package com.example.fintrack
-
-          import android.content.Context
-          import android.content.Intent
-          import android.graphics.Color
-          import android.net.Uri
-          import android.util.AttributeSet
-          import android.view.Gravity
-          import android.view.View
-          import android.view.ViewGroup
-          import android.widget.CheckBox
-          import android.widget.EditText
-          import android.widget.HorizontalScrollView
-          import android.widget.LinearLayout
-          import android.widget.ListView
-          import android.widget.ScrollView
-          import androidx.appcompat.app.AlertDialog
-          import org.osmdroid.tileprovider.tilesource.OnlineTileSourceBase
-          import org.osmdroid.util.BoundingBox
-          import org.osmdroid.util.GeoPoint
-          import org.osmdroid.util.MapTileIndex
-          import org.osmdroid.views.MapView
-          import org.osmdroid.views.overlay.Marker
-          import org.osmdroid.views.overlay.Polyline
-          import java.text.SimpleDateFormat
-          import java.util.Date
-          import java.util.Locale
-
-          private val OSMFR_HOT = object : OnlineTileSourceBase(
-              "OSM-FR-HOT", 0, 19, 256, ".png",
-              arrayOf("https://a.tile.openstreetmap.fr/hot/", "https://b.tile.openstreetmap.fr/hot/", "https://c.tile.openstreetmap.fr/hot/"),
-              "© OpenStreetMap contributors, Tiles: OSM-FR"
-          ) {
-              override fun getTileURLString(pMapTileIndex: Long): String =
-                  baseUrl + MapTileIndex.getZoom(pMapTileIndex) + "/" + MapTileIndex.getX(pMapTileIndex) + "/" + MapTileIndex.getY(pMapTileIndex) + mImageFilenameEnding
-          }
-
-          class RouteMapView @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? = null) : MapView(ctx, attrs) {
-              class Pt(val lat: Double, val lon: Double, val label: String, val ts: Long)
-              class Trip(val direction: String, val checkpoints: List<Pt>, val roadPolyline: List<DoubleArray>)
-              init {
-                  setTileSource(OSMFR_HOT); setMultiTouchControls(true); setBuiltInZoomControls(false)
-                  controller.setZoom(5.0); controller.setCenter(GeoPoint(22.0, 79.0))
-                  try { overlayManager.tilesOverlay.setColorFilter(null) } catch (_: Exception) {}
-              }
-              fun setTrips(trips: List<Trip>) {
-                  overlays.clear()
-                  val allPts = ArrayList<GeoPoint>()
-                  for (trip in trips) {
-                      val isGoing = trip.direction == "Going"
-                      val color = if (isGoing) Color.parseColor("#2563EB") else Color.parseColor("#DC2626")
-                      if (trip.roadPolyline.size >= 2) {
-                          val polyline = Polyline()
-                          polyline.setPoints(trip.roadPolyline.map { GeoPoint(it[0], it[1]) })
-                          polyline.outlinePaint.color = color
-                          polyline.outlinePaint.strokeWidth = if (isGoing) 12f else 8f
-                          overlays.add(polyline)
-                      }
-                      for (cp in trip.checkpoints) {
-                          allPts.add(GeoPoint(cp.lat, cp.lon))
-                          val m = Marker(this); m.position = GeoPoint(cp.lat, cp.lon)
-                          m.title = "${if (isGoing) "🟢" else "🔴"} ${cp.label}"
-                          m.snippet = SimpleDateFormat("HH:mm", Locale.US).format(Date(cp.ts))
-                          m.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM); overlays.add(m)
-                      }
-                  }
-                  if (allPts.isNotEmpty()) {
-                      try { zoomToBoundingBox(BoundingBox.fromGeoPoints(allPts), true, 80) } catch (_: Exception) {}
-                  }
-                  invalidate()
-              }
-          }
-
-          class TravelScreen(act: MainActivity) : Screen(act) {
-              private var selDay: String? = null
-              private var trips: List<TollTrip> = emptyList()
-              private var total = 0.0
-              private val summary = act.tv("", 13f, C.MUTED).apply { setPadding(act.dp(14), act.dp(8), act.dp(14), act.dp(2)) }
-              private val chips = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; setPadding(act.dp(8), 0, act.dp(8), 0) }
-              private val map = RouteMapView(act)
-              private val detail = act.vbox(10)
-              override val root: View = act.vbox().apply {
-                  put(summary, 0)
-                  put(HorizontalScrollView(act).apply { isHorizontalScrollBarEnabled = false; addView(chips) }, 2)
-                  put(map, 4); (getChildAt(childCount - 1).layoutParams as LinearLayout.LayoutParams).height = act.dp(360)
-                  put(ScrollView(act).apply { addView(detail) }, 4, 1f)
-              }
-              override fun refresh() {
-                  Thread {
-                      val (built, sum) = Tolls.buildTrips(act)
-                      act.runOnUiThread { trips = built; total = sum; render() }
-                  }.start()
-              }
-              private fun render() {
-                  summary.text = "${trips.size} trips  •  Total toll ${inr(total)}\nSolid blue = Going, red = Returning"
-                  chips.removeAllViews()
-                  chips.addView(act.pill("All", selDay == null) { selDay = null; render() })
-                  val days = trips.map { it.dayKey }.distinct().reversed()
-                  for (d in days.take(30)) chips.addView(act.pill(d, selDay == d) { selDay = d; render() })
-                  chips.addView(act.pill("Fix Toll SMS", false) { Thread { val n = Tolls.rematchAll(act); act.runOnUiThread { act.toast("$n toll txns re-matched"); refresh() } }.start() })
-                  chips.addView(act.pill("Reload tiles", false) { map.invalidate(); act.toast("Tile cache reloaded") })
-                  val visible = if (selDay == null) trips else trips.filter { it.dayKey == selDay }
-                  val tripsForMap = visible.map { t -> RouteMapView.Trip(t.direction, t.checkpoints.map { RouteMapView.Pt(it.lat, it.lon, it.plaza, it.ts) }, t.roadPolyline) }
-                  map.setTrips(tripsForMap)
-                  detail.removeAllViews()
-                  if (visible.isEmpty()) { detail.addView(act.tv("FASTag toll SMS milte hi yahan trips dikhengi.", 12f, C.MUTED)); return }
-                  for (t in visible) {
-                      val card = act.card()
-                      val head = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-                      head.put(act.tv(t.dayKey, 14f, C.TEXT, true), 0, 1f)
-                      head.put(act.tv(t.direction, 11f, if (t.direction == "Going") C.ACCENT else C.RED, true), 0)
-                      card.addView(head)
-                      card.addView(act.tv("📍 ${t.title}", 12f, C.MUTED))
-                      card.addView(act.tv("Total toll: ${inr(t.total, true)}", 14f, C.TEXT, true))
-                      detail.put(card, 10)
-                  }
-              }
-          }
-
-          class PayeesScreen(act: MainActivity) : Screen(act) {
-              private var sortMode = "count"; private var selectMode = false; private var query = ""
-              private val selected = LinkedHashSet<String>()
-              private val sortChips = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; setPadding(act.dp(8), 0, act.dp(8), 0) }
-              private val summary = act.tv("", 12f, C.MUTED).apply { setPadding(act.dp(14), act.dp(8), act.dp(14), act.dp(4)) }
-              private val search: EditText = EditText(act).apply {
-                  hint = "Search payee / UPI"; setHintTextColor(C.MUTED); setTextColor(C.TEXT); setSingleLine()
-                  setPadding(act.dp(14), act.dp(10), act.dp(14), act.dp(10)); background = act.shape(C.CARD, 12)
-                  addTextChangedListener(object : android.text.TextWatcher {
-                      override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                      override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                      override fun afterTextChanged(s: android.text.Editable?) { query = s?.toString()?.trim() ?: ""; refresh() }
-                  })
-              }
-              private val adapter = RowAdapter<Map<String, String?>>(act, emptyList()) { p, r ->
-                  val key = p["k"] ?: ""; val name = p["display"] ?: ""
-                  val upi = p["upi_id"]
-                  r.icon.setImageResource(Icons.wallet(act, upi ?: name, R.drawable.ic_contacts)); r.icon.clearColorFilter()
-                  r.title.text = (if (selectMode && key in selected) "☑ " else "") + name
-                  r.sub.text = "${p["n"]} txns • ${if (upi.isNullOrBlank()) "no UPI" else upi}"
-                  val spent = p["spent"]?.toDoubleOrNull() ?: 0.0; val recv = p["recv"]?.toDoubleOrNull() ?: 0.0
-                  val sign: String = if (recv > 0 && spent == 0.0) "+" else if (spent > 0 && recv == 0.0) "-" else ""
-                  val total = when { sign == "+" -> recv; sign == "-" -> spent; else -> recv - spent }
-                  r.amt.text = sign + inr(total); r.amt.setTextColor(if (sign == "+") C.GREEN else if (sign == "-") C.RED else C.TEXT)
-              }
-              private lateinit var list: ListView
-              init {
-                  list = ListView(act).apply {
-                      divider = null; adapter = this@PayeesScreen.adapter
-                      setOnItemClickListener { _, _, pos, _ ->
-                          val p = this@PayeesScreen.adapter.items.getOrNull(pos) ?: return@setOnItemClickListener
-                          if (selectMode) { val k = p["k"] ?: return@setOnItemClickListener; if (!selected.add(k)) selected.remove(k); this@PayeesScreen.adapter.notifyDataSetChanged(); this@PayeesScreen.refresh() } else this@PayeesScreen.showPayee(p)
-                      }
-                      setOnItemLongClickListener { _, _, pos, _ ->
-                          val p = this@PayeesScreen.adapter.items.getOrNull(pos) ?: return@setOnItemLongClickListener false
-                          val k = p["k"] ?: return@setOnItemLongClickListener false
-                          selectMode = true; selected.add(k); this@PayeesScreen.adapter.notifyDataSetChanged(); this@PayeesScreen.refresh(); true
-                      }
-                  }
-              }
-              override val root: View = act.vbox().apply {
-                  put(search, 8); put(HorizontalScrollView(act).apply { isHorizontalScrollBarEnabled = false; addView(sortChips) }, 2); put(summary, 0); put(list, 0, 1f)
-              }
-              override fun refresh() {
-                  sortChips.removeAllViews()
-                  sortChips.addView(act.pill("Count", sortMode == "count") { sortMode = "count"; refresh() })
-                  sortChips.addView(act.pill("Name", sortMode == "name") { sortMode = "name"; refresh() })
-                  sortChips.addView(act.pill("Recent", sortMode == "recent") { sortMode = "recent"; refresh() })
-                  sortChips.addView(act.pill("Total", sortMode == "total") { sortMode = "total"; refresh() })
-                  sortChips.addView(act.pill("Unmerge last", false) {
-                      val ok = PayeeOps.undoLastMerge(act)
-                      if (ok) { act.toast("Last merge undone"); refresh() } else act.toast("Koi merge history nahi mili")
-                  })
-                  if (selectMode) {
-                      sortChips.addView(act.pill("Merge (${selected.size})", true) { if (selected.size < 2) { act.toast("Kam se kam 2 chuno"); return@pill }; askMerge(selected.toList()) })
-                      sortChips.addView(act.pill("Cancel", false) { selectMode = false; selected.clear(); refresh() })
-                  }
-                  val order = when (sortMode) { "name" -> "p.display ASC"; "recent" -> "last DESC"; "total" -> "spent DESC"; else -> "n DESC" }
-                  val like = "%$query%"
-                  val rows = Db.get(act).rows(
-                      "SELECT p.merchant_key AS k, p.display AS display, p.upi_id AS upi_id, COUNT(t.id) AS n, SUM(CASE WHEN t.debit=1 THEN t.amount ELSE 0 END) AS spent, SUM(CASE WHEN t.debit=0 THEN t.amount ELSE 0 END) AS recv, MAX(t.ts) AS last FROM payees p LEFT JOIN txn t ON t.merchant_key = p.merchant_key WHERE p.display LIKE ? OR p.upi_id LIKE ? GROUP BY p.merchant_key ORDER BY $order LIMIT 400",
-                      like, like)
-                  adapter.items = rows; adapter.notifyDataSetChanged(); summary.text = "${rows.size} payees"
-              }
-              private fun askMerge(keys: List<String>) {
-                  val names = keys.map { k -> Db.get(act).one("SELECT display FROM payees WHERE merchant_key=?", k) ?: k }
-                  val options = names.toMutableList(); options.add("Custom name…")
-                  AlertDialog.Builder(act).setTitle("Survivor naam")
-                      .setItems(options.toTypedArray()) { _, i ->
-                          if (i == options.size - 1) act.showForm("Custom survivor name", listOf(Field("Naam", names.first()))) { v -> doMerge(keys, v[0]) }
-                          else doMerge(keys, names[i])
-                      }.setNegativeButton("Cancel", null).show()
-              }
-              private fun doMerge(keys: List<String>, survivorName: String) {
-                  val survivorKey = Learner.norm(survivorName)
-                  Thread { PayeeOps.merge(act, keys, survivorKey, survivorName); act.runOnUiThread { selectMode = false; selected.clear(); act.toast("Merged ${keys.size} payees"); this.refresh() } }.start()
-              }
-              private fun showPayee(p: Map<String, String?>) {
-                  val key = p["k"] ?: return; val name = p["display"] ?: key
-                  val db = Db.get(act)
-                  val all = db.queryTxns("merchant_key=?", arrayOf(key), 500)
-                  val spent = all.filter { it.debit }.sumOf { it.amount }
-                  val recv = all.filter { !it.debit }.sumOf { it.amount }
-                  val col = act.vbox(10)
-                  col.addView(act.tv("Out: ${inr(spent)}  •  In: ${inr(recv)}  •  Net: ${inr(recv - spent)}", 13f, C.TEXT, true))
-                  if (!p["upi_id"].isNullOrBlank()) col.addView(act.tv("UPI: ${p["upi_id"]}", 12f, C.MUTED))
-                  val autoIds = PayeeOps.smartMidnightDeleteIds(all)
-                  if (autoIds.isNotEmpty()) col.addView(act.tv("💡 ${autoIds.size} duplicate entries mile — auto-tick", 12f, C.AMBER))
-                  val selectedIds = LinkedHashSet<Long>(autoIds)
-                  val historyContainer = act.vbox(6)
-                  for (t in all) {
-                      val line = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-                      val cb = CheckBox(act).apply { isChecked = autoIds.contains(t.id) }
-                      cb.setOnCheckedChangeListener { _, isChecked -> if (isChecked) selectedIds.add(t.id) else selectedIds.remove(t.id) }
-                      line.addView(cb)
-                      val info = act.vbox(2)
-                      info.addView(act.tv("${fmtDateTime(t.ts)}  •  ${if (t.debit) "-" else "+"}${inr(t.amount, true)}  ${t.merchant}", 12f, if (t.debit) C.RED else C.GREEN))
-                      line.addView(info, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-                      historyContainer.addView(line)
-                  }
-                  col.addView(ScrollView(act).apply { addView(historyContainer) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, act.dp(300)))
-                  val dlg = AlertDialog.Builder(act).setTitle(name).setView(ScrollView(act).apply { addView(col) })
-                      .setPositiveButton("UPI se pay") { _, _ -> pay(key, name, p["upi_id"]) }
-                      .setNegativeButton("Band karo", null)
-                      .setNeutralButton("Delete selected (${selectedIds.size})", null)
-                      .create()
-                  dlg.setOnShowListener {
-                      dlg.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
-                          if (selectedIds.isEmpty()) { act.toast("Pehle transactions chuno"); return@setOnClickListener }
-                          PayeeOps.bulkDelete(act, selectedIds.toList()); act.toast("${selectedIds.size} deleted"); act.refreshAll(); dlg.dismiss()
-                      }
-                  }
-                  dlg.show()
-              }
-              private fun pay(key: String, name: String, upi: String?) {
-                  if (upi.isNullOrBlank() || !upi.contains("@")) { act.toast("UPI ID nahi mila"); return }
-                  act.showForm("Pay: $name", listOf(Field("Amount (optional)", "", true), Field("Note (optional)", "")), "Pay") { v ->
-                      var url = "upi://pay?pa=" + Uri.encode(upi) + "&pn=" + Uri.encode(name) + "&cu=INR"
-                      val amt = v[0].toDoubleOrNull(); if (amt != null && amt > 0) url += "&am=" + String.format(Locale.US, "%.2f", amt)
-                      if (v[1].isNotBlank()) url += "&tn=" + Uri.encode(v[1])
-                      try { act.startActivity(Intent.createChooser(Intent(Intent.ACTION_VIEW, Uri.parse(url)), "Pay with")) } catch (e: Exception) { act.toast("UPI app nahi mila") }
-                  }
-              }
-          }
-          EOF_21
-
-          cat > app/src/main/java/com/example/fintrack/Screens3.kt <<'EOF_22'
-          package com.example.fintrack
-
-          import android.graphics.Color
-          import android.view.Gravity
-          import android.view.View
-          import android.view.ViewGroup
-          import android.widget.LinearLayout
-          import android.widget.ScrollView
-          import java.text.SimpleDateFormat
-          import java.util.Calendar
-          import java.util.Date
-          import java.util.Locale
-
-          class ChartsScreen(act: MainActivity) : Screen(act) {
-              private var year = Calendar.getInstance().get(Calendar.YEAR)
-              private var month = Calendar.getInstance().get(Calendar.MONTH)
-              private val body = act.vbox(14)
-              override val root: View = ScrollView(act).apply { addView(body) }
-              override fun refresh() {
-                  body.removeAllViews()
-                  val db = Db.get(act)
-                  val cal = Calendar.getInstance().apply { set(Calendar.YEAR, year); set(Calendar.MONTH, month); set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }
-                  val start = cal.timeInMillis; cal.add(Calendar.MONTH, 1); val end = cal.timeInMillis
-                  val label = SimpleDateFormat("MMMM yyyy", Locale.getDefault()).format(Date(start))
-                  val bar = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setBackgroundColor(C.CARD); setPadding(act.dp(6), act.dp(6), act.dp(6), act.dp(6)) }
-                  bar.addView(act.tv("◀", 20f, C.TEXT).apply { gravity = Gravity.CENTER; setPadding(act.dp(12), act.dp(6), act.dp(12), act.dp(6)); setOnClickListener { month--; if (month < 0) { month = 11; year-- }; refresh() } })
-                  bar.addView(act.tv(label, 17f, C.TEXT, true).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-                  bar.addView(act.tv("▶", 20f, C.TEXT).apply { gravity = Gravity.CENTER; setPadding(act.dp(12), act.dp(6), act.dp(12), act.dp(6)); setOnClickListener { month++; if (month > 11) { month = 0; year++ }; refresh() } })
-                  body.addView(bar)
-                  val spent = db.num("SELECT SUM(amount) FROM txn WHERE debit=1 AND ts>=? AND ts<?", start.toString(), end.toString())
-                  val recv = db.num("SELECT SUM(amount) FROM txn WHERE debit=0 AND ts>=? AND ts<?", start.toString(), end.toString())
-                  val cats = db.rows("SELECT category, SUM(amount) AS s FROM txn WHERE debit=1 AND ts>=? AND ts<? GROUP BY category ORDER BY s DESC", start.toString(), end.toString())
-                  val summary = act.card()
-                  summary.addView(act.tv("Kharch · $label", 12f, C.MUTED))
-                  summary.addView(act.tv(inr(spent), 28f, C.RED, true))
-                  summary.addView(act.tv("Income: ${inr(recv)}  •  Net: ${inr(recv - spent)}", 13f, C.MUTED))
-                  body.put(summary)
-                  if (cats.isEmpty()) { val e = act.card(); e.addView(act.tv("No data for $label", 15f, C.TEXT, true)); body.put(e); return }
-                  val donut = DonutView(act)
-                  donut.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, act.dp(280))
-                  val palette = intArrayOf(C.ACCENT, C.GREEN, C.AMBER, C.RED, Color.parseColor("#C084FC"), Color.parseColor("#22D3EE"), Color.parseColor("#F472B6"), Color.parseColor("#A3E635"))
-                  donut.updateSlices(cats.mapIndexed { i, r -> DonutView.Slice(r["category"] ?: "", (r["s"]?.toDoubleOrNull() ?: 0.0).toFloat(), palette[i % palette.size]) })
-                  val cc = act.card()
-                  cc.addView(act.tv("Category split", 15f, C.TEXT, true))
-                  cc.addView(donut)
-                  body.put(cc)
-                  val listCard = act.card()
-                  listCard.addView(act.tv("Breakdown", 15f, C.TEXT, true))
-                  for ((i, r) in cats.withIndex()) {
-                      val cat = r["category"] ?: "Other"
-                      val v = r["s"]?.toDoubleOrNull() ?: 0.0
-                      val pct = if (spent > 0) (v / spent * 100).toInt() else 0
-                      val row = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, act.dp(8), 0, act.dp(8)); setOnClickListener { act.openLedger(LedgerScreen.Filter(mode = "cat", category = cat, year = year, month = month)) } }
-                      row.addView(act.icon(Icons.category(act, cat, R.drawable.ic_bank), palette[i % palette.size], 26))
-                      val mid = act.vbox(2); mid.addView(act.tv(cat, 14f, C.TEXT, true)); mid.addView(act.tv("$pct% of month", 11f, C.MUTED))
-                      row.addView(mid, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = act.dp(10) })
-                      row.addView(act.tv(inr(v, true), 14f, C.TEXT, true))
-                      listCard.put(row, 4)
-                  }
-                  body.put(listCard)
-              }
-          }
-
-          class DataBackupScreen(act: MainActivity) : Screen(act) {
-              private val body = act.vbox(14)
-              override val root: View = ScrollView(act).apply { addView(body) }
-              override fun refresh() {
-                  body.removeAllViews()
-                  val nw = NetWorth.compute(act)
-                  val c = act.card()
-                  c.addView(act.icon(R.drawable.ic_networth, C.GREEN, 26))
-                  c.addView(act.tv("Net worth", 12f, C.MUTED))
-                  c.addView(act.tv(inr(nw.assets), 28f, C.GREEN, true))
-                  body.put(c, 0)
-                  val d = act.card()
-                  d.addView(act.tv("Data & Backup", 15f, C.TEXT, true))
-                  d.put(act.actionBtn("Backup CSV") { act.backup() }, 10)
-                  d.put(act.actionBtn("Restore CSV") { act.pickRestore() }, 8)
-                  d.put(act.actionBtn("Clean DB & restore backup") { act.cleanAndRestore() }, 8)
-                  d.put(act.actionBtn("Upload Bank Statement (CSV)") { act.pickCsvStatement() }, 8)
-                  d.put(act.actionBtn("Upload Toll Data JSON") { act.pickTollJson() }, 8)
-                  d.put(act.actionBtn("SMS dobara scan karo") { act.rescan() }, 8)
-                  d.put(act.actionBtn("Payment notification access") { act.openNotifAccessSettings() }, 8)
-                  body.put(d)
-                  val th = act.card()
-                  th.addView(act.tv("Appearance", 15f, C.TEXT, true))
-                  th.put(act.actionBtn("Theme: cycle (system → dark → light)") { act.toggleTheme() }, 10)
-                  body.put(th)
-              }
-          }
-
-          class MoneyScreen(act: MainActivity) : Screen(act) {
-              private val inner = DataBackupScreen(act)
-              override val root: View get() = inner.root
-              override fun refresh() = inner.refresh()
-          }
-          EOF_22
-
-          cat > app/src/main/java/com/example/fintrack/HomeScreen.kt <<'EOF_HOME'
-          package com.example.fintrack
-
-          import android.view.Gravity
-          import android.view.View
-          import android.view.ViewGroup
-          import android.widget.LinearLayout
-          import android.widget.ScrollView
-          import java.text.SimpleDateFormat
-          import java.util.Calendar
-          import java.util.Date
-          import java.util.Locale
-
-          class HomeScreen(act: MainActivity) : Screen(act) {
-              private val body = act.vbox(12)
-              private var year = Calendar.getInstance().get(Calendar.YEAR)
-              private var month = Calendar.getInstance().get(Calendar.MONTH)
-              override val root: View = ScrollView(act).apply { addView(body) }
-              override fun refresh() {
-                  body.removeAllViews()
-                  val db = Db.get(act)
-                  val cal = Calendar.getInstance().apply { set(Calendar.YEAR, year); set(Calendar.MONTH, month); set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }
-                  val start = cal.timeInMillis
-                  val daysInMonth = cal.getActualMaximum(Calendar.DAY_OF_MONTH)
-                  cal.add(Calendar.MONTH, 1); val end = cal.timeInMillis
-                  val label = SimpleDateFormat("MMMM yyyy", Locale.getDefault()).format(Date(start))
-                  val spent = db.num("SELECT SUM(amount) FROM txn WHERE debit=1 AND ts>=? AND ts<?", start.toString(), end.toString())
-                  val recv = db.num("SELECT SUM(amount) FROM txn WHERE debit=0 AND ts>=? AND ts<?", start.toString(), end.toString())
-                  body.addView(toolbar(label))
-                  val exp = act.card()
-                  exp.addView(act.tv("Expenses · $label", 12f, C.MUTED))
-                  exp.addView(act.tv(inr(spent), 30f, C.RED, true))
-                  exp.addView(act.tv("Income ${inr(recv)}", 13f, C.GREEN))
-                  val now = System.currentTimeMillis()
-                  val elapsed = (((now - start).toFloat() / 86_400_000f).coerceIn(1f, daysInMonth.toFloat()))
-                  val projected = (spent / elapsed) * daysInMonth
-                  val avgText = if (projected > 0) "Projected: ${inr(projected)}  •  ${((spent / projected) * 100).toInt()}% used" else "No spend yet"
-                  exp.addView(act.tv(avgText, 12f, C.MUTED))
-                  val btnRow = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL }
-                  btnRow.addView(act.actionBtn("VIEW CHARTS") { act.show(act.chartsIndex()) }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-                  exp.put(btnRow, 10)
-                  body.put(exp)
-                  val latest = db.queryTxns("1=1", emptyArray(), 5)
-                  val lt = act.card()
-                  lt.addView(act.tv("Latest transactions", 15f, C.TEXT, true))
-                  if (latest.isEmpty()) lt.addView(act.tv("Abhi tak koi txn nahi. SMS scan karo.", 12f, C.MUTED))
-                  else for (t in latest) {
-                      val r = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, act.dp(8), 0, act.dp(8)); setOnClickListener { act.show(act.ledgerIndex()) } }
-                      r.addView(act.icon(Icons.category(act, t.category, R.drawable.ic_bank), C.ACCENT, 24))
-                      val mid = act.vbox(2); mid.addView(act.tv(t.merchant, 13f, C.TEXT, true)); mid.addView(act.tv(fmtDate(t.ts) + " · " + t.institution, 11f, C.MUTED))
-                      r.addView(mid, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = act.dp(10) })
-                      r.addView(act.tv((if (t.debit) "-" else "+") + inr(t.amount, true), 13f, if (t.debit) C.RED else C.GREEN, true))
-                      lt.put(r, 2)
-                  }
-                  lt.put(act.actionBtn("VIEW TRANSACTIONS") { act.show(act.ledgerIndex()) }, 10)
-                  body.put(lt)
-                  val half = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL }
-                  val cash = db.num("SELECT SUM(amount) FROM txn WHERE debit=1 AND channel='CASH' AND ts>=? AND ts<?", start.toString(), end.toString())
-                  val cashCard = act.card()
-                  cashCard.addView(act.icon(R.drawable.ic_grocery, C.AMBER, 22))
-                  cashCard.addView(act.tv("Cash out", 11f, C.MUTED))
-                  cashCard.addView(act.tv(inr(cash), 16f, C.AMBER, true))
-                  cashCard.setOnClickListener { act.openLedger(LedgerScreen.Filter(mode = "debit", year = year, month = month)) }
-                  half.addView(cashCard, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = act.dp(6) })
-                  val nw = NetWorth.compute(act)
-                  val accCard = act.card()
-                  accCard.addView(act.icon(R.drawable.ic_bank, C.ACCENT, 22))
-                  accCard.addView(act.tv("Accounts", 11f, C.MUTED))
-                  accCard.addView(act.tv("${nw.bank.size} bank" + (if (nw.bank.size == 1) "" else "s"), 13f, C.TEXT, true))
-                  accCard.addView(act.tv(inr(nw.assets), 15f, C.GREEN, true))
-                  accCard.setOnClickListener { act.show(act.dataIndex()) }
-                  half.addView(accCard, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = act.dp(6) })
-                  body.put(half)
-                  val review = db.num("SELECT COUNT(*) FROM txn WHERE review=1").toInt()
-                  if (review > 0) {
-                      val rc = act.card()
-                      rc.addView(act.tv("⚠ $review txns need fixing", 14f, C.AMBER, true))
-                      rc.addView(act.tv("Tap karke correct karo", 12f, C.MUTED))
-                      rc.setOnClickListener { act.openLedger(LedgerScreen.Filter(mode = "review")) }
-                      body.put(rc)
-                  }
-                  val billsThisMonth = db.num("SELECT COUNT(*) FROM txn WHERE debit=1 AND category='Bills & Recharge' AND ts>=? AND ts<?", start.toString(), end.toString()).toInt()
-                  val billCard = act.card()
-                  billCard.addView(act.tv("Bills & subscriptions", 15f, C.TEXT, true))
-                  billCard.addView(act.tv(if (billsThisMonth == 0) "No bills this month" else "$billsThisMonth paid this month", 12f, C.MUTED))
-                  billCard.put(act.actionBtn("VIEW BILLS") { act.openLedger(LedgerScreen.Filter(mode = "cat", category = "Bills & Recharge", year = year, month = month)) }, 10)
-                  body.put(billCard)
-                  val nwCard = act.card()
-                  nwCard.addView(act.tv("Net worth", 12f, C.MUTED))
-                  nwCard.addView(act.tv(inr(nw.assets - nw.liabilities), 24f, if (nw.assets >= nw.liabilities) C.GREEN else C.RED, true))
-                  nwCard.setOnClickListener { act.show(act.dataIndex()) }
-                  body.put(nwCard)
-                  val ctl = act.card()
-                  ctl.addView(act.tv("Controls", 15f, C.TEXT, true))
-                  ctl.put(act.actionBtn("Backup") { act.backup() }, 8)
-                  ctl.put(act.actionBtn("Restore") { act.pickRestore() }, 6)
-                  ctl.put(act.actionBtn("Data & Backup") { act.show(act.dataIndex()) }, 6)
-                  body.put(ctl)
-              }
-              private fun toolbar(label: String): View {
-                  val bar = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setBackgroundColor(C.CARD); setPadding(act.dp(6), act.dp(6), act.dp(6), act.dp(6)) }
-                  bar.addView(act.icon(R.drawable.ic_categories_grid, C.TEXT, 24).apply { setPadding(act.dp(10), act.dp(10), act.dp(10), act.dp(10)); setOnClickListener { act.openDrawer() } })
-                  bar.addView(act.tv("◀", 18f, C.TEXT).apply { gravity = Gravity.CENTER; setPadding(act.dp(8), act.dp(6), act.dp(8), act.dp(6)); setOnClickListener { month--; if (month < 0) { month = 11; year-- }; refresh() } })
-                  bar.addView(act.tv(label, 15f, C.TEXT, true).apply { gravity = Gravity.CENTER; setOnClickListener { pickMonthYear() } }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-                  bar.addView(act.tv("▶", 18f, C.TEXT).apply { gravity = Gravity.CENTER; setPadding(act.dp(8), act.dp(6), act.dp(8), act.dp(6)); setOnClickListener { month++; if (month > 11) { month = 0; year++ }; refresh() } })
-                  bar.addView(act.icon(R.drawable.ic_transfer, C.TEXT, 22).apply { setPadding(act.dp(10), act.dp(10), act.dp(10), act.dp(10)); setOnClickListener { act.show(act.ledgerIndex()) } })
-                  return bar
-              }
-              private fun pickMonthYear() {
-                  val years = (Calendar.getInstance().get(Calendar.YEAR) - 5..Calendar.getInstance().get(Calendar.YEAR) + 1).toList()
-                  android.app.AlertDialog.Builder(act).setTitle("Year").setItems(years.map { it.toString() }.toTypedArray()) { _, yi ->
-                      val y = years[yi]; val months = listOf("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec")
-                      android.app.AlertDialog.Builder(act).setTitle("Month ($y)").setItems(months.toTypedArray()) { _, mi -> year = y; month = mi; refresh() }.show()
-                  }.show()
-              }
-          }
-          EOF_HOME
-
           cat > app/src/main/java/com/example/fintrack/MainActivity.kt <<'EOF_19'
           package com.example.fintrack
 
@@ -2727,6 +2016,7 @@ jobs:
           import android.widget.LinearLayout
           import android.widget.TextView
           import android.widget.Toast
+          import androidx.activity.OnBackPressedCallback
           import androidx.activity.result.contract.ActivityResultContracts
           import androidx.appcompat.app.AlertDialog
           import androidx.appcompat.app.AppCompatActivity
@@ -2747,16 +2037,21 @@ jobs:
               private lateinit var lockMsg: TextView
               private lateinit var drawerPanel: LinearLayout
               private lateinit var drawerScrim: View
+              private lateinit var nav: LinearLayout
+              private lateinit var hamburger: TextView
               private val screens = ArrayList<Screen>()
               private var cur = 0
               private var unlocked = false
               private var authBusy = false
               private var stopAt = 0L
+              private var backPressCount = 0
+              private var lastBackPress = 0L
               lateinit var home: HomeScreen
               lateinit var ledger: LedgerScreen
               fun chartsIndex(): Int = screens.indexOfFirst { it is ChartsScreen }
               fun ledgerIndex(): Int = screens.indexOfFirst { it is LedgerScreen }
               fun dataIndex(): Int = screens.indexOfFirst { it is DataBackupScreen }
+              fun accountsIndex(): Int = screens.indexOfFirst { it is AccountsScreen }
               fun openDrawer() { drawerScrim.visibility = View.VISIBLE; drawerPanel.visibility = View.VISIBLE }
               fun closeDrawer() { drawerPanel.visibility = View.GONE; drawerScrim.visibility = View.GONE }
               private val openDoc = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> if (uri != null) doRestore(uri) }
@@ -2779,7 +2074,7 @@ jobs:
                   window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
                   try {
                       org.osmdroid.config.Configuration.getInstance().apply {
-                          userAgentValue = "FinTrack/10.3 (com.example.fintrack; Android)"
+                          userAgentValue = "FinTrack/10.4 (com.example.fintrack; Android)"
                           tileFileSystemCacheMaxBytes = 600L * 1024 * 1024
                           tileFileSystemCacheTrimBytes = 500L * 1024 * 1024
                           load(this@MainActivity, getSharedPreferences("osmdroid", MODE_PRIVATE))
@@ -2788,14 +2083,65 @@ jobs:
                   ForegroundHelper.start(this)
                   home = HomeScreen(this)
                   ledger = LedgerScreen(this)
-                  screens.addAll(listOf(home, ledger, TravelScreen(this), PayeesScreen(this), ChartsScreen(this), DataBackupScreen(this), MoneyScreen(this)))
+                  screens.addAll(listOf(
+                      home, ledger, TravelScreen(this), PayeesScreen(this),
+                      ChartsScreen(this), DataBackupScreen(this), AccountsScreen(this)
+                  ))
                   content = FrameLayout(this)
                   val root = FrameLayout(this)
                   val main = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(C.BG); addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)) }
+                  nav = buildBottomNav()
+                  main.addView(nav)
                   root.addView(main)
                   drawerScrim = View(this).apply { setBackgroundColor(0x88000000.toInt()); visibility = View.GONE; setOnClickListener { closeDrawer() } }
                   root.addView(drawerScrim, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-                  drawerPanel = LinearLayout(this).apply {
+                  drawerPanel = buildDrawer()
+                  root.addView(drawerPanel, FrameLayout.LayoutParams(dp(260), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.START))
+                  val fab = TextView(this).apply { text = "+"; textSize = 32f; setTextColor(android.graphics.Color.WHITE); gravity = Gravity.CENTER; setBackgroundColor(C.ACCENT); elevation = 12f }
+                  root.addView(fab, FrameLayout.LayoutParams(dp(60), dp(60), Gravity.END or Gravity.BOTTOM).apply { rightMargin = dp(20); bottomMargin = dp(90) })
+                  fab.setOnClickListener { showQuickActions() }
+                  lockMsg = tv("Locked", 14f, C.MUTED).apply { gravity = Gravity.CENTER }
+                  lockView = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setBackgroundColor(C.BG); setPadding(dp(30), dp(30), dp(30), dp(30))
+                      addView(icon(R.drawable.ic_networth, C.ACCENT, 56))
+                      addView(tv("FinTrack", 26f, C.TEXT, true).apply { setPadding(0, dp(12), 0, dp(4)) })
+                      addView(lockMsg)
+                      addView(actionBtn("Unlock") { authenticate() }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(20) })
+                  }
+                  root.addView(lockView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+                  setContentView(root)
+                  onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+                      override fun handleOnBackPressed() {
+                          if (drawerPanel.visibility == View.VISIBLE) { closeDrawer(); return }
+                          val now = System.currentTimeMillis()
+                          if (now - lastBackPress > 2000) backPressCount = 0
+                          lastBackPress = now
+                          if (cur != 0) { show(0); return }
+                          backPressCount++
+                          if (backPressCount >= 3) { finish() }
+                          else toast("Back again ${3 - backPressCount} more to exit")
+                      }
+                  })
+                  show(0); lock(); authenticate()
+              }
+
+              private fun buildBottomNav(): LinearLayout {
+                  val bar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setBackgroundColor(C.CARD); elevation = dp(8).toFloat() }
+                  val icons = intArrayOf(R.drawable.ic_bank, R.drawable.ic_transfer, R.drawable.ic_fastag, R.drawable.ic_contacts, R.drawable.ic_networth)
+                  val names = listOf("Home", "Ledger", "Travel", "Payees", "Accounts")
+                  for (i in names.indices) {
+                      val item = LinearLayout(this).apply {
+                          orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(0, dp(8), 0, dp(8)); tag = i
+                          addView(icon(icons[i], C.MUTED, 22)); addView(tv(names[i], 11f, C.MUTED).apply { gravity = Gravity.CENTER })
+                          setOnClickListener { show(i) }
+                      }
+                      bar.addView(item, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                  }
+                  return bar
+              }
+
+              private fun buildDrawer(): LinearLayout {
+                  return LinearLayout(this).apply {
                       orientation = LinearLayout.VERTICAL; setBackgroundColor(C.CARD); visibility = View.GONE
                       setPadding(dp(16), dp(24), dp(16), dp(16))
                       addView(tv("FinTrack", 22f, C.TEXT, true).apply { setPadding(0, 0, 0, dp(16)) })
@@ -2806,7 +2152,7 @@ jobs:
                           Triple("Payees", R.drawable.ic_contacts, 3),
                           Triple("Charts", R.drawable.ic_networth, 4),
                           Triple("Data & Backup", R.drawable.ic_loan, 5),
-                          Triple("Settings", R.drawable.ic_settings_24dp, 6)
+                          Triple("Accounts", R.drawable.ic_bank, 6)
                       )
                       for ((title, resId, idx) in items) {
                           val row = LinearLayout(this@MainActivity).apply {
@@ -2819,21 +2165,6 @@ jobs:
                           addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
                       }
                   }
-                  root.addView(drawerPanel, FrameLayout.LayoutParams(dp(260), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.START))
-                  val fab = TextView(this).apply { text = "+"; textSize = 32f; setTextColor(android.graphics.Color.WHITE); gravity = Gravity.CENTER; setBackgroundColor(C.ACCENT); elevation = 12f }
-                  root.addView(fab, FrameLayout.LayoutParams(dp(60), dp(60), Gravity.END or Gravity.BOTTOM).apply { rightMargin = dp(20); bottomMargin = dp(24) })
-                  fab.setOnClickListener { showQuickActions() }
-                  lockMsg = tv("Locked", 14f, C.MUTED).apply { gravity = Gravity.CENTER }
-                  lockView = LinearLayout(this).apply {
-                      orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setBackgroundColor(C.BG); setPadding(dp(30), dp(30), dp(30), dp(30))
-                      addView(icon(R.drawable.ic_networth, C.ACCENT, 56))
-                      addView(tv("FinTrack", 26f, C.TEXT, true).apply { setPadding(0, dp(12), 0, dp(4)) })
-                      addView(lockMsg)
-                      addView(actionBtn("Unlock") { authenticate() }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(20) })
-                  }
-                  root.addView(lockView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-                  setContentView(root)
-                  show(0); lock(); authenticate()
               }
 
               private fun showQuickActions() {
@@ -2855,6 +2186,8 @@ jobs:
                   } else askPermissionsAndScan()
               }
               private fun authenticate() {
+                  val prefs = getSharedPreferences("fin", MODE_PRIVATE)
+                  if (!prefs.getBoolean("lock_enabled", false)) { unlock(); return }
                   if (authBusy) return
                   val auth = BiometricManager.Authenticators.BIOMETRIC_STRONG or BiometricManager.Authenticators.DEVICE_CREDENTIAL
                   if (BiometricManager.from(this).canAuthenticate(auth) != BiometricManager.BIOMETRIC_SUCCESS) { toast("Phone me fingerprint / screen lock set nahi hai"); unlock(); return }
@@ -2867,7 +2200,15 @@ jobs:
               }
               fun show(i: Int) {
                   if (i < 0 || i >= screens.size) return
-                  cur = i; content.removeAllViews(); content.addView(screens[i].root)
+                  cur = i
+                  content.removeAllViews()
+                  content.addView(screens[i].root)
+                  for (k in 0 until nav.childCount) {
+                      val item = nav.getChildAt(k) as LinearLayout
+                      val col = if (k == i || (k == 4 && screens[i] is AccountsScreen)) C.ACCENT else C.MUTED
+                      (item.getChildAt(0) as android.widget.ImageView).setColorFilter(col)
+                      (item.getChildAt(1) as TextView).setTextColor(col)
+                  }
                   if (unlocked) screens[cur].refresh()
               }
               fun openLedger(filter: LedgerScreen.Filter) { ledger.setFilter(filter); show(1) }
@@ -2885,6 +2226,8 @@ jobs:
                   }
                   toast("Theme: $next"); recreate()
               }
+              fun setLockEnabled(v: Boolean) { getSharedPreferences("fin", MODE_PRIVATE).edit().putBoolean("lock_enabled", v).apply() }
+              fun isLockEnabled(): Boolean = getSharedPreferences("fin", MODE_PRIVATE).getBoolean("lock_enabled", false)
               private fun hasSms() = ContextCompat.checkSelfPermission(this, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED
               private fun askPermissionsAndScan() { if (hasSms()) { rescan(); return }; ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.READ_SMS, Manifest.permission.RECEIVE_SMS), 1) }
               override fun onRequestPermissionsResult(code: Int, p: Array<out String>, r: IntArray) { super.onRequestPermissionsResult(code, p, r); if (hasSms()) rescan() else toast("SMS permission zaroori hai") }
@@ -2991,14 +2334,833 @@ jobs:
               fun bulkDelete(ids: List<Long>) {
                   if (ids.isEmpty()) { toast("Pehle transactions chuno"); return }
                   AlertDialog.Builder(this).setTitle("Delete ${ids.size} transactions?")
-                      .setPositiveButton("Haan, delete") { _, _ -> PayeeOps.bulkDelete(this, ids); toast("${ids.size} deleted"); refreshAll() }
+                      .setPositiveButton("Haan, delete") { _, _ -> PayeeOps.bulkDelete(this, ids); PayeeOps.cleanupOrphanPayees(this); toast("${ids.size} deleted"); refreshAll() }
                       .setNegativeButton("Nahi", null).show()
               }
               fun openNotifAccessSettings() {
                   try { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) } catch (e: Exception) { toast("Settings me manually Notification access kholo") }
               }
+              fun changeTxnCategory(t: Txn, done: () -> Unit) {
+                  val choices = Categories.ALL
+                  AlertDialog.Builder(this).setTitle("Category badlo").setItems(choices.toTypedArray()) { _, i ->
+                      val n = t.copy(category = choices[i], status = "USER", review = false, reviewHash = null)
+                      Db.get(this).updateTxn(n)
+                      Learner.learnCategory(Db.get(this), Learner.norm(n.merchant), n.merchant, choices[i])
+                      done(); refreshAll()
+                  }.setNegativeButton("Cancel", null).show()
+              }
+              fun changeTxnPayee(t: Txn, done: () -> Unit) {
+                  showForm("Payee badlo", listOf(Field("Naya payee / dukaan", t.merchant))) { v ->
+                      val name = v[0].trim(); if (name.isBlank()) { toast("Naam khali"); return@showForm }
+                      val n = t.copy(merchant = name, status = "USER", review = false, reviewHash = null)
+                      Db.get(this).updateTxn(n); Repo.ensurePayee(this, n)
+                      done(); refreshAll()
+                  }
+              }
           }
           EOF_19
+
+          cat > app/src/main/java/com/example/fintrack/Screens1.kt <<'EOF_20'
+          package com.example.fintrack
+
+          import android.graphics.Color
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.CheckBox
+          import android.widget.EditText
+          import android.widget.HorizontalScrollView
+          import android.widget.LinearLayout
+          import android.widget.ListView
+          import android.widget.ScrollView
+          import androidx.appcompat.app.AlertDialog
+          import java.text.SimpleDateFormat
+          import java.util.Calendar
+          import java.util.Date
+          import java.util.Locale
+
+          abstract class Screen(val act: MainActivity) { abstract val root: View; abstract fun refresh() }
+
+          class LedgerScreen(act: MainActivity) : Screen(act) {
+              data class Filter(val mode: String = "all", val category: String? = null, val year: Int? = null, val month: Int? = null)
+              private var filter = Filter(); private var query = ""; private var selectMode = false
+              private val selected = LinkedHashSet<Long>()
+              private val summary = act.tv("", 12f, C.MUTED).apply { setPadding(act.dp(14), act.dp(4), act.dp(14), act.dp(4)) }
+              private val chips = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; setPadding(act.dp(8), 0, act.dp(8), 0) }
+              private val loading = act.tv("Loading…", 12f, C.MUTED).apply { gravity = Gravity.CENTER; setPadding(0, act.dp(20), 0, act.dp(20)); visibility = View.GONE }
+              sealed class Row {
+                  data class TxnRow(val t: Txn) : Row()
+                  data class GroupRow(val hash: String, val count: Int, val total: Double, val sampleMerchant: String, val sampleCategory: String, val sampleDebit: Boolean) : Row()
+                  data class YearRow(val year: Int, val count: Int, val inAmt: Double, val outAmt: Double) : Row()
+              }
+              private val adapter = RowAdapter<Row>(act, emptyList()) { item, r ->
+                  when (item) {
+                      is Row.GroupRow -> {
+                          r.icon.setImageResource(R.drawable.ic_bank); r.icon.setColorFilter(C.AMBER)
+                          r.title.text = "⚠ ${item.count} txns · ${inr(item.total, true)} · ${item.sampleMerchant}"
+                          r.sub.text = "Group · ${item.sampleCategory} · tap to fix all"
+                          r.amt.text = "Fix all"; r.amt.setTextColor(C.AMBER)
+                      }
+                      is Row.YearRow -> {
+                          r.icon.setImageResource(R.drawable.ic_bank); r.icon.setColorFilter(C.ACCENT)
+                          r.title.text = "📅 ${item.year} · ${item.count} entries"
+                          r.sub.text = "In ${inr(item.inAmt)}  •  Out ${inr(item.outAmt)}"
+                          r.amt.text = ""; r.amt.setTextColor(C.TEXT)
+                      }
+                      is Row.TxnRow -> {
+                          val t = item.t
+                          r.icon.setImageResource(Icons.category(act, t.category, R.drawable.ic_bank)); r.icon.clearColorFilter()
+                          r.title.text = (if (selectMode && selected.contains(t.id)) "☑ " else "") + t.merchant
+                          r.sub.text = fmtDate(t.ts) + " • " + t.institution + " • " + t.category + " •#" + t.msgNo
+                          r.amt.text = (if (t.debit) "-" else "+") + inr(t.amount, true); r.amt.setTextColor(if (t.debit) C.RED else C.GREEN)
+                      }
+                  }
+              }
+              private lateinit var list: ListView
+              init {
+                  list = ListView(act).apply {
+                      divider = null; adapter = this@LedgerScreen.adapter
+                      setOnItemClickListener { _, _, pos, _ ->
+                          when (val item = this@LedgerScreen.adapter.items.getOrNull(pos)) {
+                              is Row.TxnRow -> { if (selectMode) { if (!selected.add(item.t.id)) selected.remove(item.t.id); this@LedgerScreen.adapter.notifyDataSetChanged() } else showTxn(item.t) }
+                              is Row.GroupRow -> openGroupFix(item)
+                              is Row.YearRow -> { toastYear(item.year) }
+                              null -> {}
+                          }
+                      }
+                      setOnItemLongClickListener { _, _, pos, _ ->
+                          val item = this@LedgerScreen.adapter.items.getOrNull(pos) as? Row.TxnRow ?: return@setOnItemLongClickListener false
+                          AlertDialog.Builder(act).setItems(arrayOf("Delete this transaction", "Edit", "Enter select mode")) { _, which ->
+                              when (which) {
+                                  0 -> { PayeeOps.bulkDelete(act, listOf(item.t.id)); PayeeOps.cleanupOrphanPayees(act); act.toast("Deleted"); act.refreshAll() }
+                                  1 -> showTxn(item.t)
+                                  2 -> { selectMode = true; selected.add(item.t.id); refresh() }
+                              }
+                          }.setNegativeButton("Cancel", null).show()
+                          true
+                      }
+                  }
+              }
+              private fun toastYear(y: Int) {
+                  act.toast("Year $y — collapse/expand logic is done by scrolling")
+              }
+              override val root: View = act.vbox().apply {
+                  val search = EditText(act).apply {
+                      hint = "Search · #cat · >500 · <2024-06"; setHintTextColor(C.MUTED); setTextColor(C.TEXT); setSingleLine()
+                      setPadding(act.dp(14), act.dp(10), act.dp(14), act.dp(10)); background = act.shape(C.CARD, 12)
+                      addTextChangedListener(object : android.text.TextWatcher {
+                          override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                          override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                          override fun afterTextChanged(s: android.text.Editable?) { query = s?.toString()?.trim() ?: ""; refresh() }
+                      })
+                  }
+                  put(search, 8); put(HorizontalScrollView(act).apply { isHorizontalScrollBarEnabled = false; addView(chips) }, 4); put(summary, 0); put(loading, 0); put(list, 0, 1f)
+              }
+              fun setFilter(f: Filter) { filter = f; refresh() }
+              override fun refresh() {
+                  chips.removeAllViews()
+                  for ((k, label) in listOf("all" to "All", "review" to "⚠ Review", "debit" to "Kharch", "credit" to "Mila")) chips.addView(act.pill(label, filter.mode == k) { filter = Filter(mode = k); refresh() })
+                  if (filter.mode == "cat" && filter.category != null) chips.addView(act.pill("Cat: ${filter.category} ✕", true) { filter = Filter(); refresh() })
+                  if (filter.year != null && filter.month != null) {
+                      val label = "${filter.year}-${String.format("%02d", filter.month!! + 1)} ✕"
+                      chips.addView(act.pill(label, true) { filter = filter.copy(year = null, month = null); refresh() })
+                  }
+                  chips.addView(act.pill("Scan duplicates", false) { showDuplicates() })
+                  if (query.isNotBlank()) chips.addView(act.pill("Merge to payee", false) { askBulkMerge() })
+                  if (selectMode) {
+                      chips.addView(act.pill("Delete (${selected.size})", true) { act.bulkDelete(selected.toList()); selectMode = false; selected.clear(); refresh() })
+                      chips.addView(act.pill("Categorize (${selected.size})", true) { act.bulkCategory(selected.toList()); selectMode = false; selected.clear(); refresh() })
+                      chips.addView(act.pill("Cancel", false) { selectMode = false; selected.clear(); refresh() })
+                  }
+                  loading.visibility = View.VISIBLE
+                  summary.text = ""
+                  adapter.items = emptyList(); adapter.notifyDataSetChanged()
+                  Thread {
+                      val all = currentRows()
+                      val totalOut = all.filter { it.debit }.sumOf { it.amount }
+                      val totalIn = all.filter { !it.debit }.sumOf { it.amount }
+                      val yearGroups = all.groupBy { yearOf(it.ts) }.toSortedMap(compareByDescending { it })
+                      act.runOnUiThread {
+                          loading.visibility = View.GONE
+                          if (filter.mode == "review") {
+                              val groups = LinkedHashMap<String, MutableList<Txn>>()
+                              for (t in all) { if (!t.review) continue; val h = t.reviewHash ?: Db.get(act).computeReviewHash(t); groups.getOrPut(h) { ArrayList() }.add(t) }
+                              val rows = ArrayList<Row>()
+                              for ((h, list) in groups) { val sample = list.first(); rows.add(Row.GroupRow(h, list.size, list.sumOf { it.amount }, sample.merchant, sample.category, sample.debit)) }
+                              adapter.items = rows
+                              summary.text = "${all.count { it.review }} entries in ${groups.size} groups"
+                          } else {
+                              val rows = ArrayList<Row>()
+                              for ((y, list) in yearGroups) {
+                                  val yIn = list.filter { !it.debit }.sumOf { it.amount }
+                                  val yOut = list.filter { it.debit }.sumOf { it.amount }
+                                  rows.add(Row.YearRow(y, list.size, yIn, yOut))
+                                  for (t in list) rows.add(Row.TxnRow(t))
+                              }
+                              adapter.items = rows
+                              summary.text = "${all.size} entries  •  In ${inr(totalIn)}  •  Out ${inr(totalOut)}  •  Net ${inr(totalIn - totalOut)}"
+                          }
+                          adapter.notifyDataSetChanged()
+                      }
+                  }.start()
+              }
+              private fun yearOf(ts: Long): Int {
+                  val c = Calendar.getInstance(); c.timeInMillis = ts; return c.get(Calendar.YEAR)
+              }
+              private fun currentRows(): List<Txn> {
+                  val where = StringBuilder("1=1"); val args = ArrayList<String>()
+                  when (filter.mode) { "debit" -> where.append(" AND debit=1"); "credit" -> where.append(" AND debit=0"); "cat" -> { where.append(" AND category=?"); args.add(filter.category ?: "") } }
+                  if (filter.year != null && filter.month != null) {
+                      val cal = Calendar.getInstance().apply { set(Calendar.YEAR, filter.year!!); set(Calendar.MONTH, filter.month!!); set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }
+                      val start = cal.timeInMillis; cal.add(Calendar.MONTH, 1)
+                      where.append(" AND ts>=? AND ts<?"); args.add(start.toString()); args.add(cal.timeInMillis.toString())
+                  }
+                  val q = query
+                  if (q.isNotEmpty()) {
+                      val tokens = q.split(" "); val plain = StringBuilder()
+                      for (t in tokens) {
+                          when {
+                              t.startsWith("#") -> { where.append(" AND category=?"); args.add(t.substring(1).replaceFirstChar { it.uppercase() }) }
+                              t.startsWith(">") && t.substring(1).toDoubleOrNull() != null -> { where.append(" AND amount>?"); args.add(t.substring(1)) }
+                              t.startsWith("<") && t.length > 7 && t.matches(Regex("<\\d{4}-\\d{2}")) -> {
+                                  val parts = t.substring(1).split("-"); val y = parts[0].toInt(); val m = parts[1].toInt() - 1
+                                  val c = Calendar.getInstance().apply { set(Calendar.YEAR, y); set(Calendar.MONTH, m); set(Calendar.DAY_OF_MONTH, 1) }
+                                  where.append(" AND ts<?"); args.add(c.timeInMillis.toString())
+                              }
+                              else -> { if (plain.isNotEmpty()) plain.append(" "); plain.append(t) }
+                          }
+                      }
+                      if (plain.isNotEmpty()) { where.append(" AND (merchant LIKE ? OR body LIKE ? OR ref LIKE ? OR vpa LIKE ?)"); repeat(4) { args.add("%$plain%") } }
+                  }
+                  return Db.get(act).queryTxns(where.toString(), args.toTypedArray(), 100000)
+              }
+              private fun askBulkMerge() {
+                  val rows = currentRows()
+                  if (rows.isEmpty()) { act.toast("Is search me kuch nahi mila"); return }
+                  val keys = rows.map { Learner.norm(it.merchant) }.filter { it.isNotBlank() && it != "unknown" }.distinct()
+                  if (keys.isEmpty()) { act.toast("In txns me koi payee nahi hai"); return }
+                  val existing = Db.get(act).rows("SELECT merchant_key, display FROM payees WHERE merchant_key IN (" + keys.joinToString(",") { "?" } + ") ORDER BY display", *keys.toTypedArray())
+                  val names = existing.map { it["display"] ?: it["merchant_key"] ?: "" }.toMutableList()
+                  names.add("✏ Custom name…")
+                  AlertDialog.Builder(act).setTitle("In ${rows.size} txns ko kis payee me bhejein?")
+                      .setItems(names.toTypedArray()) { _, which ->
+                          if (which == names.size - 1) act.showForm("Custom payee name", listOf(Field("Naam", keys.first()))) { v -> doBulkReassign(keys, v[0]) }
+                          else doBulkReassign(keys, names[which])
+                      }
+                      .setNegativeButton("Cancel", null).show()
+              }
+              private fun doBulkReassign(fromKeys: List<String>, newName: String) {
+                  val target = newName.trim()
+                  if (target.isBlank()) { act.toast("Naam khali nahi ho sakta"); return }
+                  Thread { PayeeOps.reassignToPayee(act, fromKeys, Learner.norm(target), target); act.runOnUiThread { act.toast("Merged ${fromKeys.size} payees → $target"); act.refreshAll() } }.start()
+              }
+              private fun showDuplicates() {
+                  act.toast("Duplicates scan chal raha hai…")
+                  Thread {
+                      val rows = PayeeOps.flattenDuplicates(act)
+                      act.runOnUiThread {
+                          if (rows.isEmpty()) { act.toast("Koi duplicate nahi mila"); return@runOnUiThread }
+                          val container = act.vbox(8)
+                          container.addView(act.tv("${rows.size} rows in ${rows.map { it.groupKey }.distinct().size} groups", 12f, C.MUTED))
+                          val checkboxes = LinkedHashMap<Long, CheckBox>()
+                          for (row in rows) {
+                              val t = row.txn
+                              val line = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, act.dp(6), 0, act.dp(6)) }
+                              val cb = CheckBox(act).apply { isChecked = row.defaultDelete }
+                              checkboxes[t.id] = cb
+                              line.addView(cb)
+                              val info = act.vbox(4)
+                              info.addView(act.tv("${fmtDateTime(t.ts)}  •#${t.msgNo}  •  ${t.institution}", 12f, C.TEXT, true))
+                              val upi = if (!t.vpa.isNullOrBlank()) "  •  ${t.vpa}" else ""
+                              info.addView(act.tv("${t.merchant}$upi", 12f, if (t.merchant.trim().lowercase() == "unknown") C.RED else C.MUTED))
+                              info.addView(act.tv((if (t.debit) "-" else "+") + inr(t.amount, true), 13f, if (t.debit) C.RED else C.GREEN, true))
+                              line.addView(info, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                              container.addView(line)
+                          }
+                          AlertDialog.Builder(act).setTitle("Duplicates — tick to delete")
+                              .setView(ScrollView(act).apply { addView(container) })
+                              .setPositiveButton("Delete ticked") { _, _ ->
+                                  var n = 0
+                                  for ((id, cb) in checkboxes) if (cb.isChecked) { Db.get(act).deleteTxn(id); n++ }
+                                  PayeeOps.cleanupOrphanPayees(act)
+                                  act.toast("$n deleted"); act.refreshAll()
+                              }
+                              .setNegativeButton("Cancel", null)
+                              .setNeutralButton("Smart select") { _, _ ->
+                                  val fresh = PayeeOps.flattenDuplicates(act)
+                                  for (r in fresh) checkboxes[r.txn.id]?.isChecked = r.defaultDelete
+                              }
+                              .show()
+                      }
+                  }.start()
+              }
+              private fun openGroupFix(g: Row.GroupRow) {
+                  act.showForm("Fix group (${g.count} txns)",
+                      listOf(Field("Kisko / dukaan", g.sampleMerchant), Field("Type", if (g.sampleDebit) "Debit (kharch)" else "Credit (mila)", options = listOf("Debit (kharch)", "Credit (mila)")), Field("Category", g.sampleCategory, options = Categories.ALL)),
+                      okLabel = "Apply to all"
+                  ) { v ->
+                      AlertDialog.Builder(act).setMessage("Apply to all ${g.count} transactions in this group?")
+                          .setPositiveButton("Haan") { _, _ -> PayeeOps.applyGroupFix(act, g.hash, v[0].ifBlank { g.sampleMerchant }, v[2], v[1].startsWith("Debit")); act.refreshAll() }
+                          .setNegativeButton("Nahi", null).show()
+                  }
+              }
+              private fun showTxn(t: Txn) {
+                  val msg = fmtDateTime(t.ts) + "  •#${t.msgNo}  •  " + t.institution + "\n" + (if (t.debit) "Kharch " else "Mila ") + inr(t.amount, true) + "  •  " + t.category +
+                      (if (t.balance != null) "\nBalance: " + inr(t.balance ?: 0.0, true) else "") + "\nSource: ${t.source}  •  Parse: ${t.status}" +
+                      (if (t.vpa != null) "  •  UPI: ${t.vpa}" else "") + (if (t.ref != null) "  •  Ref: ${t.ref}" else "") +
+                      (if (t.body.isNotEmpty()) "\n\n" + t.body else "")
+                  val ad = AlertDialog.Builder(act).setTitle(t.merchant).setMessage(msg)
+                      .setPositiveButton("Edit") { _, _ -> editTxn(t) }
+                      .setNeutralButton("Delete", null)
+                      .setNegativeButton("Band karo", null).create()
+                  ad.setOnShowListener {
+                      ad.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                          PayeeOps.bulkDelete(act, listOf(t.id)); PayeeOps.cleanupOrphanPayees(act); act.toast("Deleted"); act.refreshAll(); ad.dismiss()
+                      }
+                  }
+                  ad.show()
+              }
+              private fun editTxn(t: Txn) {
+                  act.showForm("Sahi karo (app seekhegi)",
+                      listOf(Field("Kisko / dukaan", t.merchant), Field("Amount", t.amount.toString(), true), Field("Type", if (t.debit) "Debit (kharch)" else "Credit (mila)", options = listOf("Debit (kharch)", "Credit (mila)")), Field("Category", t.category, options = Categories.ALL))
+                  ) { v ->
+                      val n = t.copy(merchant = v[0].ifBlank { t.merchant }, amount = v[1].toDoubleOrNull() ?: t.amount, debit = v[2].startsWith("Debit"), category = v[3], status = "USER", review = false, reviewHash = null)
+                      val db = Db.get(act); db.updateTxn(n); Repo.ensurePayee(act, n)
+                      if (n.category == "Travel" || n.channel == "FASTAG") Tolls.record(act, n) else db.exec("DELETE FROM toll_trips WHERE txn_id=?", n.id)
+                      Learner.learnFromCorrection(act, t, n); act.refreshAll()
+                  }
+              }
+              fun addCash() {
+                  act.showForm("Cash entry",
+                      listOf(Field("Amount", "", true), Field("Type", "Spent (kharch)", options = listOf("Spent (kharch)", "Received (mila)")), Field("Kis kaam / naam", ""), Field("Category", "Other", options = Categories.ALL))
+                  ) { v ->
+                      val amt = v[0].toDoubleOrNull(); if (amt == null || amt <= 0) { act.toast("Amount sahi daalo"); return@showForm }
+                      val t = Txn(ts = System.currentTimeMillis(), amount = amt, debit = v[1].startsWith("Spent"), merchant = v[2].ifBlank { "Cash" }, category = v[3], institution = "Cash", channel = "CASH", source = "CASH", status = "USER")
+                      Repo.save(act, t); act.refreshAll()
+                  }
+              }
+          }
+          EOF_20
+
+          cat > app/src/main/java/com/example/fintrack/Screens2.kt <<'EOF_21'
+          package com.example.fintrack
+
+          import android.content.Context
+          import android.content.Intent
+          import android.graphics.Color
+          import android.net.Uri
+          import android.util.AttributeSet
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.CheckBox
+          import android.widget.EditText
+          import android.widget.HorizontalScrollView
+          import android.widget.LinearLayout
+          import android.widget.ListView
+          import android.widget.ScrollView
+          import androidx.appcompat.app.AlertDialog
+          import org.osmdroid.tileprovider.tilesource.OnlineTileSourceBase
+          import org.osmdroid.util.BoundingBox
+          import org.osmdroid.util.GeoPoint
+          import org.osmdroid.util.MapTileIndex
+          import org.osmdroid.views.MapView
+          import org.osmdroid.views.overlay.Marker
+          import org.osmdroid.views.overlay.Polyline
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+
+          private val OSMFR_HOT = object : OnlineTileSourceBase(
+              "OSM-FR-HOT", 0, 19, 256, ".png",
+              arrayOf("https://a.tile.openstreetmap.fr/hot/", "https://b.tile.openstreetmap.fr/hot/", "https://c.tile.openstreetmap.fr/hot/"),
+              "© OpenStreetMap contributors, Tiles: OSM-FR"
+          ) {
+              override fun getTileURLString(pMapTileIndex: Long): String =
+                  baseUrl + MapTileIndex.getZoom(pMapTileIndex) + "/" + MapTileIndex.getX(pMapTileIndex) + "/" + MapTileIndex.getY(pMapTileIndex) + mImageFilenameEnding
+          }
+
+          class RouteMapView @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? = null) : MapView(ctx, attrs) {
+              class Pt(val lat: Double, val lon: Double, val label: String, val ts: Long)
+              class Trip(val direction: String, val checkpoints: List<Pt>, val roadPolyline: List<DoubleArray>)
+              init {
+                  setTileSource(OSMFR_HOT); setMultiTouchControls(true); setBuiltInZoomControls(false)
+                  controller.setZoom(5.0); controller.setCenter(GeoPoint(22.0, 79.0))
+                  try { overlayManager.tilesOverlay.setColorFilter(null) } catch (_: Exception) {}
+              }
+              fun setTrips(trips: List<Trip>) {
+                  overlays.clear()
+                  val allPts = ArrayList<GeoPoint>()
+                  for (trip in trips) {
+                      val isGoing = trip.direction == "Going"
+                      val color = if (isGoing) Color.parseColor("#673AB7") else Color.parseColor("#FF4081")
+                      if (trip.roadPolyline.size >= 2) {
+                          val polyline = Polyline()
+                          polyline.setPoints(trip.roadPolyline.map { GeoPoint(it[0], it[1]) })
+                          polyline.outlinePaint.color = color
+                          polyline.outlinePaint.strokeWidth = if (isGoing) 12f else 8f
+                          overlays.add(polyline)
+                      }
+                      for (cp in trip.checkpoints) {
+                          allPts.add(GeoPoint(cp.lat, cp.lon))
+                          val m = Marker(this); m.position = GeoPoint(cp.lat, cp.lon)
+                          m.title = "${if (isGoing) "🟢" else "🔴"} ${cp.label}"
+                          m.snippet = SimpleDateFormat("HH:mm", Locale.US).format(Date(cp.ts))
+                          m.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM); overlays.add(m)
+                      }
+                  }
+                  if (allPts.isNotEmpty()) {
+                      try { zoomToBoundingBox(BoundingBox.fromGeoPoints(allPts), true, 80) } catch (_: Exception) {}
+                  }
+                  invalidate()
+              }
+          }
+
+          class TravelScreen(act: MainActivity) : Screen(act) {
+              private var tab = 0
+              private var selDay: String? = null
+              private var trips: List<TollTrip> = emptyList()
+              private var total = 0.0
+              private val summary = act.tv("", 13f, C.MUTED).apply { setPadding(act.dp(14), act.dp(8), act.dp(14), act.dp(2)) }
+              private val tabsBar = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; setPadding(act.dp(8), act.dp(4), act.dp(8), act.dp(4)) }
+              private val chips = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; setPadding(act.dp(8), 0, act.dp(8), 0) }
+              private val map = RouteMapView(act)
+              private val detail = act.vbox(10)
+              private val mapWrap = act.vbox(0)
+              private val tollList = act.vbox(8)
+              override val root: View = act.vbox().apply {
+                  put(summary, 0)
+                  put(tabsBar, 2)
+                  put(HorizontalScrollView(act).apply { isHorizontalScrollBarEnabled = false; addView(chips) }, 2)
+                  mapWrap.addView(map, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, act.dp(360)))
+                  put(mapWrap, 4)
+                  put(ScrollView(act).apply { addView(detail) }, 4, 1f)
+                  put(ScrollView(act).apply { addView(tollList); visibility = View.GONE }, 4, 1f)
+              }
+              override fun refresh() {
+                  Thread {
+                      val (built, sum) = Tolls.buildTrips(act)
+                      act.runOnUiThread { trips = built; total = sum; render() }
+                  }.start()
+              }
+              private fun render() {
+                  tabsBar.removeAllViews()
+                  tabsBar.addView(act.pill("Map", tab == 0) { tab = 0; render() })
+                  tabsBar.addView(act.pill("Tolls", tab == 1) { tab = 1; render() })
+                  summary.text = "${trips.size} trips  •  Total toll ${inr(total)}"
+                  chips.removeAllViews()
+                  chips.addView(act.pill("All", selDay == null) { selDay = null; render() })
+                  for (d in trips.map { it.dayKey }.distinct().reversed().take(30)) chips.addView(act.pill(d, selDay == d) { selDay = d; render() })
+                  chips.addView(act.pill("Fix Toll SMS", false) { Thread { val n = Tolls.rematchAll(act); act.runOnUiThread { act.toast("$n toll txns re-matched"); refresh() } }.start() })
+                  val visible = if (selDay == null) trips else trips.filter { it.dayKey == selDay }
+                  if (tab == 0) {
+                      mapWrap.visibility = View.VISIBLE
+                      (detail.parent as View).visibility = View.VISIBLE
+                      tollList.visibility = View.GONE
+                      val tripsForMap = visible.map { t -> RouteMapView.Trip(t.direction, t.checkpoints.map { RouteMapView.Pt(it.lat, it.lon, it.plaza, it.ts) }, t.roadPolyline) }
+                      map.setTrips(tripsForMap)
+                      detail.removeAllViews()
+                      if (visible.isEmpty()) detail.addView(act.tv("FASTag toll SMS milte hi yahan trips dikhengi.", 12f, C.MUTED))
+                      for (t in visible) {
+                          val card = act.card()
+                          val head = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+                          head.put(act.tv(t.dayKey, 14f, C.TEXT, true), 0, 1f)
+                          head.put(act.tv(t.direction, 11f, if (t.direction == "Going") C.ACCENT else C.RED, true), 0)
+                          card.addView(head)
+                          card.addView(act.tv("📍 ${t.title}", 12f, C.MUTED))
+                          card.addView(act.tv("Total toll: ${inr(t.total, true)}", 14f, C.TEXT, true))
+                          detail.put(card, 10)
+                      }
+                  } else {
+                      mapWrap.visibility = View.GONE
+                      (detail.parent as View).visibility = View.GONE
+                      tollList.visibility = View.VISIBLE
+                      tollList.removeAllViews()
+                      if (visible.isEmpty()) tollList.addView(act.tv("Koi toll entries nahi.", 12f, C.MUTED))
+                      for (t in visible) for (cp in t.checkpoints) {
+                          val row = act.card()
+                          row.addView(act.tv("📍 ${cp.plaza}", 14f, C.TEXT, true))
+                          row.addView(act.tv("${fmtDateTime(cp.ts)}  •  ${inr(cp.amount, true)}  •  ${t.direction}", 12f, C.MUTED))
+                          tollList.put(row, 6)
+                      }
+                  }
+              }
+          }
+
+          class PayeesScreen(act: MainActivity) : Screen(act) {
+              private var sortMode = "count"; private var selectMode = false; private var query = ""
+              private val selected = LinkedHashSet<String>()
+              private val sortChips = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; setPadding(act.dp(8), 0, act.dp(8), 0) }
+              private val summary = act.tv("", 12f, C.MUTED).apply { setPadding(act.dp(14), act.dp(8), act.dp(14), act.dp(4)) }
+              private val search: EditText = EditText(act).apply {
+                  hint = "Search payee / UPI"; setHintTextColor(C.MUTED); setTextColor(C.TEXT); setSingleLine()
+                  setPadding(act.dp(14), act.dp(10), act.dp(14), act.dp(10)); background = act.shape(C.CARD, 12)
+                  addTextChangedListener(object : android.text.TextWatcher {
+                      override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                      override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                      override fun afterTextChanged(s: android.text.Editable?) { query = s?.toString()?.trim() ?: ""; refresh() }
+                  })
+              }
+              private val adapter = RowAdapter<Map<String, String?>>(act, emptyList()) { p, r ->
+                  val key = p["k"] ?: ""; val name = p["display"] ?: ""
+                  val upi = p["upi_id"]
+                  r.icon.setImageResource(Icons.wallet(act, upi ?: name, R.drawable.ic_contacts)); r.icon.clearColorFilter()
+                  r.title.text = (if (selectMode && key in selected) "☑ " else "") + name
+                  r.sub.text = "${p["n"]} txns • ${if (upi.isNullOrBlank()) "no UPI" else upi}"
+                  val spent = p["spent"]?.toDoubleOrNull() ?: 0.0; val recv = p["recv"]?.toDoubleOrNull() ?: 0.0
+                  val sign: String = if (recv > 0 && spent == 0.0) "+" else if (spent > 0 && recv == 0.0) "-" else ""
+                  val total = when { sign == "+" -> recv; sign == "-" -> spent; else -> recv - spent }
+                  r.amt.text = sign + inr(total); r.amt.setTextColor(if (sign == "+") C.GREEN else if (sign == "-") C.RED else C.TEXT)
+              }
+              private lateinit var list: ListView
+              init {
+                  list = ListView(act).apply {
+                      divider = null; adapter = this@PayeesScreen.adapter
+                      setOnItemClickListener { _, _, pos, _ ->
+                          val p = this@PayeesScreen.adapter.items.getOrNull(pos) ?: return@setOnItemClickListener
+                          if (selectMode) { val k = p["k"] ?: return@setOnItemClickListener; if (!selected.add(k)) selected.remove(k); this@PayeesScreen.adapter.notifyDataSetChanged(); this@PayeesScreen.refresh() } else this@PayeesScreen.showPayee(p)
+                      }
+                      setOnItemLongClickListener { _, _, pos, _ ->
+                          val p = this@PayeesScreen.adapter.items.getOrNull(pos) ?: return@setOnItemLongClickListener false
+                          val k = p["k"] ?: return@setOnItemLongClickListener false
+                          selectMode = true; selected.add(k); this@PayeesScreen.adapter.notifyDataSetChanged(); this@PayeesScreen.refresh(); true
+                      }
+                  }
+              }
+              override val root: View = act.vbox().apply {
+                  put(search, 8); put(HorizontalScrollView(act).apply { isHorizontalScrollBarEnabled = false; addView(sortChips) }, 2); put(summary, 0); put(list, 0, 1f)
+              }
+              override fun refresh() {
+                  sortChips.removeAllViews()
+                  sortChips.addView(act.pill("Count", sortMode == "count") { sortMode = "count"; refresh() })
+                  sortChips.addView(act.pill("Name", sortMode == "name") { sortMode = "name"; refresh() })
+                  sortChips.addView(act.pill("Recent", sortMode == "recent") { sortMode = "recent"; refresh() })
+                  sortChips.addView(act.pill("Total", sortMode == "total") { sortMode = "total"; refresh() })
+                  sortChips.addView(act.pill("Unmerge last", false) {
+                      val ok = PayeeOps.undoLastMerge(act)
+                      if (ok) { act.toast("Last merge undone"); refresh() } else act.toast("Koi merge history nahi mili")
+                  })
+                  if (selectMode) {
+                      sortChips.addView(act.pill("Merge (${selected.size})", true) { if (selected.size < 2) { act.toast("Kam se kam 2 chuno"); return@pill }; askMerge(selected.toList()) })
+                      sortChips.addView(act.pill("Cancel", false) { selectMode = false; selected.clear(); refresh() })
+                  }
+                  val order = when (sortMode) { "name" -> "p.display ASC"; "recent" -> "last DESC"; "total" -> "spent DESC"; else -> "n DESC" }
+                  val like = "%$query%"
+                  val rows = Db.get(act).rows(
+                      "SELECT p.merchant_key AS k, p.display AS display, p.upi_id AS upi_id, COUNT(t.id) AS n, SUM(CASE WHEN t.debit=1 THEN t.amount ELSE 0 END) AS spent, SUM(CASE WHEN t.debit=0 THEN t.amount ELSE 0 END) AS recv, MAX(t.ts) AS last FROM payees p LEFT JOIN txn t ON t.merchant_key = p.merchant_key WHERE p.display LIKE ? OR p.upi_id LIKE ? GROUP BY p.merchant_key ORDER BY $order LIMIT 400",
+                      like, like)
+                  adapter.items = rows; adapter.notifyDataSetChanged(); summary.text = "${rows.size} payees"
+              }
+              private fun askMerge(keys: List<String>) {
+                  val names = keys.map { k -> Db.get(act).one("SELECT display FROM payees WHERE merchant_key=?", k) ?: k }
+                  val options = names.toMutableList(); options.add("Custom name…")
+                  AlertDialog.Builder(act).setTitle("Survivor naam")
+                      .setItems(options.toTypedArray()) { _, i ->
+                          if (i == options.size - 1) act.showForm("Custom survivor name", listOf(Field("Naam", names.first()))) { v -> doMerge(keys, v[0]) }
+                          else doMerge(keys, names[i])
+                      }.setNegativeButton("Cancel", null).show()
+              }
+              private fun doMerge(keys: List<String>, survivorName: String) {
+                  val survivorKey = Learner.norm(survivorName)
+                  Thread { PayeeOps.merge(act, keys, survivorKey, survivorName); act.runOnUiThread { selectMode = false; selected.clear(); act.toast("Merged ${keys.size} payees"); this.refresh() } }.start()
+              }
+              private fun showPayee(p: Map<String, String?>) {
+                  val key = p["k"] ?: return; val name = p["display"] ?: key
+                  val db = Db.get(act)
+                  val all = db.queryTxns("merchant_key=?", arrayOf(key), 500)
+                  val spent = all.filter { it.debit }.sumOf { it.amount }
+                  val recv = all.filter { !it.debit }.sumOf { it.amount }
+                  val col = act.vbox(10)
+                  col.addView(act.tv("Out: ${inr(spent)}  •  In: ${inr(recv)}  •  Net: ${inr(recv - spent)}", 13f, C.TEXT, true))
+                  if (!p["upi_id"].isNullOrBlank()) col.addView(act.tv("UPI: ${p["upi_id"]}", 12f, C.MUTED))
+                  val autoIds = PayeeOps.smartMidnightDeleteIds(all)
+                  if (autoIds.isNotEmpty()) col.addView(act.tv("💡 ${autoIds.size} duplicate entries mile — auto-tick", 12f, C.AMBER))
+                  val selectedIds = LinkedHashSet<Long>(autoIds)
+                  val historyContainer = act.vbox(6)
+                  for (t in all) {
+                      val line = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+                      val cb = CheckBox(act).apply { isChecked = autoIds.contains(t.id) }
+                      cb.setOnCheckedChangeListener { _, isChecked -> if (isChecked) selectedIds.add(t.id) else selectedIds.remove(t.id) }
+                      line.addView(cb)
+                      val info = act.vbox(2)
+                      info.addView(act.tv("${fmtDateTime(t.ts)}  •#${t.msgNo}  •  ${if (t.debit) "-" else "+"}${inr(t.amount, true)}  •  ${t.category}", 12f, if (t.debit) C.RED else C.GREEN))
+                      if (t.body.isNotEmpty()) info.addView(act.tv(t.body.take(100), 10f, C.MUTED))
+                      info.setOnClickListener {
+                          AlertDialog.Builder(act).setTitle(t.merchant).setMessage(t.body.ifBlank { "(no body)" })
+                              .setPositiveButton("Change category") { _, _ -> act.changeTxnCategory(t) { refresh() } }
+                              .setNeutralButton("Change payee") { _, _ -> act.changeTxnPayee(t) { refresh() } }
+                              .setNegativeButton("Close", null).show()
+                      }
+                      line.addView(info, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                      historyContainer.addView(line)
+                  }
+                  col.addView(ScrollView(act).apply { addView(historyContainer) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, act.dp(340)))
+                  val dlg = AlertDialog.Builder(act).setTitle(name).setView(ScrollView(act).apply { addView(col) })
+                      .setPositiveButton("UPI se pay") { _, _ -> pay(key, name, p["upi_id"]) }
+                      .setNegativeButton("Band karo", null)
+                      .setNeutralButton("Delete selected (${selectedIds.size})", null)
+                      .create()
+                  dlg.setOnShowListener {
+                      dlg.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                          if (selectedIds.isEmpty()) { act.toast("Pehle transactions chuno"); return@setOnClickListener }
+                          PayeeOps.bulkDelete(act, selectedIds.toList()); PayeeOps.cleanupOrphanPayees(act); act.toast("${selectedIds.size} deleted"); act.refreshAll(); dlg.dismiss()
+                      }
+                  }
+                  dlg.show()
+              }
+              private fun pay(key: String, name: String, upi: String?) {
+                  if (upi.isNullOrBlank() || !upi.contains("@")) { act.toast("UPI ID nahi mila"); return }
+                  act.showForm("Pay: $name", listOf(Field("Amount (optional)", "", true), Field("Note (optional)", "")), "Pay") { v ->
+                      var url = "upi://pay?pa=" + Uri.encode(upi) + "&pn=" + Uri.encode(name) + "&cu=INR"
+                      val amt = v[0].toDoubleOrNull(); if (amt != null && amt > 0) url += "&am=" + String.format(Locale.US, "%.2f", amt)
+                      if (v[1].isNotBlank()) url += "&tn=" + Uri.encode(v[1])
+                      try { act.startActivity(Intent.createChooser(Intent(Intent.ACTION_VIEW, Uri.parse(url)), "Pay with")) } catch (e: Exception) { act.toast("UPI app nahi mila") }
+                  }
+              }
+          }
+          EOF_21
+
+          cat > app/src/main/java/com/example/fintrack/Screens3.kt <<'EOF_22'
+          package com.example.fintrack
+
+          import android.graphics.Color
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.Switch
+          import java.text.SimpleDateFormat
+          import java.util.Calendar
+          import java.util.Date
+          import java.util.Locale
+
+          class ChartsScreen(act: MainActivity) : Screen(act) {
+              private var year = Calendar.getInstance().get(Calendar.YEAR)
+              private var month = Calendar.getInstance().get(Calendar.MONTH)
+              private val body = act.vbox(14)
+              override val root: View = ScrollView(act).apply { addView(body) }
+              override fun refresh() {
+                  body.removeAllViews()
+                  val db = Db.get(act)
+                  val cal = Calendar.getInstance().apply { set(Calendar.YEAR, year); set(Calendar.MONTH, month); set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }
+                  val start = cal.timeInMillis; cal.add(Calendar.MONTH, 1); val end = cal.timeInMillis
+                  val label = SimpleDateFormat("MMMM yyyy", Locale.getDefault()).format(Date(start))
+                  val bar = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setBackgroundColor(C.CARD); setPadding(act.dp(6), act.dp(6), act.dp(6), act.dp(6)) }
+                  bar.addView(act.tv("◀", 20f, C.TEXT).apply { gravity = Gravity.CENTER; setPadding(act.dp(12), act.dp(6), act.dp(12), act.dp(6)); setOnClickListener { month--; if (month < 0) { month = 11; year-- }; refresh() } })
+                  bar.addView(act.tv(label, 17f, C.TEXT, true).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                  bar.addView(act.tv("▶", 20f, C.TEXT).apply { gravity = Gravity.CENTER; setPadding(act.dp(12), act.dp(6), act.dp(12), act.dp(6)); setOnClickListener { month++; if (month > 11) { month = 0; year++ }; refresh() } })
+                  body.addView(bar)
+                  val spent = db.num("SELECT SUM(amount) FROM txn WHERE debit=1 AND ts>=? AND ts<?", start.toString(), end.toString())
+                  val recv = db.num("SELECT SUM(amount) FROM txn WHERE debit=0 AND ts>=? AND ts<?", start.toString(), end.toString())
+                  val cats = db.rows("SELECT category, SUM(amount) AS s FROM txn WHERE debit=1 AND ts>=? AND ts<? GROUP BY category ORDER BY s DESC", start.toString(), end.toString())
+                  val summary = act.card()
+                  summary.addView(act.tv("Kharch · $label", 12f, C.MUTED))
+                  summary.addView(act.tv(inr(spent), 28f, C.RED, true))
+                  summary.addView(act.tv("Income: ${inr(recv)}  •  Net: ${inr(recv - spent)}", 13f, C.MUTED))
+                  body.put(summary)
+                  if (cats.isEmpty()) { val e = act.card(); e.addView(act.tv("No data for $label", 15f, C.TEXT, true)); body.put(e); return }
+                  val donut = DonutView(act)
+                  donut.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, act.dp(280))
+                  val palette = intArrayOf(C.ACCENT, C.ACCENT2, C.RED, C.AMBER, Color.parseColor("#C084FC"), Color.parseColor("#22D3EE"), Color.parseColor("#F472B6"), Color.parseColor("#A3E635"))
+                  donut.updateSlices(cats.mapIndexed { i, r -> DonutView.Slice(r["category"] ?: "", (r["s"]?.toDoubleOrNull() ?: 0.0).toFloat(), palette[i % palette.size]) })
+                  val cc = act.card()
+                  cc.addView(act.tv("Category split", 15f, C.TEXT, true))
+                  cc.addView(donut)
+                  body.put(cc)
+                  val listCard = act.card()
+                  listCard.addView(act.tv("Breakdown", 15f, C.TEXT, true))
+                  for ((i, r) in cats.withIndex()) {
+                      val cat = r["category"] ?: "Other"
+                      val v = r["s"]?.toDoubleOrNull() ?: 0.0
+                      val pct = if (spent > 0) (v / spent * 100).toInt() else 0
+                      val row = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, act.dp(8), 0, act.dp(8)); setOnClickListener { act.openLedger(LedgerScreen.Filter(mode = "cat", category = cat, year = year, month = month)) } }
+                      row.addView(act.icon(Icons.category(act, cat, R.drawable.ic_bank), palette[i % palette.size], 26))
+                      val mid = act.vbox(2); mid.addView(act.tv(cat, 14f, C.TEXT, true)); mid.addView(act.tv("$pct% of month", 11f, C.MUTED))
+                      row.addView(mid, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = act.dp(10) })
+                      row.addView(act.tv(inr(v, true), 14f, C.TEXT, true))
+                      listCard.put(row, 4)
+                  }
+                  body.put(listCard)
+              }
+          }
+
+          class DataBackupScreen(act: MainActivity) : Screen(act) {
+              private val body = act.vbox(14)
+              override val root: View = ScrollView(act).apply { addView(body) }
+              override fun refresh() {
+                  body.removeAllViews()
+                  val nw = NetWorth.compute(act)
+                  val c = act.card()
+                  c.addView(act.icon(R.drawable.ic_networth, C.GREEN, 26))
+                  c.addView(act.tv("Net worth", 12f, C.MUTED))
+                  c.addView(act.tv(inr(nw.assets), 28f, C.GREEN, true))
+                  body.put(c, 0)
+                  val d = act.card()
+                  d.addView(act.tv("Data & Backup", 15f, C.TEXT, true))
+                  d.put(act.actionBtn("Backup CSV") { act.backup() }, 10)
+                  d.put(act.actionBtn("Restore CSV") { act.pickRestore() }, 8)
+                  d.put(act.actionBtn("Clean DB & restore backup") { act.cleanAndRestore() }, 8)
+                  d.put(act.actionBtn("Upload Bank Statement (CSV)") { act.pickCsvStatement() }, 8)
+                  d.put(act.actionBtn("Upload Toll Data JSON") { act.pickTollJson() }, 8)
+                  d.put(act.actionBtn("SMS dobara scan karo") { act.rescan() }, 8)
+                  d.put(act.actionBtn("Payment notification access") { act.openNotifAccessSettings() }, 8)
+                  body.put(d)
+                  val th = act.card()
+                  th.addView(act.tv("Settings", 15f, C.TEXT, true))
+                  val lockSwitch = Switch(act).apply { text = "Fingerprint lock"; isChecked = act.isLockEnabled(); setOnCheckedChangeListener { _, v -> act.setLockEnabled(v); act.toast(if (v) "Lock ON" else "Lock OFF") } }
+                  th.addView(lockSwitch)
+                  th.put(act.actionBtn("Theme: cycle (system → dark → light)") { act.toggleTheme() }, 10)
+                  body.put(th)
+              }
+          }
+
+          class AccountsScreen(act: MainActivity) : Screen(act) {
+              private val body = act.vbox(14)
+              override val root: View = ScrollView(act).apply { addView(body) }
+              override fun refresh() {
+                  body.removeAllViews()
+                  val db = Db.get(act)
+                  val nw = NetWorth.compute(act)
+                  val head = act.card()
+                  head.addView(act.tv("Accounts", 18f, C.TEXT, true))
+                  head.addView(act.tv("Total: ${inr(nw.assets)}", 14f, C.GREEN, true))
+                  body.put(head)
+                  val rows = db.rows("SELECT institution, account, balance, last_ts FROM accounts WHERE excluded=0 ORDER BY institution, account")
+                  if (rows.isEmpty()) {
+                      val e = act.card(); e.addView(act.tv("SMS scan hone par yahan accounts dikhenge.", 12f, C.MUTED)); body.put(e)
+                  } else {
+                      for (r in rows) {
+                          val inst = r["institution"] ?: ""; val acct = r["account"] ?: ""; val bal = r["balance"]?.toDoubleOrNull() ?: 0.0
+                          val last = r["last_ts"]?.toLongOrNull() ?: 0L
+                          val card = act.card()
+                          val top = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+                          top.addView(act.icon(Icons.bank(act, inst, R.drawable.ic_bank), C.TEXT, 30))
+                          val mid = act.vbox(2)
+                          mid.addView(act.tv(inst.ifBlank { "Unknown Bank" }, 14f, C.TEXT, true))
+                          if (acct.isNotBlank()) mid.addView(act.tv("A/c $acct", 11f, C.MUTED))
+                          if (last > 0) mid.addView(act.tv("Last seen " + fmtDate(last), 11f, C.MUTED))
+                          top.addView(mid, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = act.dp(10) })
+                          top.addView(act.tv(inr(bal, true), 15f, if (bal >= 0) C.GREEN else C.RED, true))
+                          card.addView(top)
+                          body.put(card, 10)
+                      }
+                  }
+              }
+          }
+          EOF_22
+
+          cat > app/src/main/java/com/example/fintrack/HomeScreen.kt <<'EOF_HOME'
+          package com.example.fintrack
+
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import java.text.SimpleDateFormat
+          import java.util.Calendar
+          import java.util.Date
+          import java.util.Locale
+
+          class HomeScreen(act: MainActivity) : Screen(act) {
+              private val body = act.vbox(12)
+              private var year = Calendar.getInstance().get(Calendar.YEAR)
+              private var month = Calendar.getInstance().get(Calendar.MONTH)
+              override val root: View = ScrollView(act).apply { addView(body) }
+              override fun refresh() {
+                  body.removeAllViews()
+                  val db = Db.get(act)
+                  val cal = Calendar.getInstance().apply { set(Calendar.YEAR, year); set(Calendar.MONTH, month); set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }
+                  val start = cal.timeInMillis
+                  val daysInMonth = cal.getActualMaximum(Calendar.DAY_OF_MONTH)
+                  cal.add(Calendar.MONTH, 1); val end = cal.timeInMillis
+                  val label = SimpleDateFormat("MMMM yyyy", Locale.getDefault()).format(Date(start))
+                  val spent = db.num("SELECT SUM(amount) FROM txn WHERE debit=1 AND ts>=? AND ts<?", start.toString(), end.toString())
+                  val recv = db.num("SELECT SUM(amount) FROM txn WHERE debit=0 AND ts>=? AND ts<?", start.toString(), end.toString())
+                  body.addView(toolbar(label))
+                  val exp = act.card()
+                  exp.addView(act.tv("Expenses · $label", 12f, C.MUTED))
+                  exp.addView(act.tv(inr(spent), 30f, C.RED, true))
+                  exp.addView(act.tv("Income ${inr(recv)}", 13f, C.GREEN))
+                  val now = System.currentTimeMillis()
+                  val elapsed = (((now - start).toFloat() / 86_400_000f).coerceIn(1f, daysInMonth.toFloat()))
+                  val projected = (spent / elapsed) * daysInMonth
+                  val avgText = if (projected > 0) "Projected: ${inr(projected)}  •  ${((spent / projected) * 100).toInt()}% used" else "No spend yet"
+                  exp.addView(act.tv(avgText, 12f, C.MUTED))
+                  val btnRow = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL }
+                  btnRow.addView(act.actionBtn("VIEW CHARTS") { act.show(act.chartsIndex()) }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                  exp.put(btnRow, 10)
+                  body.put(exp)
+                  val latest = db.queryTxns("1=1", emptyArray(), 5)
+                  val lt = act.card()
+                  lt.addView(act.tv("Latest transactions", 15f, C.TEXT, true))
+                  if (latest.isEmpty()) lt.addView(act.tv("Abhi tak koi txn nahi. SMS scan karo.", 12f, C.MUTED))
+                  else for (t in latest) {
+                      val r = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, act.dp(8), 0, act.dp(8)); setOnClickListener { act.show(act.ledgerIndex()) } }
+                      r.addView(act.icon(Icons.category(act, t.category, R.drawable.ic_bank), C.ACCENT, 24))
+                      val mid = act.vbox(2); mid.addView(act.tv(t.merchant, 13f, C.TEXT, true)); mid.addView(act.tv(fmtDate(t.ts) + " · " + t.institution + " •#" + t.msgNo, 11f, C.MUTED))
+                      r.addView(mid, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = act.dp(10) })
+                      r.addView(act.tv((if (t.debit) "-" else "+") + inr(t.amount, true), 13f, if (t.debit) C.RED else C.GREEN, true))
+                      lt.put(r, 2)
+                  }
+                  lt.put(act.actionBtn("VIEW TRANSACTIONS") { act.show(act.ledgerIndex()) }, 10)
+                  body.put(lt)
+                  val half = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL }
+                  val cash = db.num("SELECT SUM(amount) FROM txn WHERE debit=1 AND channel='CASH' AND ts>=? AND ts<?", start.toString(), end.toString())
+                  val cashCard = act.card()
+                  cashCard.addView(act.icon(R.drawable.ic_grocery, C.AMBER, 22))
+                  cashCard.addView(act.tv("Cash out", 11f, C.MUTED))
+                  cashCard.addView(act.tv(inr(cash), 16f, C.AMBER, true))
+                  cashCard.setOnClickListener { act.openLedger(LedgerScreen.Filter(mode = "debit", year = year, month = month)) }
+                  half.addView(cashCard, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = act.dp(6) })
+                  val nw = NetWorth.compute(act)
+                  val accCard = act.card()
+                  accCard.addView(act.icon(R.drawable.ic_bank, C.ACCENT, 22))
+                  accCard.addView(act.tv("Accounts", 11f, C.MUTED))
+                  accCard.addView(act.tv("${nw.bank.size} bank" + (if (nw.bank.size == 1) "" else "s"), 13f, C.TEXT, true))
+                  accCard.addView(act.tv(inr(nw.assets), 15f, C.GREEN, true))
+                  accCard.setOnClickListener { act.show(act.accountsIndex()) }
+                  half.addView(accCard, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = act.dp(6) })
+                  body.put(half)
+                  val review = db.num("SELECT COUNT(*) FROM txn WHERE review=1").toInt()
+                  if (review > 0) {
+                      val rc = act.card()
+                      rc.addView(act.tv("⚠ $review txns need fixing", 14f, C.AMBER, true))
+                      rc.addView(act.tv("Tap karke correct karo", 12f, C.MUTED))
+                      rc.setOnClickListener { act.openLedger(LedgerScreen.Filter(mode = "review")) }
+                      body.put(rc)
+                  }
+                  val billsThisMonth = db.num("SELECT COUNT(*) FROM txn WHERE debit=1 AND category='Bills & Recharge' AND ts>=? AND ts<?", start.toString(), end.toString()).toInt()
+                  val billCard = act.card()
+                  billCard.addView(act.tv("Bills & subscriptions", 15f, C.TEXT, true))
+                  billCard.addView(act.tv(if (billsThisMonth == 0) "No bills this month" else "$billsThisMonth paid this month", 12f, C.MUTED))
+                  billCard.put(act.actionBtn("VIEW BILLS") { act.openLedger(LedgerScreen.Filter(mode = "cat", category = "Bills & Recharge", year = year, month = month)) }, 10)
+                  body.put(billCard)
+                  val nwCard = act.card()
+                  nwCard.addView(act.tv("Net worth", 12f, C.MUTED))
+                  nwCard.addView(act.tv(inr(nw.assets - nw.liabilities), 24f, if (nw.assets >= nw.liabilities) C.GREEN else C.RED, true))
+                  nwCard.setOnClickListener { act.show(act.accountsIndex()) }
+                  body.put(nwCard)
+              }
+              private fun toolbar(label: String): View {
+                  val bar = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setBackgroundColor(C.CARD); setPadding(act.dp(6), act.dp(6), act.dp(6), act.dp(6)) }
+                  bar.addView(act.icon(R.drawable.ic_categories_grid, C.TEXT, 24).apply { setPadding(act.dp(10), act.dp(10), act.dp(10), act.dp(10)); setOnClickListener { act.openDrawer() } })
+                  bar.addView(act.tv("◀", 18f, C.TEXT).apply { gravity = Gravity.CENTER; setPadding(act.dp(8), act.dp(6), act.dp(8), act.dp(6)); setOnClickListener { month--; if (month < 0) { month = 11; year-- }; refresh() } })
+                  bar.addView(act.tv(label, 15f, C.TEXT, true).apply { gravity = Gravity.CENTER; setOnClickListener { pickMonthYear() } }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                  bar.addView(act.tv("▶", 18f, C.TEXT).apply { gravity = Gravity.CENTER; setPadding(act.dp(8), act.dp(6), act.dp(8), act.dp(6)); setOnClickListener { month++; if (month > 11) { month = 0; year++ }; refresh() } })
+                  bar.addView(act.icon(R.drawable.ic_transfer, C.TEXT, 22).apply { setPadding(act.dp(10), act.dp(10), act.dp(10), act.dp(10)); setOnClickListener { act.show(act.ledgerIndex()) } })
+                  return bar
+              }
+              private fun pickMonthYear() {
+                  val years = (Calendar.getInstance().get(Calendar.YEAR) - 5..Calendar.getInstance().get(Calendar.YEAR) + 1).toList()
+                  android.app.AlertDialog.Builder(act).setTitle("Year").setItems(years.map { it.toString() }.toTypedArray()) { _, yi ->
+                      val y = years[yi]; val months = listOf("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec")
+                      android.app.AlertDialog.Builder(act).setTitle("Month ($y)").setItems(months.toTypedArray()) { _, mi -> year = y; month = mi; refresh() }.show()
+                  }.show()
+              }
+          }
+          EOF_HOME
 
           cat > app/src/main/res/drawable/ic_bank.xml <<'EOF_D0'
           <?xml version="1.0" encoding="utf-8"?>
@@ -3084,13 +3246,6 @@ jobs:
           </vector>
           EOF_D8
 
-          cat > app/src/main/res/drawable/ic_settings_24dp.xml <<'EOF_D10'
-          <?xml version="1.0" encoding="utf-8"?>
-          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
-              <path android:pathData="M12,15a3,3 0 1,0 0,-6a3,3 0 0,0 0,6z" android:strokeColor="#FFFFFFFF" android:strokeWidth="2" android:fillColor="#00000000"/>
-          </vector>
-          EOF_D10
-
       - name: Build Debug APK
         working-directory: /tmp/proj
         run: gradle assembleDebug --no-daemon
@@ -3099,8 +3254,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="v10.3.${{ github.run_number }}"
+          VERSION="v10.4.${{ github.run_number }}"
           gh release create "$VERSION" /tmp/proj/app/build/outputs/apk/debug/app-debug.apk \
             --repo "${{ github.repository }}" \
             --title "FinTrack Build ${{ github.run_number }}" \
-            --notes "v10.3: drawer nav + FinArt-style Home tile stack (Expenses + VIEW CHARTS, Latest transactions, Cash/Accounts halves, Review, Bills, Net worth, Controls) + Charts screen + Data&Backup screen. All existing features (SMS, dedupe, merge/unmerge, travel OSRM map, backup) preserved. Icons.kt wired everywhere."
+            --notes "v10.4: persistent hamburger + bottom nav; Accounts screen with real bank data; back button 3-press exit; fingerprint toggle in settings; Payee txn tap -> category/payee change; unique msg_no per txn; Travel Map|Tolls tab; Ledger year-grouped with full totals + loading spinner; controls removed from Home; FinArt purple/pink theme."
