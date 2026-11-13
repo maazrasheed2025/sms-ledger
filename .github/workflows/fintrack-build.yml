@@ -2693,7 +2693,18 @@ jobs:
               }
           }
           EOF_22
-
+# v12.0 hotfix: fix lambda-in-listener return type for pie long-press
+python3 - <<'PYEOF'
+import io
+p = 'app/src/main/java/com/example/fintrack/HomeScreen.kt'
+with io.open(p, 'r', encoding='utf-8') as f:
+    src = f.read()
+old = 'act.toast("Budget set"); true }; }'
+new = 'act.toast("Budget set") } }; true }'
+src = src.replace(old, new)
+with io.open(p, 'w', encoding='utf-8') as f:
+    f.write(src)
+PYEOF
       - name: Build Debug APK
         working-directory: /tmp/proj
         run: gradle assembleDebug --no-daemon
