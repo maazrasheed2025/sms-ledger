@@ -29,10 +29,6 @@ jobs:
         run: |
           mkdir -p /tmp/proj/app/src/main/java/com/example/fintrack /tmp/proj/app/src/main/res/drawable /tmp/proj/app/src/main/res/values /tmp/proj/app/src/main/res/xml
           cd /tmp/proj
-# auto-fix: broken merge_sel string interpolation in Screens2.kt
-find app/src/main/java/com/example/fintrack -name 'Screens2.kt' -exec sed -i 's|sortChips.addView(act.pill("${Str.s("merge_sel")}.*|sortChips.addView(act.pill("Merge (${selected.size})", true) { if (selected.size < 2) { act.toast(Str.s("select_two")); return@pill }; askMerge(selected.toList()) })|' {} \;
-# auto-fix: broken theme button in Screens3.kt
-find app/src/main/java/com/example/fintrack -name 'Screens3.kt' -exec sed -i 's|th.put(act.actionBtn(Str.s("theme")) + ": cycle.*|th.put(act.actionBtn(Str.s("theme") + ": cycle") { act.toggleTheme() }, 10)|' {} \;
 
           if [ -d "$GITHUB_WORKSPACE/app/src/main/res/drawable-nodpi" ]; then
             mkdir -p app/src/main/res/drawable-nodpi
@@ -73,8 +69,8 @@ find app/src/main/java/com/example/fintrack -name 'Screens3.kt' -exec sed -i 's|
                   applicationId = "com.example.fintrack"
                   minSdk = 30
                   targetSdk = 33
-                  versionCode = 23
-                  versionName = "10.5"
+                  versionCode = 24
+                  versionName = "10.5.1"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -313,7 +309,7 @@ find app/src/main/java/com/example/fintrack -name 'Screens3.kt' -exec sed -i 's|
           object Str {
               private val en: Map<String, String> = mapOf(
                   "home" to "Home", "ledger" to "Ledger", "travel" to "Travel", "payees" to "Payees",
-                  "accounts" to "Accounts", "charts" to "Charts", "settings" to "Settings", "data_backup" to "Settings",
+                  "accounts" to "Accounts", "charts" to "Charts", "settings" to "Settings",
                   "expenses" to "Expenses", "income" to "Income", "latest_txns" to "Latest transactions",
                   "view_txns" to "VIEW TRANSACTIONS", "view_charts" to "VIEW CHARTS", "view_bills" to "VIEW BILLS",
                   "cash_atm" to "Cash (ATM)", "net_worth" to "Net worth", "review" to "Review",
@@ -331,9 +327,8 @@ find app/src/main/java/com/example/fintrack -name 'Screens3.kt' -exec sed -i 's|
                   "change_category" to "Change category", "change_payee" to "Change payee",
                   "edit" to "Edit", "close" to "Close", "message" to "Message", "none" to "(none)",
                   "pay_upi" to "Pay via UPI", "upi_id_missing" to "UPI ID missing",
-                  "map" to "Map", "tolls" to "Tolls", "all_days" to "All", "fix_toll_sms" to "Fix toll SMS",
-                  "no_tolls" to "No toll entries yet.",
-                  "no_trips" to "No trips yet. Toll SMS will appear here.",
+                  "map" to "Map", "tolls" to "Tolls", "fix_toll_sms" to "Fix toll SMS",
+                  "no_tolls" to "No toll entries yet.", "no_trips" to "No trips yet. Toll SMS will appear here.",
                   "no_dup" to "No duplicates found.", "duplicates" to "Duplicates — tick to delete",
                   "delete_ticked" to "Delete ticked", "smart_select" to "Smart select",
                   "backup" to "Backup", "restore" to "Restore", "clean_restore" to "Clean DB & restore backup",
@@ -341,120 +336,84 @@ find app/src/main/java/com/example/fintrack -name 'Screens3.kt' -exec sed -i 's|
                   "rescan_sms" to "Rescan SMS", "notif_access" to "Payment notification access",
                   "fingerprint_lock" to "Fingerprint lock", "theme" to "Theme",
                   "language" to "Language", "lang_english" to "English", "lang_hinglish" to "Hinglish",
-                  "lock_on" to "Lock ON", "lock_off" to "Lock OFF",
-                  "scanning" to "Scanning SMS…",
+                  "lock_on" to "Lock ON", "lock_off" to "Lock OFF", "scanning" to "Scanning SMS…",
                   "scan_done" to "SMS scan complete", "scanned" to "Scanned", "imported" to "Imported",
                   "skipped_dup" to "Skipped (dup)", "ignored" to "Ignored", "next_scan" to "Next scan after",
-                  "quick_add" to "Quick add", "cash_entry" to "Cash entry", "data_imports" to "Settings",
-                  "restore_file" to "Restore CSV", "add_note" to "Note on a txn (open Ledger)",
-                  "ok" to "OK", "band_karo" to "Close",
+                  "quick_add" to "Quick add", "cash_entry" to "Cash entry",
+                  "add_note" to "Note on a txn (open Ledger)", "ok" to "OK",
                   "back_again" to "Press back 2 more times to exit",
                   "back_again2" to "Press back 1 more time to exit",
-                  "welcome" to "Welcome to FinTrack", "first_run_msg" to "What do you want to do first?\n\n• Scan SMS — import bank transactions from inbox\n• Restore backup — restores CSV; older SMS won't re-import after this",
+                  "welcome" to "Welcome to FinTrack",
+                  "first_run_msg" to "What do you want to do first?\n\n• Scan SMS — import bank transactions from inbox\n• Restore backup — restores CSV; older SMS won't re-import after this",
                   "scan_sms" to "Scan SMS", "restore_backup" to "Restore backup", "later" to "Later",
                   "balance" to "Balance", "source" to "Source", "parse" to "Parse",
-                  "upto_year" to "Show ${'$'}${'$'}year${'$'}${'$'} entries",
                   "no_data_month" to "No data for this month",
                   "category_split" to "Category split", "breakdown" to "Breakdown",
                   "pct_of_month" to "% of month",
                   "bank_accounts" to "Bank accounts", "wallets" to "Wallets", "loans" to "Loans",
                   "add_id" to "Add another UPI / name for this person",
                   "add_id_hint" to "e.g. name@upi or rahul.sharma@okhdfc",
-                  "add_btn" to "Add & merge",
-                  "merge_done" to "Merged",
-                  "unmerge_last" to "Unmerge last",
-                  "merge_sel" to "Merge (${'$'}${'$'}n${'$'}${'$'})",
-                  "count" to "Count", "name" to "Name", "recent" to "Recent",
-                  "txn_count" to "txns",
-                  "no_upi" to "no UPI",
+                  "add_btn" to "Add & merge", "merge_done" to "Merged",
+                  "unmerge_last" to "Unmerge last", "count" to "Count", "name" to "Name", "recent" to "Recent",
+                  "txn_count" to "txns", "no_upi" to "no UPI",
                   "out_short" to "Sent", "in_short" to "Recd",
-                  "unmerge_ok" to "Last merge undone",
-                  "unmerge_none" to "No merge history",
+                  "unmerge_ok" to "Last merge undone", "unmerge_none" to "No merge history",
                   "select_two" to "Select at least 2",
                   "search_hint" to "Search · #cat · >500 · <2024-06",
                   "search_payee" to "Search payee / UPI",
                   "new_payee" to "New payee / shop", "payee_blank" to "Name cannot be empty",
                   "amount_bad" to "Enter a valid amount", "type" to "Type",
-                  "spent" to "Spent", "received" to "Received",
-                  "kisko" to "Who / merchant",
-                  "year_row" to "📅 ${'$'}${'$'}y${'$'}${'$'} · ${'$'}${'$'}n${'$'}${'$'} entries",
+                  "spent" to "Spent", "received" to "Received", "kisko" to "Who / merchant",
                   "long_press_hint" to "Long-press any txn to delete or select",
                   "prev" to "Previous", "next" to "Next",
                   "loan_account" to "Loan account", "no_accounts_yet" to "No accounts yet. Scan SMS to populate.",
-                  "last_seen" to "Last seen"
+                  "last_seen" to "Last seen", "merge_btn" to "Merge"
               )
-              private val hi: Map<String, String> = mapOf(
-                  "home" to "Home", "ledger" to "Ledger", "travel" to "Travel", "payees" to "Payees",
-                  "accounts" to "Accounts", "charts" to "Charts", "settings" to "Settings", "data_backup" to "Settings",
-                  "expenses" to "Kharch", "income" to "Aaya", "latest_txns" to "Latest transactions",
-                  "view_txns" to "VIEW TRANSACTIONS", "view_charts" to "VIEW CHARTS", "view_bills" to "VIEW BILLS",
-                  "cash_atm" to "Cash (ATM)", "net_worth" to "Net worth", "review" to "Review",
-                  "review_needed" to "transactions ko review chahiye", "tap_fix" to "Tap karke fix karo",
-                  "bills_subs" to "Bills aur subscriptions", "no_bills" to "Is mahine koi bill nahi",
-                  "paid_this_month" to "is mahine paid", "projected" to "Projected",
-                  "used" to "used", "no_spend" to "Abhi tak koi kharch nahi",
-                  "no_txns" to "Abhi tak koi txn nahi. SMS scan karo.",
-                  "search" to "Search", "all" to "All", "review_chip" to "Review",
-                  "debit" to "Diya", "credit" to "Aaya", "scan_duplicates" to "Duplicates dhoondo",
-                  "merge_to_payee" to "Payee me merge", "delete" to "Delete", "cancel" to "Cancel",
-                  "categorize" to "Category badlo", "year" to "Saal", "month" to "Mahina",
-                  "loading" to "Load ho raha…", "entries" to "entries", "in_label" to "Aaya", "out_label" to "Diya",
-                  "net_label" to "Net", "total" to "Total", "category" to "Category",
-                  "change_category" to "Category badlo", "change_payee" to "Payee badlo",
-                  "edit" to "Edit", "close" to "Band karo", "message" to "Message", "none" to "(kuch nahi)",
-                  "pay_upi" to "UPI se pay", "upi_id_missing" to "UPI ID nahi mila",
-                  "map" to "Map", "tolls" to "Tolls", "all_days" to "All", "fix_toll_sms" to "Toll SMS fix",
-                  "no_tolls" to "Koi toll entry nahi.",
-                  "no_trips" to "Koi trip nahi. Toll SMS yahan dikhenge.",
-                  "no_dup" to "Koi duplicate nahi mila.", "duplicates" to "Duplicates — tick to delete",
-                  "delete_ticked" to "Tick kiya hua delete", "smart_select" to "Smart select",
-                  "backup" to "Backup", "restore" to "Restore", "clean_restore" to "Clean DB & restore backup",
-                  "upload_csv" to "Bank statement (CSV) upload", "upload_toll" to "Toll data (JSON) upload",
-                  "rescan_sms" to "SMS dobara scan", "notif_access" to "Payment notification access",
-                  "fingerprint_lock" to "Fingerprint lock", "theme" to "Theme",
-                  "language" to "Bhasha", "lang_english" to "English", "lang_hinglish" to "Hinglish",
-                  "lock_on" to "Lock ON", "lock_off" to "Lock OFF",
-                  "scanning" to "SMS scan ho raha…",
-                  "scan_done" to "SMS scan complete", "scanned" to "Scanned", "imported" to "Imported",
-                  "skipped_dup" to "Skipped (dup)", "ignored" to "Ignored", "next_scan" to "Next scan after",
-                  "quick_add" to "Quick add", "cash_entry" to "Cash entry", "data_imports" to "Settings",
-                  "restore_file" to "Restore CSV", "add_note" to "Kisi txn pe note (Ledger kholo)",
-                  "ok" to "OK", "band_karo" to "Band karo",
-                  "back_again" to "Back 2 aur baar dabao exit ke liye",
-                  "back_again2" to "Back 1 aur baar dabao exit ke liye",
-                  "welcome" to "FinTrack me swagat", "first_run_msg" to "Pehle kya karna hai?\n\n• Scan SMS — inbox se bank transactions import\n• Restore backup — CSV restore; uske baad older SMS re-import nahi honge",
-                  "scan_sms" to "Scan SMS", "restore_backup" to "Restore backup", "later" to "Baad me",
-                  "balance" to "Balance", "source" to "Source", "parse" to "Parse",
-                  "upto_year" to "${'$'}${'$'}year${'$'}${'$'} entries dikhao",
-                  "no_data_month" to "Is mahine koi data nahi",
-                  "category_split" to "Category split", "breakdown" to "Breakdown",
-                  "pct_of_month" to "% of month",
-                  "bank_accounts" to "Bank accounts", "wallets" to "Wallets", "loans" to "Loans",
-                  "add_id" to "Is insaan ke liye doosri UPI / naam add karo",
-                  "add_id_hint" to "jaise name@upi ya rahul.sharma@okhdfc",
-                  "add_btn" to "Add & merge",
-                  "merge_done" to "Merge ho gaya",
-                  "unmerge_last" to "Unmerge last",
-                  "merge_sel" to "Merge (${'$'}${'$'}n${'$'}${'$'})",
-                  "count" to "Count", "name" to "Name", "recent" to "Recent",
-                  "txn_count" to "txns",
-                  "no_upi" to "koi UPI nahi",
-                  "out_short" to "Diya", "in_short" to "Aaya",
-                  "unmerge_ok" to "Last merge undo ho gaya",
-                  "unmerge_none" to "Koi merge history nahi",
-                  "select_two" to "Kam se kam 2 chuno",
-                  "search_hint" to "Search · #cat · >500 · <2024-06",
-                  "search_payee" to "Payee / UPI search",
-                  "new_payee" to "Naya payee / dukaan", "payee_blank" to "Naam khali nahi ho sakta",
-                  "amount_bad" to "Sahi amount daalo", "type" to "Type",
-                  "spent" to "Kharch", "received" to "Mila",
-                  "kisko" to "Kisko / dukaan",
-                  "year_row" to "📅 ${'$'}${'$'}y${'$'}${'$'} · ${'$'}${'$'}n${'$'}${'$'} entries",
-                  "long_press_hint" to "Kisi bhi txn ko long-press karke delete ya select karo",
-                  "prev" to "Pehla", "next" to "Agla",
-                  "loan_account" to "Loan account", "no_accounts_yet" to "Abhi koi account nahi. SMS scan karo.",
-                  "last_seen" to "Last seen"
-              )
+              private val hi: Map<String, String> = en.toMutableMap().apply {
+                  put("home", "Home"); put("ledger", "Ledger"); put("travel", "Travel"); put("payees", "Payees")
+                  put("accounts", "Accounts"); put("charts", "Charts"); put("settings", "Settings")
+                  put("expenses", "Kharch"); put("income", "Aaya"); put("latest_txns", "Latest transactions")
+                  put("cash_atm", "Cash (ATM)"); put("net_worth", "Net worth")
+                  put("review_needed", "transactions ko review chahiye"); put("tap_fix", "Tap karke fix karo")
+                  put("no_bills", "Is mahine koi bill nahi"); put("paid_this_month", "is mahine paid")
+                  put("projected", "Projected"); put("used", "used"); put("no_spend", "Abhi tak koi kharch nahi")
+                  put("no_txns", "Abhi tak koi txn nahi. SMS scan karo.")
+                  put("debit", "Diya"); put("credit", "Aaya")
+                  put("scan_duplicates", "Duplicates dhoondo"); put("merge_to_payee", "Payee me merge")
+                  put("delete", "Delete"); put("cancel", "Cancel"); put("categorize", "Category badlo")
+                  put("year", "Saal"); put("month", "Mahina")
+                  put("loading", "Load ho raha…"); put("in_label", "Aaya"); put("out_label", "Diya")
+                  put("change_category", "Category badlo"); put("change_payee", "Payee badlo")
+                  put("close", "Band karo"); put("none", "(kuch nahi)")
+                  put("pay_upi", "UPI se pay"); put("upi_id_missing", "UPI ID nahi mila")
+                  put("fix_toll_sms", "Toll SMS fix"); put("no_tolls", "Koi toll entry nahi.")
+                  put("no_trips", "Koi trip nahi. Toll SMS yahan dikhenge.")
+                  put("no_dup", "Koi duplicate nahi mila.")
+                  put("delete_ticked", "Tick kiya hua delete"); put("smart_select", "Smart select")
+                  put("rescan_sms", "SMS dobara scan"); put("notif_access", "Payment notification access")
+                  put("fingerprint_lock", "Fingerprint lock"); put("language", "Bhasha")
+                  put("lock_on", "Lock ON"); put("lock_off", "Lock OFF"); put("scanning", "SMS scan ho raha…")
+                  put("scan_done", "SMS scan complete"); put("quick_add", "Quick add")
+                  put("add_note", "Kisi txn pe note (Ledger kholo)")
+                  put("back_again", "Back 2 aur baar dabao exit ke liye")
+                  put("back_again2", "Back 1 aur baar dabao exit ke liye")
+                  put("welcome", "FinTrack me swagat")
+                  put("first_run_msg", "Pehle kya karna hai?\n\n• Scan SMS — inbox se bank transactions import\n• Restore backup — CSV restore; uske baad older SMS re-import nahi honge")
+                  put("scan_sms", "Scan SMS"); put("restore_backup", "Restore backup"); put("later", "Baad me")
+                  put("no_data_month", "Is mahine koi data nahi")
+                  put("bank_accounts", "Bank accounts"); put("wallets", "Wallets"); put("loans", "Loans")
+                  put("add_id", "Is insaan ke liye doosri UPI / naam add karo")
+                  put("add_id_hint", "jaise name@upi ya rahul.sharma@okhdfc"); put("add_btn", "Add & merge")
+                  put("merge_done", "Merge ho gaya"); put("unmerge_last", "Unmerge last")
+                  put("no_upi", "koi UPI nahi"); put("out_short", "Diya"); put("in_short", "Aaya")
+                  put("unmerge_ok", "Last merge undo ho gaya"); put("unmerge_none", "Koi merge history nahi")
+                  put("select_two", "Kam se kam 2 chuno")
+                  put("new_payee", "Naya payee / dukaan"); put("payee_blank", "Naam khali nahi ho sakta")
+                  put("amount_bad", "Sahi amount daalo"); put("spent", "Kharch"); put("received", "Mila")
+                  put("kisko", "Kisko / dukaan")
+                  put("long_press_hint", "Kisi bhi txn ko long-press karke delete ya select karo")
+                  put("no_accounts_yet", "Abhi koi account nahi. SMS scan karo.")
+              }
               @Volatile private var hinglish = false
               fun setHinglish(v: Boolean) { hinglish = v }
               fun isHinglish(): Boolean = hinglish
@@ -477,7 +436,7 @@ find app/src/main/java/com/example/fintrack -name 'Screens3.kt' -exec sed -i 's|
 
           object Backup {
               val CANONICAL = listOf("Bank", "Account_No", "Txn_Date", "Description", "Ref_No", "Withdrawal", "Deposit", "Category", "UPI_ID")
-              private val tables = listOf("txn","payees","net_items","senders","merchant_rules","parse_patterns","nb_words","toll_trips","toll_plazas","payee_tags","loans","payee_merges","accounts")
+              private val tables = listOf("txn","payees","net_items","senders","merchant_rules","parse_patterns","nb_words","toll_trips","toll_plazas","payee_tags","loans","payee_merges","accounts","payee_aliases")
               private val dateFmt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
               private fun q(s: String): String = "\"" + s.replace("\r", " ").replace("\n", " ").replace("\"", "\"\"") + "\""
               fun export(ctx: Context): String {
@@ -658,13 +617,7 @@ find app/src/main/java/com/example/fintrack -name 'Screens3.kt' -exec sed -i 's|
                   }
                   if (oldVersion < 10) {
                       runCatching { db.execSQL("ALTER TABLE accounts ADD COLUMN kind TEXT DEFAULT 'BANK'") }
-                      runCatching {
-                          db.execSQL("CREATE TABLE IF NOT EXISTS accounts2 (id INTEGER PRIMARY KEY AUTOINCREMENT, institution TEXT, account TEXT, kind TEXT DEFAULT 'BANK', balance REAL, last_ts INTEGER, excluded INTEGER DEFAULT 0, UNIQUE(institution, account, kind))")
-                          db.execSQL("INSERT OR IGNORE INTO accounts2(institution, account, kind, balance, last_ts, excluded) SELECT institution, account, 'BANK', balance, last_ts, excluded FROM accounts")
-                          db.execSQL("DROP TABLE accounts")
-                          db.execSQL("ALTER TABLE accounts2 RENAME TO accounts")
-                      }
-                      db.execSQL("CREATE TABLE IF NOT EXISTS payee_aliases (alias_key TEXT PRIMARY KEY, payee_key TEXT, created_at INTEGER)")
+                      runCatching { db.execSQL("CREATE TABLE IF NOT EXISTS payee_aliases (alias_key TEXT PRIMARY KEY, payee_key TEXT, created_at INTEGER)") }
                   }
               }
               fun rows(sql: String, vararg args: String): List<Map<String, String?>> {
@@ -1532,7 +1485,7 @@ find app/src/main/java/com/example/fintrack -name 'Screens3.kt' -exec sed -i 's|
                       val url = URL("https://router.project-osrm.org/route/v1/driving/$coords?overview=full&geometries=polyline")
                       val conn = url.openConnection() as HttpURLConnection
                       conn.requestMethod = "GET"; conn.connectTimeout = 8000; conn.readTimeout = 8000
-                      conn.setRequestProperty("User-Agent", "FinTrack/10.5")
+                      conn.setRequestProperty("User-Agent", "FinTrack/10.5.1")
                       if (conn.responseCode != 200) throw RuntimeException("OSRM HTTP ${conn.responseCode}")
                       val txt = conn.inputStream.bufferedReader().use { it.readText() }
                       val json = org.json.JSONObject(txt)
@@ -1648,7 +1601,8 @@ find app/src/main/java/com/example/fintrack -name 'Screens3.kt' -exec sed -i 's|
                   var moved = 0
                   w.beginTransaction()
                   try {
-                      moved = w.update("txn", ContentValues().apply { put("merchant_key", payeeKey); put("merchant", db.one("SELECT display FROM payees WHERE merchant_key=?", payeeKey) ?: payeeKey) },
+                      val payeeName = db.one("SELECT display FROM payees WHERE merchant_key=?", payeeKey) ?: payeeKey
+                      moved = w.update("txn", ContentValues().apply { put("merchant_key", payeeKey); put("merchant", payeeName) },
                           "merchant_key=?", arrayOf(aliasKey))
                       runCatching { w.execSQL("INSERT OR REPLACE INTO payee_aliases(alias_key, payee_key, created_at) VALUES(?,?,?)", arrayOf(aliasKey, payeeKey, System.currentTimeMillis())) }
                       w.delete("payees", "merchant_key=?", arrayOf(aliasKey))
@@ -2013,56 +1967,6 @@ find app/src/main/java/com/example/fintrack -name 'Screens3.kt' -exec sed -i 's|
           }
           EOF_W
 
-          cat > app/src/main/java/com/example/fintrack/PdfReport.kt <<'EOF_PDF'
-          package com.example.fintrack
-
-          import android.content.Context
-          import android.graphics.Canvas
-          import android.graphics.Color
-          import android.graphics.Paint
-          import android.graphics.pdf.PdfDocument
-          import androidx.core.content.FileProvider
-          import java.io.File
-          import java.text.SimpleDateFormat
-          import java.util.Calendar
-          import java.util.Date
-          import java.util.Locale
-
-          object PdfReport {
-              fun generate(ctx: Context, year: Int, month: Int): File {
-                  val db = Db.get(ctx)
-                  val cal = Calendar.getInstance().apply { set(Calendar.YEAR, year); set(Calendar.MONTH, month); set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }
-                  val start = cal.timeInMillis; cal.add(Calendar.MONTH, 1); val end = cal.timeInMillis
-                  val label = SimpleDateFormat("MMMM yyyy", Locale.getDefault()).format(Date(start))
-                  val spent = db.num("SELECT SUM(amount) FROM txn WHERE debit=1 AND ts>=? AND ts<?", start.toString(), end.toString())
-                  val recv = db.num("SELECT SUM(amount) FROM txn WHERE debit=0 AND ts>=? AND ts<?", start.toString(), end.toString())
-                  val cats = db.rows("SELECT category, SUM(amount) AS s FROM txn WHERE debit=1 AND ts>=? AND ts<? GROUP BY category ORDER BY s DESC", start.toString(), end.toString())
-                  val doc = PdfDocument()
-                  val pageInfo = PdfDocument.PageInfo.Builder(595, 842, 1).create()
-                  val page = doc.startPage(pageInfo)
-                  val c: Canvas = page.canvas
-                  val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK }
-                  var y = 50f
-                  p.textSize = 26f; p.isFakeBoldText = true; c.drawText("FinTrack · $label", 40f, y, p); y += 30f
-                  p.textSize = 14f; p.isFakeBoldText = false
-                  c.drawText("Spent: ${inr(spent)}     Received: ${inr(recv)}     Net: ${inr(recv - spent)}", 40f, y, p); y += 30f
-                  p.isFakeBoldText = true; p.textSize = 16f; c.drawText("Category breakdown", 40f, y, p); y += 22f
-                  p.isFakeBoldText = false; p.textSize = 13f
-                  for (r in cats.take(10)) { val cat = r["category"] ?: ""; val v = r["s"]?.toDoubleOrNull() ?: 0.0; c.drawText("• $cat", 50f, y, p); c.drawText(inr(v), 555f - p.measureText(inr(v)), y, p); y += 18f }
-                  doc.finishPage(page)
-                  val dir = File(ctx.cacheDir, "reports"); if (!dir.exists()) dir.mkdirs()
-                  val file = File(dir, "fintrack_${year}_${month + 1}.pdf")
-                  file.outputStream().use { doc.writeTo(it) }
-                  doc.close()
-                  return file
-              }
-              fun shareIntent(ctx: Context, file: File): android.content.Intent {
-                  val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", file)
-                  return android.content.Intent(android.content.Intent.ACTION_SEND).apply { type = "application/pdf"; putExtra(android.content.Intent.EXTRA_STREAM, uri); addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }
-              }
-          }
-          EOF_PDF
-
           cat > app/src/main/java/com/example/fintrack/Ui.kt <<'EOF_23'
           package com.example.fintrack
 
@@ -2274,7 +2178,7 @@ find app/src/main/java/com/example/fintrack -name 'Screens3.kt' -exec sed -i 's|
                   window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
                   try {
                       org.osmdroid.config.Configuration.getInstance().apply {
-                          userAgentValue = "FinTrack/10.5 (com.example.fintrack; Android)"
+                          userAgentValue = "FinTrack/10.5.1 (com.example.fintrack; Android)"
                           tileFileSystemCacheMaxBytes = 600L * 1024 * 1024
                           tileFileSystemCacheTrimBytes = 500L * 1024 * 1024
                           load(this@MainActivity, getSharedPreferences("osmdroid", MODE_PRIVATE))
@@ -2608,7 +2512,6 @@ find app/src/main/java/com/example/fintrack -name 'Screens3.kt' -exec sed -i 's|
               private val summary = act.tv("", 12f, C.MUTED).apply { setPadding(act.dp(14), act.dp(4), act.dp(14), act.dp(4)) }
               private val chips = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; setPadding(act.dp(8), 0, act.dp(8), 0) }
               private val loading = act.tv(Str.s("loading"), 12f, C.MUTED).apply { gravity = Gravity.CENTER; setPadding(0, act.dp(20), 0, act.dp(20)); visibility = View.GONE }
-              private val keyCache = HashMap<Long, String>()
               sealed class Row {
                   data class TxnRow(val t: Txn) : Row()
                   data class YearRow(val year: Int, val count: Int, val net: Double, val collapsed: Boolean) : Row()
@@ -2617,8 +2520,7 @@ find app/src/main/java/com/example/fintrack -name 'Screens3.kt' -exec sed -i 's|
               private val adapter = RowAdapter<Row>(act, emptyList()) { item, r ->
                   when (item) {
                       is Row.YearRow -> {
-                          r.icon.setImageResource(if (item.collapsed) R.drawable.ic_bank else R.drawable.ic_bank)
-                          r.icon.setColorFilter(C.ACCENT)
+                          r.icon.setImageResource(R.drawable.ic_bank); r.icon.setColorFilter(C.ACCENT)
                           r.title.text = "${if (item.collapsed) "▶" else "▼"} ${item.year} · ${item.count} entries"
                           val (label, color) = inrSigned(item.net)
                           r.sub.text = label; r.sub.setTextColor(color)
@@ -3067,7 +2969,7 @@ find app/src/main/java/com/example/fintrack -name 'Screens3.kt' -exec sed -i 's|
                       if (ok) { act.toast(Str.s("unmerge_ok")); refresh() } else act.toast(Str.s("unmerge_none"))
                   })
                   if (selectMode) {
-                      sortChips.addView(act.pill("${Str.s("merge_sel")} (${selected.size})".replace("$n", selected.size.toString()), true) { if (selected.size < 2) { act.toast(Str.s("select_two")); return@pill }; askMerge(selected.toList()) })
+                      sortChips.addView(act.pill("${Str.s("merge_btn")} (${selected.size})", true) { if (selected.size < 2) { act.toast(Str.s("select_two")); return@pill }; askMerge(selected.toList()) })
                       sortChips.addView(act.pill(Str.s("cancel"), false) { selectMode = false; selected.clear(); refresh() })
                   }
                   val order = when (sortMode) { "name" -> "p.display ASC"; "recent" -> "last DESC"; "total" -> "spent DESC"; else -> "n DESC" }
@@ -3214,7 +3116,7 @@ find app/src/main/java/com/example/fintrack -name 'Screens3.kt' -exec sed -i 's|
                       val pct = if (spent > 0) (v / spent * 100).toInt() else 0
                       val row = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, act.dp(8), 0, act.dp(8)); setOnClickListener { act.openLedger(LedgerScreen.Filter(mode = "cat", category = cat, year = year, month = month)) } }
                       row.addView(act.icon(Icons.category(act, cat, R.drawable.ic_bank), palette[i % palette.size], 26))
-                      val mid = act.vbox(2); mid.addView(act.tv(cat, 14f, C.TEXT, true)); mid.addView(act.tv("$pct${Str.s("pct_of_month")}", 11f, C.MUTED))
+                      val mid = act.vbox(2); mid.addView(act.tv(cat, 14f, C.TEXT, true)); mid.addView(act.tv("$pct ${Str.s("pct_of_month")}", 11f, C.MUTED))
                       row.addView(mid, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = act.dp(10) })
                       row.addView(act.tv(inr(v, true), 14f, C.TEXT, true))
                       listCard.put(row, 4)
@@ -3251,7 +3153,7 @@ find app/src/main/java/com/example/fintrack -name 'Screens3.kt' -exec sed -i 's|
                   th.addView(lockSwitch)
                   val langSwitch = Switch(act).apply { text = Str.s("language") + ": " + (if (act.isHinglish()) Str.s("lang_hinglish") else Str.s("lang_english")); isChecked = act.isHinglish(); setOnCheckedChangeListener { _, v -> act.setLang(v) } }
                   th.addView(langSwitch)
-                  th.put(act.actionBtn(Str.s("theme")) + ": cycle (system → dark → light)") { act.toggleTheme() }, 10)
+                  th.put(act.actionBtn(Str.s("theme") + ": cycle") { act.toggleTheme() }, 10)
                   body.put(th)
               }
           }
@@ -3482,8 +3384,8 @@ find app/src/main/java/com/example/fintrack -name 'Screens3.kt' -exec sed -i 's|
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="v10.5.${{ github.run_number }}"
+          VERSION="v10.5.1.${{ github.run_number }}"
           gh release create "$VERSION" /tmp/proj/app/build/outputs/apk/debug/app-debug.apk \
             --repo "${{ github.repository }}" \
             --title "FinTrack Build ${{ github.run_number }}" \
-            --notes "v10.5: dashboard-only txns/charts; accounts split (bank/wallet/loan); payee alias add; collapsible ledger years with +green/-red net totals; global hamburger; travel Tolls tab sorted newest first; better review grouping; Cash = ATM total; real net worth from bank+wallet balances; Settings rename; strict English + language toggle (default English); FinArt purple/pink theme."
+            --notes "v10.5.1: fixed two compile errors (Screens2 merge button, Screens3 theme button). All v10.5 features intact: dashboard-only chart cards, split accounts (banks/wallets/loans), payee alias add, collapsible ledger years, global hamburger, travel Tolls tab, Cash=ATM, real net worth, Settings rename, English/Hinglish toggle."
