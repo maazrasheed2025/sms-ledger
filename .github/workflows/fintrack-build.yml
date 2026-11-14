@@ -30,73 +30,72 @@ jobs:
           python3 --version
           python3 -c "import PIL; print('Pillow OK', PIL.__version__)" || pip install --quiet Pillow
 
-      - name: Generate project files
+      - name: Generate icons
         run: |
-          mkdir -p /tmp/proj/app/src/main/java/com/example/fintrack /tmp/proj/app/src/main/res/drawable /tmp/proj/app/src/main/res/values /tmp/proj/app/src/main/res/xml
-          cd /tmp/proj
-          SRC="$GITHUB_WORKSPACE/app/src/main/res"
-
           echo "########## ICON PIPELINE START ##########"
+          SRC="$GITHUB_WORKSPACE/app/src/main/res"
           ICON_SRC="$SRC/icon_source.png"
           echo "LOOKING FOR: $ICON_SRC"
           if [ -f "$ICON_SRC" ]; then echo "FILE EXISTS: YES ($(stat -c%s "$ICON_SRC") bytes)"; else echo "FILE EXISTS: NO"; fi
           ls -la "$SRC" | head -30
-          mkdir -p app/src/main/res/mipmap-mdpi app/src/main/res/mipmap-hdpi app/src/main/res/mipmap-xhdpi app/src/main/res/mipmap-xxhdpi app/src/main/res/mipmap-xxxhdpi app/src/main/res/drawable-xxxhdpi app/src/main/res/mipmap-anydpi-v26
+          mkdir -p /tmp/proj/app/src/main/res/mipmap-mdpi /tmp/proj/app/src/main/res/mipmap-hdpi /tmp/proj/app/src/main/res/mipmap-xhdpi /tmp/proj/app/src/main/res/mipmap-xxhdpi /tmp/proj/app/src/main/res/mipmap-xxxhdpi /tmp/proj/app/src/main/res/drawable-xxxhdpi /tmp/proj/app/src/main/res/mipmap-anydpi-v26
 
           if [ -f "$ICON_SRC" ]; then
-            python3 - "$ICON_SRC" <<'PYEOF'
-import sys, os
-try:
-    from PIL import Image
-except ImportError:
-    os.system("pip install --quiet Pillow")
-    from PIL import Image
-src = sys.argv[1]
-img = Image.open(src).convert("RGBA")
-print(f"[icon-py] opened {src}, size={img.size}, mode=RGBA")
-base = Image.new("RGBA", (1024, 1024), (0, 0, 0, 0))
-w, h = img.size
-scale = min(1024 / w, 1024 / h)
-nw, nh = int(w * scale), int(h * scale)
-img_r = img.resize((nw, nh), Image.LANCZOS)
-base.paste(img_r, ((1024 - nw) // 2, (1024 - nh) // 2), img_r)
-out_dir = "app/src/main/res"
-sizes = {"mdpi": 48, "hdpi": 72, "xhdpi": 96, "xxhdpi": 144, "xxxhdpi": 192}
-for d, s in sizes.items():
-    im = base.resize((s, s), Image.LANCZOS)
-    p = f"{out_dir}/mipmap-{d}/ic_launcher.png"
-    im.save(p); im.save(f"{out_dir}/mipmap-{d}/ic_launcher_round.png")
-    print(f"[icon-py] wrote {p} ({os.path.getsize(p)} bytes, {im.size})")
-inner = base.resize((285, 285), Image.LANCZOS)
-fg = Image.new("RGBA", (432, 432), (0, 0, 0, 0))
-fg.paste(inner, ((432 - 285) // 2, (432 - 285) // 2), inner)
-fgp = f"{out_dir}/drawable-xxxhdpi/ic_launcher_foreground.png"
-fg.save(fgp)
-print(f"[icon-py] wrote {fgp} ({os.path.getsize(fgp)} bytes, {fg.size})")
-PYEOF
+            cat > /tmp/make_icons.py <<'PYEOF'
+          import sys, os
+          from PIL import Image
+          src = sys.argv[1]
+          out = sys.argv[2]
+          img = Image.open(src).convert("RGBA")
+          print(f"[icon-py] opened {src}, size={img.size}")
+          base = Image.new("RGBA", (1024, 1024), (0, 0, 0, 0))
+          w, h = img.size
+          scale = min(1024 / w, 1024 / h)
+          nw, nh = int(w * scale), int(h * scale)
+          img_r = img.resize((nw, nh), Image.LANCZOS)
+          base.paste(img_r, ((1024 - nw) // 2, (1024 - nh) // 2), img_r)
+          sizes = {"mdpi": 48, "hdpi": 72, "xhdpi": 96, "xxhdpi": 144, "xxxhdpi": 192}
+          for d, s in sizes.items():
+              im = base.resize((s, s), Image.LANCZOS)
+              p = f"{out}/mipmap-{d}/ic_launcher.png"
+              im.save(p); im.save(f"{out}/mipmap-{d}/ic_launcher_round.png")
+              print(f"[icon-py] wrote {p} ({os.path.getsize(p)} bytes, {im.size})")
+          inner = base.resize((285, 285), Image.LANCZOS)
+          fg = Image.new("RGBA", (432, 432), (0, 0, 0, 0))
+          fg.paste(inner, ((432 - 285) // 2, (432 - 285) // 2), inner)
+          fgp = f"{out}/drawable-xxxhdpi/ic_launcher_foreground.png"
+          fg.save(fgp)
+          print(f"[icon-py] wrote {fgp} ({os.path.getsize(fgp)} bytes, {fg.size})")
+          PYEOF
+            python3 /tmp/make_icons.py "$ICON_SRC" /tmp/proj/app/src/main/res
             echo "########## ICON VERIFY ##########"
-            for m in mdpi hdpi xhdpi xxhdpi xxxhdpi; do f="app/src/main/res/mipmap-$m/ic_launcher.png"; [ -f "$f" ] && echo "VERIFIED $f size=$(stat -c%s "$f")" || echo "MISSING $f"; done
-            f="app/src/main/res/drawable-xxxhdpi/ic_launcher_foreground.png"; [ -f "$f" ] && echo "VERIFIED $f size=$(stat -c%s "$f")" || echo "MISSING $f"
+            for m in mdpi hdpi xhdpi xxhdpi xxxhdpi; do f="/tmp/proj/app/src/main/res/mipmap-$m/ic_launcher.png"; [ -f "$f" ] && echo "VERIFIED $f size=$(stat -c%s "$f")" || echo "MISSING $f"; done
+            f="/tmp/proj/app/src/main/res/drawable-xxxhdpi/ic_launcher_foreground.png"; [ -f "$f" ] && echo "VERIFIED $f size=$(stat -c%s "$f")" || echo "MISSING $f"
           else
-            echo "########## ICON FALLBACK (file not found) ##########"
-            printf 'iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAQAAAAsXDIkAAAAEklEQVR4nGNgGAWjYBSMglEwCgAABv0B/2XqiqgAAAAASUVORK5CYII=' | base64 -d > app/src/main/res/mipmap-mdpi/ic_launcher.png
-            for m in hdpi xhdpi xxhdpi xxxhdpi; do cp app/src/main/res/mipmap-mdpi/ic_launcher.png "app/src/main/res/mipmap-$m/ic_launcher.png"; cp app/src/main/res/mipmap-mdpi/ic_launcher.png "app/src/main/res/mipmap-$m/ic_launcher_round.png"; done
-            cp app/src/main/res/mipmap-mdpi/ic_launcher.png "app/src/main/res/drawable-xxxhdpi/ic_launcher_foreground.png"
+            echo "########## ICON FALLBACK ##########"
+            printf 'iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAQAAAAsXDIkAAAAEklEQVR4nGNgGAWjYBSMglEwCgAABv0B/2XqiqgAAAAASUVORK5CYII=' | base64 -d > /tmp/proj/app/src/main/res/mipmap-mdpi/ic_launcher.png
+            for m in hdpi xhdpi xxhdpi xxxhdpi; do cp /tmp/proj/app/src/main/res/mipmap-mdpi/ic_launcher.png "/tmp/proj/app/src/main/res/mipmap-$m/ic_launcher.png"; cp /tmp/proj/app/src/main/res/mipmap-mdpi/ic_launcher.png "/tmp/proj/app/src/main/res/mipmap-$m/ic_launcher_round.png"; done
+            cp /tmp/proj/app/src/main/res/mipmap-mdpi/ic_launcher.png "/tmp/proj/app/src/main/res/drawable-xxxhdpi/ic_launcher_foreground.png"
           fi
           echo "########## ICON PIPELINE END ##########"
 
-          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF_ADAPT'
+          cat > /tmp/proj/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF_ADAPT'
           <?xml version="1.0" encoding="utf-8"?>
           <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
               <background android:drawable="@drawable/ic_launcher_background"/>
               <foreground android:drawable="@drawable/ic_launcher_foreground"/>
           </adaptive-icon>
           EOF_ADAPT
-          cp app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
-          cat > app/src/main/res/drawable/ic_launcher_background.xml <<'EOF_BG'
+          cp /tmp/proj/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml /tmp/proj/app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
+          cat > /tmp/proj/app/src/main/res/drawable/ic_launcher_background.xml <<'EOF_BG'
           <?xml version="1.0" encoding="utf-8"?>
           <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle"><solid android:color="#673AB7"/></shape>
           EOF_BG
+
+      - name: Generate project files
+        run: |
+          mkdir -p /tmp/proj/app/src/main/java/com/example/fintrack /tmp/proj/app/src/main/res/drawable /tmp/proj/app/src/main/res/values /tmp/proj/app/src/main/res/xml
+          cd /tmp/proj
 
           cat > settings.gradle.kts <<'EOF_0'
           pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
@@ -1073,7 +1072,7 @@ PYEOF
           class HomeScreen(act: MainActivity) : Screen(act) {
               private val body = act.vbox(12)
               private var year = Calendar.getInstance().get(Calendar.YEAR); private var month = Calendar.getInstance().get(Calendar.MONTH)
-              override val root: View = ScrollView(act).apply { addView(body); tag = "home_root" }
+              override val root: View = ScrollView(act).apply { addView(body); tag = "home_root"; setBackgroundColor(C.BG) }
               override fun refresh() { try { body.removeAllViews(); val db = Db.get(act); val cal = Calendar.getInstance().apply { set(Calendar.YEAR, year); set(Calendar.MONTH, month); set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }; val start = cal.timeInMillis; val daysInMonth = cal.getActualMaximum(Calendar.DAY_OF_MONTH); cal.add(Calendar.MONTH, 1); val end = cal.timeInMillis; val label = SimpleDateFormat("MMMM yyyy", Locale.getDefault()).format(Date(start)); val prevStart = Calendar.getInstance().apply { timeInMillis = start; add(Calendar.MONTH, -1) }.timeInMillis; val prevEnd = start; val spent = db.num("SELECT SUM(amount) FROM txn WHERE debit=1 AND ts>=? AND ts<?", start.toString(), end.toString()); val recv = db.num("SELECT SUM(amount) FROM txn WHERE debit=0 AND ts>=? AND ts<?", start.toString(), end.toString()); val prevSpent = db.num("SELECT SUM(amount) FROM txn WHERE debit=1 AND ts>=? AND ts<?", prevStart.toString(), prevEnd.toString()); body.addView(act.tv(Str.s("dashboard"), 22f, C.TEXT, true).apply { setPadding(act.dp(4), act.dp(6), 0, act.dp(6)) }); val exp = act.card(); val mr = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }; mr.addView(act.tv("◀", 16f, C.TEXT).apply { setPadding(act.dp(8), act.dp(4), act.dp(8), act.dp(4)); setOnClickListener { month--; if (month < 0) { month = 11; year-- }; refresh() } }); mr.addView(act.tv(label, 13f, C.MUTED).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)); mr.addView(act.tv("▶", 16f, C.TEXT).apply { setPadding(act.dp(8), act.dp(4), act.dp(8), act.dp(4)); setOnClickListener { month++; if (month > 11) { month = 0; year++ }; refresh() } }); mr.addView(act.icon(R.drawable.ic_pdf, C.ICON, 28).apply { setPadding(act.dp(8), act.dp(4), act.dp(8), act.dp(4)); setOnClickListener { act.sharePdf(year, month) } }); exp.addView(mr); exp.addView(act.tv(Str.s("expenses"), 12f, C.MUTED)); exp.addView(act.tv(inr(spent), 30f, C.RED, true)); exp.addView(act.tv("${Str.s("income")} ${inr(recv)}", 13f, C.GREEN)); if (prevSpent > 0) { val diff = spent - prevSpent; val pct = (diff / prevSpent * 100).toInt(); val (lbl, col) = inrSigned(diff); exp.addView(act.tv("${if (diff >= 0) "↑" else "↓"} ${Math.abs(pct)}% ${Str.s("vs_prev")} ${SimpleDateFormat("MMM", Locale.getDefault()).format(Date(prevStart))}", 12f, col)) }; val now = System.currentTimeMillis(); val elapsed = (((now - start).toFloat() / 86_400_000f).coerceIn(1f, daysInMonth.toFloat())); val projected = (spent / elapsed) * daysInMonth; if (projected > 0) exp.addView(act.tv("${Str.s("projected")}: ${inr(projected)}", 12f, C.MUTED)) else exp.addView(act.tv(Str.s("no_spend"), 12f, C.MUTED)); body.put(exp); val cats = db.rows("SELECT category, SUM(amount) AS s FROM txn WHERE debit=1 AND ts>=? AND ts<? GROUP BY category ORDER BY s DESC", start.toString(), end.toString()); val pie = act.card(); pie.addView(act.tv(Str.s("category_split"), 15f, C.TEXT, true)); if (cats.isEmpty()) pie.addView(act.tv(Str.s("no_data_month"), 12f, C.MUTED)) else { val d = DonutView(act); d.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, act.dp(240)); val pal = intArrayOf(C.ACCENT, C.ACCENT2, C.RED, C.AMBER, Color.parseColor("#C084FC"), Color.parseColor("#22D3EE"), Color.parseColor("#F472B6"), Color.parseColor("#A3E635")); d.updateSlices(cats.mapIndexed { i, r -> DonutView.Slice(r["category"] ?: "", (r["s"]?.toDoubleOrNull() ?: 0.0).toFloat(), pal[i % pal.size]) }); pie.addView(d); for ((i, r) in cats.withIndex()) { val cat = r["category"] ?: "Other"; val v = r["s"]?.toDoubleOrNull() ?: 0.0; val pct = if (spent > 0) (v / spent * 100).toInt() else 0; val row = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, act.dp(6), 0, act.dp(6)); setOnClickListener { act.openLedger(LedgerScreen.Filter(mode = "cat", category = cat, year = year, month = month)) }; setOnLongClickListener { val cur = Db.get(act).one("SELECT monthly_limit FROM budgets WHERE category=?", cat); act.showForm("Budget for $cat", listOf(Field("Monthly limit", cur ?: "", true))) { vv -> val l = vv[0].toDoubleOrNull(); if (l != null) { Db.get(act).exec("INSERT OR REPLACE INTO budgets(category, monthly_limit, updated_at) VALUES(?,?,?)", cat, l, System.currentTimeMillis()); act.toast("Budget set") } }; true } }; row.addView(act.icon(Icons.category(act, cat, R.drawable.ic_bank), pal[i % pal.size], 28)); val mid = act.vbox(2); mid.addView(act.tv(cat, 15f, C.TEXT, true)); mid.addView(act.tv("$pct ${Str.s("pct_of_month")}", 12f, C.MUTED)); row.addView(mid, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = act.dp(10) }); row.addView(act.tv(inr(v, true), 14f, C.TEXT, true)); pie.put(row, 6) } }; body.put(pie); val heat = db.rows("SELECT CAST(strftime('%H', ts/1000, 'unixepoch', 'localtime') AS INTEGER) AS h, COUNT(*) AS n FROM txn WHERE debit=1 AND ts>=? AND ts<? GROUP BY h", start.toString(), end.toString()); val hv = IntArray(24); for (r in heat) { val h = r["h"]?.toIntOrNull() ?: -1; val n = r["n"]?.toIntOrNull() ?: 0; if (h in 0..23) hv[h] = n }; val hm = HeatmapStripView(act); hm.values = hv; hm.maxValue = (hv.maxOrNull() ?: 1).coerceAtLeast(1); val hc = act.card(); hc.addView(act.tv(Str.s("heatmap"), 15f, C.TEXT, true)); hc.addView(hm); body.put(hc); val lt = act.card(); lt.addView(act.tv(Str.s("latest_txns"), 15f, C.TEXT, true)); val latest = db.queryTxns("1=1", emptyArray(), 5); if (latest.isEmpty()) lt.addView(act.tv(Str.s("no_txns"), 12f, C.MUTED)) else for (t in latest) { val r = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, act.dp(8), 0, act.dp(8)); setOnClickListener { act.show(act.ledgerIndex()) } }; r.addView(act.icon(Icons.category(act, t.category, R.drawable.ic_bank), C.ICON, 28)); val mid = act.vbox(2); mid.addView(act.tv(t.merchant, 14f, C.TEXT, true)); mid.addView(act.tv(fmtDate(t.ts) + " • " + t.institution, 12f, C.MUTED)); r.addView(mid, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = act.dp(10) }); r.addView(act.tv((if (t.debit) "-" else "+") + inr(t.amount, true), 13f, if (t.debit) C.RED else C.GREEN, true)); lt.put(r, 2) }; lt.put(act.actionBtn(Str.s("view_txns")) { act.show(act.ledgerIndex()) }, 10); body.put(lt); val half = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL }; val atm = db.num("SELECT SUM(amount) FROM txn WHERE debit=1 AND (channel='ATM' OR category='Cash')"); val cash = act.card(); cash.addView(act.icon(R.drawable.ic_grocery, C.ICON, 24)); cash.addView(act.tv(Str.s("cash_atm"), 11f, C.MUTED)); cash.addView(act.tv(inr(atm), 16f, C.AMBER, true)); cash.setOnClickListener { act.openLedger(LedgerScreen.Filter(mode = "cat", category = "Cash")) }; half.addView(cash, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = act.dp(6) }); val nw = NetWorth.compute(act); val nwv = nw.assets - nw.liabilities; val acc = act.card(); acc.addView(act.icon(R.drawable.ic_bank, C.ICON, 24)); acc.addView(act.tv(Str.s("net_worth"), 11f, C.MUTED)); acc.addView(act.tv(inr(nwv), 15f, if (nwv >= 0) C.GREEN else C.RED, true)); acc.addView(act.tv("${nw.banks.size + nw.wallets.size + nw.fastags.size} accounts", 10f, C.MUTED)); acc.setOnClickListener { act.show(act.accountsIndex()) }; half.addView(acc, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = act.dp(6) }); body.put(half) } catch (_: Exception) {} }
           }
           EOF_HOME
@@ -1312,7 +1311,6 @@ PYEOF
                       body.removeAllViews()
                       val db = Db.get(act)
                       body.addView(act.tv(Str.s("settings"), 22f, C.TEXT, true).apply { setPadding(act.dp(4), act.dp(6), 0, act.dp(6)) })
-                      // DATA SECTION with counts, tappable
                       val dataCard = act.card()
                       dataCard.addView(act.tv(Str.s("data_section"), 15f, C.TEXT, true))
                       fun countOf(sql: String, vararg args: String): Int = (db.one(sql, *args)?.toIntOrNull() ?: 0)
@@ -1338,9 +1336,7 @@ PYEOF
                           dataCard.put(r, 4)
                       }
                       body.put(dataCard, 0)
-                      // Backup & Restore
                       val d = act.card(); d.addView(act.tv("Data & Backup", 15f, C.TEXT, true)); d.put(act.actionBtn(Str.s("backup")) { act.backup() }, 10); d.put(act.actionBtn(Str.s("restore")) { act.pickRestore() }, 8); d.put(act.actionBtn(Str.s("clean_restore")) { act.cleanAndRestore() }, 8); d.put(act.actionBtn(Str.s("upload_csv")) { act.pickCsvStatement() }, 8); d.put(act.actionBtn(Str.s("upload_toll")) { act.pickTollJson() }, 8); d.put(act.actionBtn(Str.s("rescan_sms")) { act.rescan() }, 8); d.put(act.actionBtn(Str.s("notif_access")) { act.openNotifAccessSettings() }, 8); body.put(d)
-                      // Preferences
                       val th = act.card(); th.addView(act.tv("Preferences", 15f, C.TEXT, true)); th.addView(Switch(act).apply { text = Str.s("fingerprint_lock"); isChecked = act.isLockEnabled(); setOnCheckedChangeListener { _, v -> act.setLockEnabled(v); act.toast(if (v) Str.s("lock_on") else Str.s("lock_off")) } }); th.addView(Switch(act).apply { text = Str.s("language") + ": " + (if (act.isHinglish()) Str.s("lang_hinglish") else Str.s("lang_english")); isChecked = act.isHinglish(); setOnCheckedChangeListener { _, v -> act.setLang(v) } }); th.put(act.actionBtn(Str.s("theme") + ": " + act.themeModeLabel()) { act.cycleThemeMode() }, 10); th.put(act.tv(Str.s("color_theme") + ": " + C.paletteOf(act.colorPalette()).name, 13f, C.TEXT, true).apply { setPadding(act.dp(6), act.dp(12), 0, act.dp(4)) }, 8); val colorRow = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL }; for (k in arrayOf("purple","teal","amber","indigo","rose","green","navy")) { val pal = C.paletteOf(k); val p = act.pill(pal.name, act.colorPalette() == k) { act.setColorPalette(k) }; colorRow.addView(p) }; th.addView(colorRow); body.put(th)
                   } catch (_: Exception) {}
               }
@@ -1703,4 +1699,5 @@ PYEOF
           gh release create "$VERSION" /tmp/proj/app/build/outputs/apk/debug/app-debug.apk \
             --repo "${{ github.repository }}" \
             --title "Imran's Finances v12.5.0 Build ${{ github.run_number }}" \
-            --notes "v12.5.0: Ten fixes. (1) Ledger rows now show category-specific icons tinted accent colour (was generic bank icon). (2) Machine Learning screen: added Refresh & scan SMS button and new Scan database button. (3) SMS scan popup changed to toast (no more blocking dialog on app open). (4) Scan database re-runs VpaExtractor + BillDetector on all existing txns to regenerate pending_review entries. (5) Settings shows a Data section with counts for transactions/accounts/payees/UPI IDs/mobiles/tolls/rules/loans/bills/budgets/categories/pending ML — each tappable to open the corresponding screen. (6) Top bar thicker (padding 10dp, elevation 2dp, icon 32dp, title 20f). (7) Dashboard PDF export icon now 28dp (was 22dp). (8) Bottom nav has 6 tabs now — Dashboard, Ledger, Travel, Payees, Accounts, Settings. Nav bar is thicker (padding 4dp, elevation 6dp, icon 24dp). (9) Payee screen grouping by txn-count buckets (1-10/11-20/21-50/50+) with collapsible headers and full data (no 400 limit); background and icon colours now follow theme. (10) Icon pipeline replaced with Python/Pillow version with ########## markers and per-file VERIFIED/MISSING logging."
+            --notes "v12.5.0: Ten fixes. (1) Ledger rows now show category-specific icons tinted accent colour. (2) ML screen has Refresh & scan SMS + Scan database buttons. (3) SMS scan popup changed to toast. (4) Scan database re-runs VPA + bill extractors across all txns. (5) Settings shows Data section with counts (txns/accounts/payees/UPI/mobiles/tolls/rules/loans/bills/budgets/categories/pending ML) each tappable to open its screen. (6) Top bar thicker (padding 10dp, elevation 2dp, icon 32dp). (7) Dashboard PDF export icon 28dp. (8) Bottom nav now has 6 tabs including Settings, thicker (padding 4dp, elevation 6dp, icon 24dp). (9) Payee screen grouped by txn-count buckets (1-10/11-20/21-50/50+) with collapsible headers, no 400 limit, theme colours applied to background and icons. (10) Icon pipeline uses Python/Pillow with ########## markers and VERIFIED/MISSING per-file logging."
+```
