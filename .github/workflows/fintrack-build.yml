@@ -38,7 +38,7 @@ jobs:
           echo "LOOKING FOR: $ICON_SRC"
           if [ -f "$ICON_SRC" ]; then echo "FILE EXISTS: YES ($(stat -c%s "$ICON_SRC") bytes)"; else echo "FILE EXISTS: NO"; fi
           ls -la "$SRC" | head -30
-          mkdir -p /tmp/proj/app/src/main/res/mipmap-mdpi /tmp/proj/app/src/main/res/mipmap-hdpi /tmp/proj/app/src/main/res/mipmap-xhdpi /tmp/proj/app/src/main/res/mipmap-xxhdpi /tmp/proj/app/src/main/res/mipmap-xxxhdpi /tmp/proj/app/src/main/res/drawable-xxxhdpi /tmp/proj/app/src/main/res/mipmap-anydpi-v26
+          mkdir -p /tmp/proj/app/src/main/res/mipmap-mdpi /tmp/proj/app/src/main/res/mipmap-hdpi /tmp/proj/app/src/main/res/mipmap-xhdpi /tmp/proj/app/src/main/res/mipmap-xxhdpi /tmp/proj/app/src/main/res/mipmap-xxxhdpi /tmp/proj/app/src/main/res/drawable-xxxhdpi /tmp/proj/app/src/main/res/mipmap-anydpi-v26 /tmp/proj/app/src/main/res/drawable /tmp/proj/app/src/main/res/values /tmp/proj/app/src/main/res/xml
 
           if [ -f "$ICON_SRC" ]; then
             cat > /tmp/make_icons.py <<'PYEOF'
