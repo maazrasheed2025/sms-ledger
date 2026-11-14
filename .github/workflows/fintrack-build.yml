@@ -296,7 +296,7 @@ jobs:
                   return null
               }
               private fun prettify(slug: String): String = when (slug) {
-                  "hm" -> "H&M"; "kfc" -> "KFC"; "pvr" -> "PVR"; "inox" -> "INOX"; "bpcl" -> "BPCL"; "hpcl" -> "HPCL"; "iocl" -> "IOCL"; "lic" -> "LIC"; "bsnl" -> "BSNL"; "mtnl" -> "MTNL"; "vi" -> "Vi"; "jio" -> "Jio"; "airtel" -> "Airtel"; "swiggy" -> "Swiggy"; "zomato" -> "Zomato"; "amazon" to "Amazon"; "flipkart" to "Flipkart"; "myntra" to "Myntra"; "nykaa" to "Nykaa"; "clovia" to "Clovia"; "zivame" to "Zivame"; else -> slug.replaceFirstChar { it.uppercase() }
+                  "hm" -> "H&M"; "kfc" -> "KFC"; "pvr" -> "PVR"; "inox" -> "INOX"; "bpcl" -> "BPCL"; "hpcl" -> "HPCL"; "iocl" -> "IOCL"; "lic" -> "LIC"; "bsnl" -> "BSNL"; "mtnl" -> "MTNL"; "vi" -> "Vi"; "jio" -> "Jio"; "airtel" -> "Airtel"; "swiggy" -> "Swiggy"; "zomato" -> "Zomato"; "amazon" -> "Amazon"; "flipkart" -> "Flipkart"; "myntra" -> "Myntra"; "nykaa" -> "Nykaa"; "clovia" -> "Clovia"; "zivame" -> "Zivame"; else -> slug.replaceFirstChar { it.uppercase() }
               }
           }
           EOF_BRANDS
