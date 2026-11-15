@@ -728,7 +728,10 @@ jobs:
           import androidx.work.ExistingPeriodicWorkPolicy
           import androidx.work.PeriodicWorkRequestBuilder
           import androidx.work.WorkManager
+          import java.io.File
+          import java.text.SimpleDateFormat
           import java.util.Calendar
+          import java.util.Locale
           import java.util.concurrent.TimeUnit
           object BackupScheduler {
               private const val WORK_NAME = "imrans_auto_backup"
@@ -2040,4 +2043,4 @@ jobs:
           gh release create "$VERSION" /tmp/proj/app/build/outputs/apk/debug/app-debug.apk \
             --repo "${{ github.repository }}" \
             --title "Imran's Finances v12.5.0 Build ${{ github.run_number }}" \
-            --notes "v12.5.0 final touches. (1) Settings: Auto-backup section with Off / Once daily 02:00 / Twice daily 02:00 & 14:00, persisted via WorkManager, survives reboot. (2) Retention: 7 newest backups (14 files on disk). (3) Restore: dialog listing stored backups with parsed date/time, plus Pick external file option. (4) Info subtitle under every Settings button. (5) Notification access section shows live status plus read-only list of the 10 apps we read. (6) About screen added to drawer with 300dp 1024x1024 icon, Telegram + WhatsApp + 4 donation UPI buttons, styled scrollable description."
+            --notes "v12.5.0 final. Auto-backup (WorkManager, once/twice daily, 7 newest kept), Restore picker with parsed date/time list, sub-descriptions on every Settings button, live Notification-access status with read-only app list, and About screen (300dp icon, Telegram/WhatsApp/donation UPI buttons, styled scrollable description)."
