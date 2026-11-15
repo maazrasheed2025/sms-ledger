@@ -38,7 +38,7 @@ jobs:
           echo "LOOKING FOR: $ICON_SRC"
           if [ -f "$ICON_SRC" ]; then echo "FILE EXISTS: YES ($(stat -c%s "$ICON_SRC") bytes)"; else echo "FILE EXISTS: NO"; fi
           ls -la "$SRC" | head -30
-          mkdir -p /tmp/proj/app/src/main/res/mipmap-mdpi /tmp/proj/app/src/main/res/mipmap-hdpi /tmp/proj/app/src/main/res/mipmap-xhdpi /tmp/proj/app/src/main/res/mipmap-xxhdpi /tmp/proj/app/src/main/res/mipmap-xxxhdpi /tmp/proj/app/src/main/res/drawable-xxxhdpi /tmp/proj/app/src/main/res/mipmap-anydpi-v26 /tmp/proj/app/src/main/res/drawable /tmp/proj/app/src/main/res/values /tmp/proj/app/src/main/res/xml
+          mkdir -p /tmp/proj/app/src/main/res/mipmap-mdpi /tmp/proj/app/src/main/res/mipmap-hdpi /tmp/proj/app/src/main/res/mipmap-xhdpi /tmp/proj/app/src/main/res/mipmap-xxhdpi /tmp/proj/app/src/main/res/mipmap-xxxhdpi /tmp/proj/app/src/main/res/drawable-xxxhdpi /tmp/proj/app/src/main/res/drawable-nodpi /tmp/proj/app/src/main/res/mipmap-anydpi-v26 /tmp/proj/app/src/main/res/drawable /tmp/proj/app/src/main/res/values /tmp/proj/app/src/main/res/xml
 
           if [ -f "$ICON_SRC" ]; then
             cat > /tmp/make_icons.py <<'PYEOF'
@@ -54,6 +54,8 @@ jobs:
           nw, nh = int(w * scale), int(h * scale)
           img_r = img.resize((nw, nh), Image.LANCZOS)
           base.paste(img_r, ((1024 - nw) // 2, (1024 - nh) // 2), img_r)
+          base.save(f"{out}/drawable-nodpi/icon_source.png")
+          print(f"[icon-py] wrote {out}/drawable-nodpi/icon_source.png")
           sizes = {"mdpi": 48, "hdpi": 72, "xhdpi": 96, "xxhdpi": 144, "xxxhdpi": 192}
           for d, s in sizes.items():
               im = base.resize((s, s), Image.LANCZOS)
@@ -76,6 +78,7 @@ jobs:
             printf 'iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAQAAAAsXDIkAAAAEklEQVR4nGNgGAWjYBSMglEwCgAABv0B/2XqiqgAAAAASUVORK5CYII=' | base64 -d > /tmp/proj/app/src/main/res/mipmap-mdpi/ic_launcher.png
             for m in hdpi xhdpi xxhdpi xxxhdpi; do cp /tmp/proj/app/src/main/res/mipmap-mdpi/ic_launcher.png "/tmp/proj/app/src/main/res/mipmap-$m/ic_launcher.png"; cp /tmp/proj/app/src/main/res/mipmap-mdpi/ic_launcher.png "/tmp/proj/app/src/main/res/mipmap-$m/ic_launcher_round.png"; done
             cp /tmp/proj/app/src/main/res/mipmap-mdpi/ic_launcher.png "/tmp/proj/app/src/main/res/drawable-xxxhdpi/ic_launcher_foreground.png"
+            cp /tmp/proj/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png "/tmp/proj/app/src/main/res/drawable-nodpi/icon_source.png"
           fi
           echo "########## ICON PIPELINE END ##########"
 
@@ -125,6 +128,7 @@ jobs:
               implementation("androidx.biometric:biometric:1.1.0")
               implementation("org.osmdroid:osmdroid-android:6.1.18")
               implementation("com.google.android.material:material:1.12.0")
+              implementation("androidx.work:work-runtime-ktx:2.9.0")
           }
           EOF_3
 
@@ -139,11 +143,13 @@ jobs:
               <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
               <application android:label="@string/app_name" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round" android:allowBackup="false" android:usesCleartextTraffic="true" android:theme="@style/Theme.Material3.DayNight.NoActionBar">
                   <activity android:name=".MainActivity" android:exported="true" android:configChanges="uiMode">
                       <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
                   </activity>
                   <receiver android:name=".SmsReceiver" android:exported="true" android:permission="android.permission.BROADCAST_SMS"><intent-filter><action android:name="android.provider.Telephony.SMS_RECEIVED"/></intent-filter></receiver>
+                  <receiver android:name=".BootReceiver" android:exported="true"><intent-filter><action android:name="android.intent.action.BOOT_COMPLETED"/></intent-filter></receiver>
                   <service android:name=".NotifListener" android:exported="false" android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"><intent-filter><action android:name="android.service.notification.NotificationListenerService"/></intent-filter></service>
                   <service android:name=".ForegroundHelper" android:exported="false" android:foregroundServiceType="dataSync"/>
                   <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.fileprovider" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths"/></provider>
@@ -156,6 +162,7 @@ jobs:
           <paths xmlns:android="http://schemas.android.com/apk/res/android">
               <external-files-path name="exports" path="exports/"/>
               <external-files-path name="backups" path="backups/"/>
+              <external-files-path name="downloads_backups" path="Downloads/ImransFinances/"/>
               <cache-path name="cache" path="."/>
               <cache-path name="screenshots" path="screenshots/"/>
           </paths>
@@ -235,12 +242,15 @@ jobs:
           cat > app/src/main/res/drawable/ic_ml.xml <<'EOF_D17'
           <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:pathData="M12,2v4M12,18v4M2,12h4M18,12h4M4.9,4.9l2.8,2.8M16.3,16.3l2.8,2.8M4.9,19.1l2.8,-2.8M16.3,7.7l2.8,-2.8" android:strokeColor="#FFFFFFFF" android:strokeWidth="2" android:strokeLineCap="round"/><circle cx="12" cy="12" r="3" android:fillColor="#00000000" android:strokeColor="#FFFFFFFF" android:strokeWidth="2"/></vector>
           EOF_D17
+          cat > app/src/main/res/drawable/ic_info.xml <<'EOF_INFO'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:pathData="M12,22a10,10 0 1,1 0,-20a10,10 0 1,1 0,20z" android:strokeColor="#FFFFFFFF" android:strokeWidth="2" android:fillColor="#00000000"/><path android:pathData="M12,8v.01M12,12v5" android:strokeColor="#FFFFFFFF" android:strokeWidth="2" android:strokeLineCap="round"/></vector>
+          EOF_INFO
 
           cat > app/src/main/java/com/example/fintrack/Str.kt <<'EOF_STR2'
           package com.example.fintrack
           object Str {
               private val en: Map<String, String> = mapOf(
-                  "app_title" to "Imran's Finances","dashboard" to "Dashboard","ledger" to "Ledger","travel" to "Travel","payees" to "Payees","accounts" to "Accounts","charts" to "Charts","settings" to "Settings","bills" to "Bills","budgets" to "Budgets","categories" to "Categories","rules" to "Rules","loans" to "Loans","expenses" to "Expenses","income" to "Income","latest_txns" to "Latest transactions","view_txns" to "VIEW TRANSACTIONS","cash_atm" to "Cash (ATM)","net_worth" to "Net worth","projected" to "Projected","used" to "used","no_spend" to "No spend yet this month","no_txns" to "No transactions yet. Scan SMS to start.","all" to "All","debit" to "Sent","credit" to "Received","today" to "Today","week" to "Week","month" to "Month","scan_duplicates" to "Duplicates","delete" to "Delete","cancel" to "Cancel","categorize" to "Categorize","loading" to "Loading…","in_label" to "In","out_label" to "Out","net_label" to "Net","total" to "Total","category" to "Category","tags" to "Tags","change_category" to "Change category","change_payee" to "Change payee","edit" to "Edit","close" to "Close","none" to "(none)","map" to "Map","tolls" to "Tolls","no_tolls" to "No toll entries yet.","no_trips" to "No trips yet.","no_dup" to "No duplicates found.","duplicates" to "Duplicates","delete_ticked" to "Delete ticked","backup" to "Backup","restore" to "Restore","clean_restore" to "Clean DB & restore","upload_csv" to "Upload bank statement (CSV)","upload_toll" to "Upload toll data (JSON)","rescan_sms" to "Rescan SMS","notif_access" to "Notification access","fingerprint_lock" to "Fingerprint lock","theme" to "Theme","language" to "Language","lang_english" to "English","lang_hinglish" to "Hinglish","lock_on" to "Lock ON","lock_off" to "Lock OFF","scanning" to "Scanning SMS…","scan_done" to "SMS scan complete","scanned" to "Scanned","imported" to "Imported","skipped_dup" to "Skipped (dup)","ignored" to "Ignored","next_scan" to "Next scan after","quick_add" to "Quick add","cash_entry" to "Cash entry","ok" to "OK","back_again" to "Press back 2 more times to exit","back_again2" to "Press back 1 more time to exit","welcome" to "Welcome to Imran's Finances","first_run_msg" to "What do you want to do first?\n\n• Scan SMS — import bank transactions from inbox\n• Restore backup — restores CSV; older SMS won't re-import after this","scan_sms" to "Scan SMS","restore_backup" to "Restore backup","later" to "Later","no_data_month" to "No data for this month","category_split" to "Category split","pct_of_month" to "% of month","bank_accounts" to "Bank accounts","wallets" to "Wallets","fastag_accounts" to "FASTag","add_id" to "Add another UPI / name","add_id_hint" to "e.g. name@upi","add_btn" to "Add & merge","merge_done" to "Merged","unmerge_last" to "Unmerge last","txn_count" to "txns","no_upi" to "no UPI","out_short" to "Sent","in_short" to "Recd","unmerge_ok" to "Last merge undone","unmerge_none" to "No merge history","select_two" to "Select at least 2","search_hint" to "Search","search_payee" to "Search payee / UPI","new_payee" to "New payee / shop","payee_blank" to "Name cannot be empty","amount_bad" to "Enter a valid amount","type" to "Type","spent" to "Spent","received" to "Received","kisko" to "Who / merchant","no_accounts_yet" to "No accounts yet. Scan SMS to populate.","merge_btn" to "Merge","add_bill" to "Add bill","bill_name" to "Bill name","due_day" to "Due day (1-31)","frequency" to "Frequency","monthly" to "Monthly","weekly" to "Weekly","yearly" to "Yearly","mark_paid" to "Mark paid","set_budget" to "Set budget","budget_left" to "Left","custom_categories" to "Custom categories","add_category" to "Add category","category_name" to "Category name","search" to "Search","no_results" to "No results","amount" to "Amount","note" to "Note","view_raw" to "View raw SMS","raw_sms" to "Raw SMS","sender" to "Sender","parse_status" to "Parse","recurring" to "Recurring","newest" to "Newest","oldest" to "Oldest","vs_prev" to "vs","balance_unknown" to "Balance unknown · tap to set","set_balance" to "Set balance","current_balance" to "Current balance","share_pdf" to "Share PDF","heatmap" to "Spending by hour","loan_no" to "Loan No","next_emi" to "Next EMI est.","total_paid" to "Total paid","no_loans" to "No loans detected yet.","delete_rule" to "Delete rule","no_rules" to "No learned rules yet.","reclassify" to "Reclassify","backup_saved_to" to "Backup saved to:","backup_failed" to "Backup failed:","restore_failed" to "Restore failed:","restored_rows" to "restored rows","insurance" to "Insurance / Policy","loan" to "Loan","card" to "Credit Card","wallet" to "Wallet","bank" to "Bank","move_to" to "Move to…","toll_date_grid" to "Toll dates","tap_manage" to "Tap any account to manage","export_pdf" to "Export PDF","export_long_shot" to "Long screenshot","move_to_tolls" to "Move to tolls","move_all_to_tolls" to "Move ALL to tolls","screenshot" to "Screenshot","saved_to" to "Saved to:","screenshot_failed" to "Screenshot failed:","moved_to_tolls" to "Moved to tolls","no_txn_selected" to "No transactions selected","select_txns" to "Select transactions","done" to "Done","toll_for_date" to "Tolls on","expand" to "Expand","collapse" to "Collapse","remove_from_tolls" to "Remove from tolls","removed_from_tolls" to "Removed from tolls","remove_duplicates" to "Remove duplicates","apply_similar" to "Apply to similar","similar_found" to "Found similar transactions","select_all" to "Select all","clear_rules" to "Clear all rules","matched" to "matched","color_theme" to "Color theme","theme_purple" to "Purple","theme_teal" to "Teal","theme_amber" to "Amber","theme_indigo" to "Indigo","theme_rose" to "Rose","theme_green" to "Green","theme_navy" to "Navy","machine_learning" to "Machine Learning","ml_pending" to "Pending detections","ml_no_pending" to "Nothing to review. Tap Scan database or Refresh & scan to find new UPI / mobile / bill patterns.","ml_apply" to "Apply selected","ml_apply_done" to "Applied","ml_reject" to "Reject","ml_reject_done" to "Rejected and remembered","ml_proposed" to "Proposed","ml_confidence" to "Confidence","ml_original" to "Original message","ml_kind_vpa" to "UPI ID","ml_kind_mobile" to "Mobile","ml_kind_atm" to "ATM","ml_kind_cdm" to "CDM Deposit","ml_kind_bill" to "Bill","ml_refresh" to "Refresh & scan SMS","ml_scan_db" to "Scan database","ml_scanning" to "Scanning…","ml_scan_done" to "Scan complete","ml_db_scan_done" to "Database scan complete","contacts" to "UPI & Mobile","contacts_upi" to "UPI IDs","contacts_mobile" to "Mobiles","contacts_none" to "No identifiers found yet. Scan SMS first.","contacts_search" to "Search UPI or mobile","contacts_txns" to "transactions","contacts_in" to "In","contacts_out" to "Out","contacts_last" to "Last","delete_payee" to "Delete payee","delete_account" to "Delete account","delete_loan" to "Delete loan","delete_bill" to "Delete bill","show_inactive" to "Show inactive bills","scan_bills" to "Scan transactions for bills","bill_scan_done" to "Bills detected","delete_confirm" to "Are you sure?","deleted" to "Deleted","payee_grp_1_10" to "1-10 txns","payee_grp_11_20" to "11-20 txns","payee_grp_21_50" to "21-50 txns","payee_grp_50_plus" to "50+ txns","data_section" to "Data in database","data_txns" to "Transactions","data_accounts" to "Accounts","data_payees" to "Payees","data_upi" to "UPI IDs","data_mobiles" to "Mobiles","data_tolls" to "Toll entries","data_rules" to "Rules","data_loans" to "Loans","data_bills" to "Bills","data_budgets" to "Budgets","data_categories" to "Categories","data_pending" to "Pending ML items"
+                  "app_title" to "Imran's Finances","dashboard" to "Dashboard","ledger" to "Ledger","travel" to "Travel","payees" to "Payees","accounts" to "Accounts","charts" to "Charts","settings" to "Settings","bills" to "Bills","budgets" to "Budgets","categories" to "Categories","rules" to "Rules","loans" to "Loans","expenses" to "Expenses","income" to "Income","latest_txns" to "Latest transactions","view_txns" to "VIEW TRANSACTIONS","cash_atm" to "Cash (ATM)","net_worth" to "Net worth","projected" to "Projected","used" to "used","no_spend" to "No spend yet this month","no_txns" to "No transactions yet. Scan SMS to start.","all" to "All","debit" to "Sent","credit" to "Received","today" to "Today","week" to "Week","month" to "Month","scan_duplicates" to "Duplicates","delete" to "Delete","cancel" to "Cancel","categorize" to "Categorize","loading" to "Loading…","in_label" to "In","out_label" to "Out","net_label" to "Net","total" to "Total","category" to "Category","tags" to "Tags","change_category" to "Change category","change_payee" to "Change payee","edit" to "Edit","close" to "Close","none" to "(none)","map" to "Map","tolls" to "Tolls","no_tolls" to "No toll entries yet.","no_trips" to "No trips yet.","no_dup" to "No duplicates found.","duplicates" to "Duplicates","delete_ticked" to "Delete ticked","backup" to "Backup","restore" to "Restore","clean_restore" to "Clean DB & restore","upload_csv" to "Upload bank statement (CSV)","upload_toll" to "Upload toll data (JSON)","rescan_sms" to "Rescan SMS","notif_access" to "Notification access","fingerprint_lock" to "Fingerprint lock","theme" to "Theme","language" to "Language","lang_english" to "English","lang_hinglish" to "Hinglish","lock_on" to "Lock ON","lock_off" to "Lock OFF","scanning" to "Scanning SMS…","scan_done" to "SMS scan complete","scanned" to "Scanned","imported" to "Imported","skipped_dup" to "Skipped (dup)","ignored" to "Ignored","next_scan" to "Next scan after","quick_add" to "Quick add","cash_entry" to "Cash entry","ok" to "OK","back_again" to "Press back 2 more times to exit","back_again2" to "Press back 1 more time to exit","welcome" to "Welcome to Imran's Finances","first_run_msg" to "What do you want to do first?\n\n• Scan SMS — import bank transactions from inbox\n• Restore backup — restores CSV; older SMS won't re-import after this","scan_sms" to "Scan SMS","restore_backup" to "Restore backup","later" to "Later","no_data_month" to "No data for this month","category_split" to "Category split","pct_of_month" to "% of month","bank_accounts" to "Bank accounts","wallets" to "Wallets","fastag_accounts" to "FASTag","add_id" to "Add another UPI / name","add_id_hint" to "e.g. name@upi","add_btn" to "Add & merge","merge_done" to "Merged","unmerge_last" to "Unmerge last","txn_count" to "txns","no_upi" to "no UPI","out_short" to "Sent","in_short" to "Recd","unmerge_ok" to "Last merge undone","unmerge_none" to "No merge history","select_two" to "Select at least 2","search_hint" to "Search","search_payee" to "Search payee / UPI","new_payee" to "New payee / shop","payee_blank" to "Name cannot be empty","amount_bad" to "Enter a valid amount","type" to "Type","spent" to "Spent","received" to "Received","kisko" to "Who / merchant","no_accounts_yet" to "No accounts yet. Scan SMS to populate.","merge_btn" to "Merge","add_bill" to "Add bill","bill_name" to "Bill name","due_day" to "Due day (1-31)","frequency" to "Frequency","monthly" to "Monthly","weekly" to "Weekly","yearly" to "Yearly","mark_paid" to "Mark paid","set_budget" to "Set budget","budget_left" to "Left","custom_categories" to "Custom categories","add_category" to "Add category","category_name" to "Category name","search" to "Search","no_results" to "No results","amount" to "Amount","note" to "Note","view_raw" to "View raw SMS","raw_sms" to "Raw SMS","sender" to "Sender","parse_status" to "Parse","recurring" to "Recurring","newest" to "Newest","oldest" to "Oldest","vs_prev" to "vs","balance_unknown" to "Balance unknown · tap to set","set_balance" to "Set balance","current_balance" to "Current balance","share_pdf" to "Share PDF","heatmap" to "Spending by hour","loan_no" to "Loan No","next_emi" to "Next EMI est.","total_paid" to "Total paid","no_loans" to "No loans detected yet.","delete_rule" to "Delete rule","no_rules" to "No learned rules yet.","reclassify" to "Reclassify","backup_saved_to" to "Backup saved to:","backup_failed" to "Backup failed:","restore_failed" to "Restore failed:","restored_rows" to "restored rows","insurance" to "Insurance / Policy","loan" to "Loan","card" to "Credit Card","wallet" to "Wallet","bank" to "Bank","move_to" to "Move to…","toll_date_grid" to "Toll dates","tap_manage" to "Tap any account to manage","export_pdf" to "Export PDF","export_long_shot" to "Long screenshot","move_to_tolls" to "Move to tolls","move_all_to_tolls" to "Move ALL to tolls","screenshot" to "Screenshot","saved_to" to "Saved to:","screenshot_failed" to "Screenshot failed:","moved_to_tolls" to "Moved to tolls","no_txn_selected" to "No transactions selected","select_txns" to "Select transactions","done" to "Done","toll_for_date" to "Tolls on","expand" to "Expand","collapse" to "Collapse","remove_from_tolls" to "Remove from tolls","removed_from_tolls" to "Removed from tolls","remove_duplicates" to "Remove duplicates","apply_similar" to "Apply to similar","similar_found" to "Found similar transactions","select_all" to "Select all","clear_rules" to "Clear all rules","matched" to "matched","color_theme" to "Color theme","theme_purple" to "Purple","theme_teal" to "Teal","theme_amber" to "Amber","theme_indigo" to "Indigo","theme_rose" to "Rose","theme_green" to "Green","theme_navy" to "Navy","machine_learning" to "Machine Learning","ml_pending" to "Pending detections","ml_no_pending" to "Nothing to review. Tap Scan database or Refresh & scan to find new UPI / mobile / bill patterns.","ml_apply" to "Apply selected","ml_apply_done" to "Applied","ml_reject" to "Reject","ml_reject_done" to "Rejected and remembered","ml_proposed" to "Proposed","ml_confidence" to "Confidence","ml_original" to "Original message","ml_kind_vpa" to "UPI ID","ml_kind_mobile" to "Mobile","ml_kind_atm" to "ATM","ml_kind_cdm" to "CDM Deposit","ml_kind_bill" to "Bill","ml_refresh" to "Refresh & scan SMS","ml_scan_db" to "Scan database","ml_scanning" to "Scanning…","ml_scan_done" to "Scan complete","ml_db_scan_done" to "Database scan complete","contacts" to "UPI & Mobile","contacts_upi" to "UPI IDs","contacts_mobile" to "Mobiles","contacts_none" to "No identifiers found yet. Scan SMS first.","contacts_search" to "Search UPI or mobile","contacts_txns" to "transactions","contacts_in" to "In","contacts_out" to "Out","contacts_last" to "Last","delete_payee" to "Delete payee","delete_account" to "Delete account","delete_loan" to "Delete loan","delete_bill" to "Delete bill","show_inactive" to "Show inactive bills","scan_bills" to "Scan transactions for bills","bill_scan_done" to "Bills detected","delete_confirm" to "Are you sure?","deleted" to "Deleted","payee_grp_1_10" to "1-10 txns","payee_grp_11_20" to "11-20 txns","payee_grp_21_50" to "21-50 txns","payee_grp_50_plus" to "50+ txns","data_section" to "Data in database","data_txns" to "Transactions","data_accounts" to "Accounts","data_payees" to "Payees","data_upi" to "UPI IDs","data_mobiles" to "Mobiles","data_tolls" to "Toll entries","data_rules" to "Rules","data_loans" to "Loans","data_bills" to "Bills","data_budgets" to "Budgets","data_categories" to "Categories","data_pending" to "Pending ML items","about" to "About","auto_backup" to "Auto-backup","auto_backup_off" to "Off","auto_backup_once" to "Once a day (02:00)","auto_backup_twice" to "Twice a day (02:00 & 14:00)","sub_backup" to "Saves a CSV + rules JSON to Downloads/ImransFinances/","sub_restore" to "Shows the last 7 backups saved on this device — pick one to restore","sub_clean" to "Wipes the database to start fresh (permissions & preferences kept)","sub_csv" to "Upload a CSV exported from your bank — column mapping preview before import","sub_toll" to "Upload toll plaza data (NHAI JSON format) — used to match toll SMS to plazas","sub_rescan" to "Re-reads your SMS inbox for new bank messages since the last scan","sub_ml_refresh" to "Runs SMS scan, then checks all transactions for new UPI / mobile / bill patterns","sub_ml_scan" to "Re-examines every existing transaction in the DB for unreviewed patterns","sub_notif" to "Reads payment notifications from these apps only. All data stays on device.","notif_granted" to "Granted","notif_not_granted" to "Not granted — tap to open settings","notif_apps" to "Apps we read from","backups_available" to "Available backups","pick_external" to "Pick external file…","no_backups" to "No backups yet — tap Backup to create one","restore_from" to "Restore from","donation" to "Support this project","telegram" to "Join Telegram","whatsapp" to "Message on WhatsApp","donate_100" to "Donate ₹100","donate_200" to "Donate ₹200","donate_500" to "Donate ₹500","donate_1000" to "Donate ₹1000","no_upi_app" to "No UPI app found on this device","about_description" to "ABOUT_DESC_PLACEHOLDER"
               )
               private val hi: Map<String, String> = en.toMutableMap().apply { put("expenses","Kharch"); put("income","Aaya"); put("debit","Diya"); put("credit","Aaya"); put("in_label","Aaya"); put("out_label","Diya") }
               @Volatile private var hinglish = false
@@ -662,6 +672,103 @@ jobs:
           }
           EOF_14
 
+          cat > app/src/main/java/com/example/fintrack/BootReceiver.kt <<'EOF_BOOT'
+          package com.example.fintrack
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          class BootReceiver : BroadcastReceiver() {
+              override fun onReceive(context: Context, intent: Intent) { try { if (intent.action != Intent.ACTION_BOOT_COMPLETED) return; BackupScheduler.reschedule(context) } catch (_: Exception) {} }
+          }
+          EOF_BOOT
+
+          cat > app/src/main/java/com/example/fintrack/BackupWorker.kt <<'EOF_BW'
+          package com.example.fintrack
+          import android.content.Context
+          import androidx.work.Worker
+          import androidx.work.WorkerParameters
+          import java.io.File
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+          class BackupWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params) {
+              override fun doWork(): Result {
+                  try {
+                      val ctx = applicationContext
+                      val ts = SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date())
+                      val csv = Backup.export(ctx)
+                      val rules = Backup.exportRulesJson(ctx)
+                      val dir = File(ctx.getExternalFilesDir(null), "backups"); dir.mkdirs()
+                      File(dir, "imrans_finances_$ts.csv").writeText(csv)
+                      File(dir, "imrans_finances_$ts.rules.json").writeText(rules)
+                      trimOld(dir)
+                      return Result.success()
+                  } catch (_: Exception) { return Result.retry() }
+              }
+              private fun trimOld(dir: File) {
+                  try {
+                      val csvs = (dir.listFiles { _, n -> n.startsWith("imrans_finances_") && n.endsWith(".csv") } ?: emptyArray()).sortedBy { it.name }
+                      val maxBackups = 7
+                      if (csvs.size > maxBackups) {
+                          for (f in csvs.take(csvs.size - maxBackups)) {
+                              val base = f.name.removeSuffix(".csv")
+                              try { f.delete() } catch (_: Exception) {}
+                              try { File(dir, "$base.rules.json").delete() } catch (_: Exception) {}
+                          }
+                      }
+                  } catch (_: Exception) {}
+              }
+          }
+          EOF_BW
+
+          cat > app/src/main/java/com/example/fintrack/BackupScheduler.kt <<'EOF_BS'
+          package com.example.fintrack
+          import android.content.Context
+          import androidx.work.Constraints
+          import androidx.work.ExistingPeriodicWorkPolicy
+          import androidx.work.PeriodicWorkRequestBuilder
+          import androidx.work.WorkManager
+          import java.util.Calendar
+          import java.util.concurrent.TimeUnit
+          object BackupScheduler {
+              private const val WORK_NAME = "imrans_auto_backup"
+              private const val WORK_NAME2 = "imrans_auto_backup_2"
+              fun schedule(ctx: Context, mode: String) {
+                  cancel(ctx)
+                  if (mode == "off") return
+                  val prefs = ctx.getSharedPreferences("fin", Context.MODE_PRIVATE)
+                  prefs.edit().putString("auto_backup_mode", mode).apply()
+                  try {
+                      val wm = WorkManager.getInstance(ctx)
+                      val constraints = Constraints.Builder().setRequiresBatteryNotLow(true).build()
+                      val r1 = PeriodicWorkRequestBuilder<BackupWorker>(24, TimeUnit.HOURS).setInitialDelay(initialDelayHours(2), TimeUnit.HOURS).setConstraints(constraints).build()
+                      wm.enqueueUniquePeriodicWork(WORK_NAME, ExistingPeriodicWorkPolicy.UPDATE, r1)
+                      if (mode == "twice") {
+                          val r2 = PeriodicWorkRequestBuilder<BackupWorker>(24, TimeUnit.HOURS).setInitialDelay(initialDelayHours(14), TimeUnit.HOURS).setConstraints(constraints).build()
+                          wm.enqueueUniquePeriodicWork(WORK_NAME2, ExistingPeriodicWorkPolicy.UPDATE, r2)
+                      }
+                  } catch (_: Exception) {}
+              }
+              private fun initialDelayHours(hour: Int): Long {
+                  val now = Calendar.getInstance()
+                  val target = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, hour); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0); if (timeInMillis <= now.timeInMillis) add(Calendar.DAY_OF_MONTH, 1) }
+                  return (target.timeInMillis - now.timeInMillis) / 3_600_000L
+              }
+              fun cancel(ctx: Context) { try { val wm = WorkManager.getInstance(ctx); wm.cancelUniqueWork(WORK_NAME); wm.cancelUniqueWork(WORK_NAME2) } catch (_: Exception) {} }
+              fun reschedule(ctx: Context) { try { val prefs = ctx.getSharedPreferences("fin", Context.MODE_PRIVATE); val mode = prefs.getString("auto_backup_mode", "off") ?: "off"; if (mode != "off") schedule(ctx, mode) } catch (_: Exception) {} }
+              fun currentMode(ctx: Context): String = try { ctx.getSharedPreferences("fin", Context.MODE_PRIVATE).getString("auto_backup_mode", "off") ?: "off" } catch (_: Exception) { "off" }
+              fun listBackups(ctx: Context): List<Pair<File, Long>> {
+                  return try {
+                      val dir = File(ctx.getExternalFilesDir(null), "backups"); if (!dir.exists()) return emptyList()
+                      (dir.listFiles { _, n -> n.startsWith("imrans_finances_") && n.endsWith(".csv") } ?: emptyArray()).mapNotNull { f ->
+                          val name = f.name.removePrefix("imrans_finances_").removeSuffix(".csv")
+                          try { val t = SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).parse(name)?.time ?: f.lastModified(); f to t } catch (_: Exception) { f to f.lastModified() }
+                      }.sortedByDescending { it.second }
+                  } catch (_: Exception) { emptyList() }
+              }
+          }
+          EOF_BS
+
           cat > app/src/main/java/com/example/fintrack/Tolls.kt <<'EOF_15'
           package com.example.fintrack
           import android.content.Context
@@ -736,7 +843,7 @@ jobs:
           import android.service.notification.NotificationListenerService
           import android.service.notification.StatusBarNotification
           class NotifListener : NotificationListenerService() {
-              private val WL = setOf("com.dreamplug.androidapp","com.google.android.apps.nbu.paisa.user","com.yesbank.iris","com.phonepe.app","com.jupiter.money","net.one97.paytm","com.mobikwik_new","com.jio.jiopay","com.fedmobile","com.supermoney")
+              companion object { val WL: Map<String, String> = linkedMapOf("net.one97.paytm" to "Paytm", "com.phonepe.app" to "PhonePe", "com.google.android.apps.nbu.paisa.user" to "Google Pay", "in.amazon.mShop.android.shopping" to "Amazon Pay", "com.mobikwik_new" to "Mobikwik", "com.jio.jiopay" to "Jio Payments Bank", "com.jupiter.money" to "Jupiter", "com.fedmobile" to "Fi Money", "com.supermoney" to "SuperMoney", "com.yesbank.iris" to "Yes Bank") }
               override fun onNotificationPosted(sbn: StatusBarNotification?) { try { val n = sbn ?: return; if (n.packageName !in WL) return; process(applicationContext, n) } catch (_: Exception) {} }
               private fun process(ctx: Context, sbn: StatusBarNotification) { try { val extras = sbn.notification?.extras ?: return; val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""; val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""; val big = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString() ?: ""; val full = (title + " " + text + " " + big).trim(); if (full.length < 5) return; val amt = Regex("""(?:₹|rs\.?|inr)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)""", RegexOption.IGNORE_CASE).find(full)?.groupValues?.get(1)?.replace(",", "")?.toDoubleOrNull() ?: return; if (amt <= 0) return; val l = full.lowercase(); val debit = "debited" in l || "paid" in l || "sent" in l || "spent" in l || "withdrawn" in l || "purchase" in l; val merchant = sbn.packageName.take(40); val t = Txn(smsKey = "NOTIF|${sbn.packageName}|${full.hashCode()}", ts = sbn.postTime, amount = amt, debit = debit, merchant = merchant, category = Categories.classify(merchant, full, debit), institution = sbn.packageName, channel = "APP", sender = sbn.packageName, body = full, source = "NOTIF", status = "NOTIF"); Repo.save(ctx, t) } catch (_: Exception) {} }
           }
@@ -1037,6 +1144,7 @@ jobs:
           fun Context.pill(label: String, selected: Boolean, onClick: () -> Unit): TextView = tv(label, 13f, if (selected) Color.WHITE else C.TEXT, selected).apply { setPadding(dp(14), dp(7), dp(14), dp(7)); background = rippleShape(if (selected) C.ACCENT else C.CARD2, 18, if (selected) Color.parseColor("#33FFFFFF") else Color.parseColor("#33000000")); setOnClickListener { onClick() }; layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(dp(4), dp(4), dp(4), dp(4)) } }
           fun Context.actionBtn(label: String, onClick: () -> Unit): TextView = tv(label, 14f, Color.WHITE, true).apply { gravity = Gravity.CENTER; setPadding(dp(14), dp(10), dp(14), dp(10)); background = rippleShape(C.ACCENT, 14, Color.parseColor("#33FFFFFF")); setOnClickListener { onClick() } }
           fun Context.ghostBtn(label: String, onClick: () -> Unit): TextView = tv(label, 13f, C.ACCENT, true).apply { gravity = Gravity.CENTER; setPadding(dp(12), dp(8), dp(12), dp(8)); background = rippleShape(C.CARD2, 14, Color.parseColor("#33000000")); setOnClickListener { onClick() } }
+          fun Context.subtitle(text: String): TextView = tv(text, 11f, C.MUTED).apply { setPadding(dp(4), dp(2), dp(4), dp(6)); setLineSpacing(dp(2).toFloat(), 1f) }
           fun LinearLayout.put(v: View, top: Int = 10, weight: Float = 0f): View { val lp = if (orientation == LinearLayout.VERTICAL) LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, if (weight > 0) 0 else ViewGroup.LayoutParams.WRAP_CONTENT, weight) else LinearLayout.LayoutParams(if (weight > 0) 0 else ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, weight); if (orientation == LinearLayout.VERTICAL) lp.topMargin = (top * resources.displayMetrics.density).toInt() else lp.leftMargin = (top * resources.displayMetrics.density).toInt(); addView(v, lp); return v }
           fun inr(v: Double, paise: Boolean = false): String { val s = String.format(Locale.US, if (paise) "%.2f" else "%.0f", Math.abs(v)); val parts = s.split("."); var whole = parts[0]; if (whole.length > 3) { val last3 = whole.takeLast(3); var rest = whole.dropLast(3); val groups = ArrayList<String>(); while (rest.length > 2) { groups.add(0, rest.takeLast(2)); rest = rest.dropLast(2) }; if (rest.isNotEmpty()) groups.add(0, rest); whole = groups.joinToString(",") + "," + last3 }; return (if (v < 0) "-" else "") + "₹" + whole + (if (parts.size > 1) "." + parts[1] else "") }
           fun inrSigned(v: Double): Pair<String, Int> { val l = if (v >= 0) "+" + inr(v) else "-" + inr(-v); return l to (if (v >= 0) C.GREEN else C.RED) }
@@ -1306,6 +1414,12 @@ jobs:
           class ChartsScreen(act: MainActivity) : Screen(act) { private var year = Calendar.getInstance().get(Calendar.YEAR); private var month = Calendar.getInstance().get(Calendar.MONTH); private val body = act.vbox(14); override val root: View = ScrollView(act).apply { addView(body); setBackgroundColor(C.BG) }; override fun refresh() { try { body.removeAllViews(); val db = Db.get(act); val cal = Calendar.getInstance().apply { set(Calendar.YEAR, year); set(Calendar.MONTH, month); set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }; val start = cal.timeInMillis; cal.add(Calendar.MONTH, 1); val end = cal.timeInMillis; val label = SimpleDateFormat("MMMM yyyy", Locale.getDefault()).format(Date(start)); val bar = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setBackgroundColor(C.CARD); setPadding(act.dp(6), act.dp(6), act.dp(6), act.dp(6)) }; bar.addView(act.tv("◀", 20f, C.TEXT).apply { setPadding(act.dp(12), act.dp(6), act.dp(12), act.dp(6)); setOnClickListener { month--; if (month < 0) { month = 11; year-- }; refresh() } }); bar.addView(act.tv(label, 17f, C.TEXT, true).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)); bar.addView(act.tv("▶", 20f, C.TEXT).apply { setPadding(act.dp(12), act.dp(6), act.dp(12), act.dp(6)); setOnClickListener { month++; if (month > 11) { month = 0; year++ }; refresh() } }); body.addView(bar); val spent = db.num("SELECT SUM(amount) FROM txn WHERE debit=1 AND ts>=? AND ts<?", start.toString(), end.toString()); val recv = db.num("SELECT SUM(amount) FROM txn WHERE debit=0 AND ts>=? AND ts<?", start.toString(), end.toString()); val cats = db.rows("SELECT category, SUM(amount) AS s FROM txn WHERE debit=1 AND ts>=? AND ts<? GROUP BY category ORDER BY s DESC", start.toString(), end.toString()); val s = act.card(); s.addView(act.tv("${Str.s("expenses")} · $label", 12f, C.MUTED)); s.addView(act.tv(inr(spent), 28f, C.RED, true)); s.addView(act.tv("${Str.s("income")}: ${inr(recv)}", 13f, C.GREEN)); body.put(s); if (cats.isEmpty()) { val e = act.card(); e.addView(act.tv(Str.s("no_data_month"), 15f, C.TEXT, true)); body.put(e); return }; val d = DonutView(act); d.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, act.dp(280)); val pal = intArrayOf(C.ACCENT, C.ACCENT2, C.RED, C.AMBER, Color.parseColor("#C084FC"), Color.parseColor("#22D3EE")); d.updateSlices(cats.mapIndexed { i, r -> DonutView.Slice(r["category"] ?: "", (r["s"]?.toDoubleOrNull() ?: 0.0).toFloat(), pal[i % pal.size]) }); val cc = act.card(); cc.addView(act.tv(Str.s("category_split"), 15f, C.TEXT, true)); cc.addView(d); body.put(cc) } catch (_: Exception) {} } }
           class DataBackupScreen(act: MainActivity) : Screen(act) {
               private val body = act.vbox(14); override val root: View = ScrollView(act).apply { addView(body); setBackgroundColor(C.BG) }
+              private fun labelledCard(title: String, subtitle: String, onClick: (() -> Unit)? = null): LinearLayout {
+                  val card = act.vbox(12).apply { background = act.shape(C.CARD, radius = 20, strokeColor = C.BORDER); setPadding(act.dp(16), act.dp(14), act.dp(16), act.dp(14)); if (onClick != null) { setOnClickListener { onClick() }; isClickable = true } }
+                  card.addView(act.tv(title, 15f, C.TEXT, true))
+                  card.addView(act.subtitle(subtitle))
+                  return card
+              }
               override fun refresh() {
                   try {
                       body.removeAllViews()
@@ -1336,7 +1450,51 @@ jobs:
                           dataCard.put(r, 4)
                       }
                       body.put(dataCard, 0)
-                      val d = act.card(); d.addView(act.tv("Data & Backup", 15f, C.TEXT, true)); d.put(act.actionBtn(Str.s("backup")) { act.backup() }, 10); d.put(act.actionBtn(Str.s("restore")) { act.pickRestore() }, 8); d.put(act.actionBtn(Str.s("clean_restore")) { act.cleanAndRestore() }, 8); d.put(act.actionBtn(Str.s("upload_csv")) { act.pickCsvStatement() }, 8); d.put(act.actionBtn(Str.s("upload_toll")) { act.pickTollJson() }, 8); d.put(act.actionBtn(Str.s("rescan_sms")) { act.rescan() }, 8); d.put(act.actionBtn(Str.s("ml_refresh")) { act.show(act.mlIndex()); act.toast(Str.s("ml_scanning")) }, 8); d.put(act.actionBtn(Str.s("ml_scan_db")) { Thread { try { val db2 = Db.get(act); val all = db2.queryTxns("1=1", emptyArray(), 100000); var n = 0; for (t in all) { try { val d0 = VpaExtractor.detect(act, t); if (d0 != null) { val rej = db2.one("SELECT 1 FROM ml_rejected WHERE kind=? AND raw=?", d0.kind, d0.raw); val ex = db2.one("SELECT 1 FROM pending_review WHERE txn_id=? AND kind=?", t.id.toString(), d0.kind); if (rej == null && ex == null) { db2.exec("INSERT OR IGNORE INTO pending_review(txn_id, kind, raw, proposed_merchant, proposed_category, confidence, status, created_at) VALUES(?,?,?,?,?,?,?,?)", d0.txnId, d0.kind, d0.raw, d0.proposedMerchant, d0.proposedCategory, d0.confidence, "pending", System.currentTimeMillis()); n++ } }; val b0 = BillDetector.detect(t); if (b0 != null) { val rej = db2.one("SELECT 1 FROM ml_rejected WHERE kind=? AND raw=?", b0.kind, b0.raw); val ex = db2.one("SELECT 1 FROM pending_review WHERE txn_id=? AND kind='BILL'", t.id.toString()); if (rej == null && ex == null) { db2.exec("INSERT OR IGNORE INTO pending_review(txn_id, kind, raw, proposed_merchant, proposed_category, confidence, status, created_at) VALUES(?,?,?,?,?,?,?,?)", b0.txnId, "BILL", b0.raw, b0.proposedMerchant, b0.proposedCategory, b0.confidence, "pending", System.currentTimeMillis()); n++ } } } catch (_: Exception) {} }; act.runOnUiThread { act.toast("$n ${Str.s("ml_db_scan_done")}"); act.show(act.mlIndex()) } } catch (_: Exception) { act.runOnUiThread { act.toast(Str.s("ml_db_scan_done")) } } }.start() }, 8); d.put(act.actionBtn(Str.s("notif_access")) { act.openNotifAccessSettings() }, 8); body.put(d)
+                      body.put(labelledCard(Str.s("backup"), Str.s("sub_backup")) { act.backup() }, 10)
+                      body.put(labelledCard(Str.s("restore"), Str.s("sub_restore")) { act.showRestorePicker() }, 8)
+                      val autoCard = act.vbox(12).apply { background = act.shape(C.CARD, radius = 20, strokeColor = C.BORDER); setPadding(act.dp(16), act.dp(14), act.dp(16), act.dp(14)) }
+                      autoCard.addView(act.tv(Str.s("auto_backup"), 15f, C.TEXT, true))
+                      val currentMode = BackupScheduler.currentMode(act)
+                      val modes = listOf("off" to Str.s("auto_backup_off"), "once" to Str.s("auto_backup_once"), "twice" to Str.s("auto_backup_twice"))
+                      for ((k, lbl) in modes) {
+                          val on = currentMode == k
+                          val opt = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, act.dp(10), 0, act.dp(10)); setOnClickListener { BackupScheduler.schedule(act, k); refresh() } }
+                          opt.addView(act.tv(if (on) "◉" else "○", 20f, if (on) C.ACCENT else C.MUTED).apply { setPadding(0, 0, act.dp(10), 0) })
+                          opt.addView(act.tv(lbl, 14f, if (on) C.ACCENT else C.TEXT, on), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                          autoCard.put(opt, 2)
+                      }
+                      autoCard.addView(act.subtitle("Keeps the 7 newest backups. Runs in background, survives reboots."))
+                      body.put(autoCard, 8)
+                      body.put(labelledCard(Str.s("clean_restore"), Str.s("sub_clean")) { act.cleanAndRestore() }, 8)
+                      body.put(labelledCard(Str.s("upload_csv"), Str.s("sub_csv")) { act.pickCsvStatement() }, 8)
+                      body.put(labelledCard(Str.s("upload_toll"), Str.s("sub_toll")) { act.pickTollJson() }, 8)
+                      body.put(labelledCard(Str.s("rescan_sms"), Str.s("sub_rescan")) { act.rescan() }, 8)
+                      body.put(labelledCard(Str.s("ml_refresh"), Str.s("sub_ml_refresh")) { act.show(act.mlIndex()); act.toast(Str.s("ml_scanning")) }, 8)
+                      body.put(labelledCard(Str.s("ml_scan_db"), Str.s("sub_ml_scan")) {
+                          Thread {
+                              try {
+                                  val db2 = Db.get(act); val all = db2.queryTxns("1=1", emptyArray(), 100000); var n = 0
+                                  for (t in all) { try { val d0 = VpaExtractor.detect(act, t); if (d0 != null) { val rej = db2.one("SELECT 1 FROM ml_rejected WHERE kind=? AND raw=?", d0.kind, d0.raw); val ex = db2.one("SELECT 1 FROM pending_review WHERE txn_id=? AND kind=?", t.id.toString(), d0.kind); if (rej == null && ex == null) { db2.exec("INSERT OR IGNORE INTO pending_review(txn_id, kind, raw, proposed_merchant, proposed_category, confidence, status, created_at) VALUES(?,?,?,?,?,?,?,?)", d0.txnId, d0.kind, d0.raw, d0.proposedMerchant, d0.proposedCategory, d0.confidence, "pending", System.currentTimeMillis()); n++ } }; val b0 = BillDetector.detect(t); if (b0 != null) { val rej = db2.one("SELECT 1 FROM ml_rejected WHERE kind=? AND raw=?", b0.kind, b0.raw); val ex = db2.one("SELECT 1 FROM pending_review WHERE txn_id=? AND kind='BILL'", t.id.toString()); if (rej == null && ex == null) { db2.exec("INSERT OR IGNORE INTO pending_review(txn_id, kind, raw, proposed_merchant, proposed_category, confidence, status, created_at) VALUES(?,?,?,?,?,?,?,?)", b0.txnId, "BILL", b0.raw, b0.proposedMerchant, b0.proposedCategory, b0.confidence, "pending", System.currentTimeMillis()); n++ } } } catch (_: Exception) {} }
+                                  act.runOnUiThread { act.toast("$n ${Str.s("ml_db_scan_done")}"); act.show(act.mlIndex()) }
+                              } catch (_: Exception) { act.runOnUiThread { act.toast(Str.s("ml_db_scan_done")) } }
+                          }.start()
+                      }, 8)
+                      val notifCard = act.vbox(12).apply { background = act.shape(C.CARD, radius = 20, strokeColor = C.BORDER); setPadding(act.dp(16), act.dp(14), act.dp(16), act.dp(14)) }
+                      notifCard.addView(act.tv(Str.s("notif_access"), 15f, C.TEXT, true))
+                      notifCard.addView(act.subtitle(Str.s("sub_notif")))
+                      val connected = try { val nm = act.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager; nm.isNotificationListenerAccessGranted(android.content.ComponentName(act, NotifListener::class.java)) } catch (_: Exception) { false }
+                      val statusRow = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, act.dp(8), 0, act.dp(8)); setOnClickListener { act.openNotifAccessSettings() } }
+                      statusRow.addView(act.tv(if (connected) "● " + Str.s("notif_granted") else "○ " + Str.s("notif_not_granted"), 13f, if (connected) C.GREEN else C.RED, true), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                      statusRow.addView(act.tv("›", 18f, C.MUTED))
+                      notifCard.addView(statusRow)
+                      notifCard.addView(act.tv(Str.s("notif_apps"), 12f, C.TEXT, true).apply { setPadding(0, act.dp(8), 0, act.dp(4)) })
+                      for ((pkg, name) in NotifListener.WL) {
+                          val r = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, act.dp(4), 0, act.dp(4)) }
+                          r.addView(act.tv("•", 12f, C.MUTED).apply { setPadding(0, 0, act.dp(8), 0) })
+                          r.addView(act.tv(name, 12f, C.MUTED), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                          notifCard.put(r, 0)
+                      }
+                      body.put(notifCard, 8)
                       val th = act.card(); th.addView(act.tv("Preferences", 15f, C.TEXT, true)); th.addView(Switch(act).apply { text = Str.s("fingerprint_lock"); isChecked = act.isLockEnabled(); setOnCheckedChangeListener { _, v -> act.setLockEnabled(v); act.toast(if (v) Str.s("lock_on") else Str.s("lock_off")) } }); th.addView(Switch(act).apply { text = Str.s("language") + ": " + (if (act.isHinglish()) Str.s("lang_hinglish") else Str.s("lang_english")); isChecked = act.isHinglish(); setOnCheckedChangeListener { _, v -> act.setLang(v) } }); th.put(act.actionBtn(Str.s("theme") + ": " + act.themeModeLabel()) { act.cycleThemeMode() }, 10); th.put(act.tv(Str.s("color_theme"), 13f, C.TEXT, true).apply { setPadding(act.dp(6), act.dp(12), 0, act.dp(4)) }, 8); val colorRow = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(act.dp(6), act.dp(4), act.dp(6), act.dp(4)) }; for (k in arrayOf("purple","teal","amber","indigo","rose","green","navy")) { val pal = C.paletteOf(k); val selected = act.colorPalette() == k; val circle = android.view.View(act).apply { val sz = act.dp(38); layoutParams = LinearLayout.LayoutParams(sz, sz).apply { setMargins(act.dp(6), act.dp(6), act.dp(6), act.dp(6)) }; background = if (selected) act.shape(pal.accent, radius = 19, strokeColor = C.TEXT, strokeWidthDp = 3) else act.shape(pal.accent, radius = 19); setOnClickListener { act.setColorPalette(k) }; isClickable = true }; colorRow.addView(circle) }; th.addView(colorRow); body.put(th)
                   } catch (_: Exception) {}
               }
@@ -1477,6 +1635,165 @@ jobs:
           }
           EOF_22
 
+          cat > app/src/main/java/com/example/fintrack/AboutScreen.kt <<'EOF_ABOUT'
+          package com.example.fintrack
+          import android.content.Intent
+          import android.net.Uri
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.ImageView
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import androidx.appcompat.app.AlertDialog
+          class AboutScreen(act: MainActivity) : Screen(act) {
+              private val body = act.vbox(14)
+              override val root: View = ScrollView(act).apply { addView(body); setBackgroundColor(C.BG) }
+              override fun refresh() {
+                  try {
+                      body.removeAllViews()
+                      body.addView(act.tv(Str.s("about"), 22f, C.TEXT, true).apply { setPadding(act.dp(4), act.dp(6), 0, act.dp(6)) })
+                      val iconCard = act.card()
+                      iconCard.gravity = Gravity.CENTER_HORIZONTAL
+                      val iv = ImageView(act).apply {
+                          val resId = act.resources.getIdentifier("icon_source", "drawable", act.packageName)
+                          if (resId != 0) setImageResource(resId) else setImageResource(R.drawable.ic_bank)
+                          layoutParams = LinearLayout.LayoutParams(act.dp(300), act.dp(300)).apply { gravity = Gravity.CENTER_HORIZONTAL; topMargin = act.dp(8); bottomMargin = act.dp(8) }
+                          scaleType = ImageView.ScaleType.FIT_CENTER
+                      }
+                      iconCard.addView(iv)
+                      iconCard.addView(act.tv("Imran's Finances", 22f, C.TEXT, true).apply { gravity = Gravity.CENTER_HORIZONTAL })
+                      iconCard.addView(act.tv("v12.5.0", 12f, C.MUTED).apply { gravity = Gravity.CENTER_HORIZONTAL; setPadding(0, act.dp(2), 0, act.dp(4)) })
+                      body.put(iconCard, 0)
+                      val contact = act.card()
+                      contact.addView(act.tv("Connect", 15f, C.TEXT, true))
+                      contact.put(act.actionBtn(Str.s("telegram")) {
+                          try { act.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/royalmintflavor"))) } catch (_: Exception) { act.toast("Cannot open Telegram") }
+                      }, 10)
+                      contact.put(act.actionBtn(Str.s("whatsapp")) {
+                          try { act.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://wa.me/919935166926"))) } catch (_: Exception) { act.toast("Cannot open WhatsApp") }
+                      }, 8)
+                      body.put(contact, 8)
+                      val donate = act.card()
+                      donate.addView(act.tv(Str.s("donation"), 15f, C.TEXT, true))
+                      donate.addView(act.subtitle("UPI: maazrasheed2000-1@okaxis · Pick an amount to open your UPI app"))
+                      val amounts = listOf(100, 200, 500, 1000)
+                      for (amt in amounts) {
+                          val b = act.actionBtn("Donate ₹$amt") { launchUpi(amt) }
+                          donate.put(b, 8)
+                      }
+                      body.put(donate, 8)
+                      val about = act.card()
+                      about.addView(act.tv("About the app", 15f, C.TEXT, true))
+                      about.addView(styledDescription())
+                      body.put(about, 8)
+                  } catch (_: Exception) {}
+              }
+              private fun launchUpi(amt: Int) {
+                  try {
+                      val uri = "upi://pay?pa=maazrasheed2000-1@okaxis&pn=Maaz%20Rasheed&am=$amt&cu=INR&tn=Donation%20to%20Imran%27s%20Finances"
+                      val i = Intent(Intent.ACTION_VIEW, Uri.parse(uri))
+                      act.startActivity(i)
+                  } catch (_: Exception) { act.toast(Str.s("no_upi_app")) }
+              }
+              private fun styledDescription(): LinearLayout {
+                  val col = act.vbox(0)
+                  fun h(text: String) = act.tv(text, 15f, C.ACCENT, true).apply { setPadding(0, act.dp(14), 0, act.dp(4)) }
+                  fun h2(text: String) = act.tv(text, 13f, C.TEXT, true).apply { setPadding(0, act.dp(10), 0, act.dp(2)) }
+                  fun p(text: String) = act.tv(text, 12f, C.TEXT).apply { setLineSpacing(act.dp(3).toFloat(), 1f); setPadding(0, act.dp(2), 0, act.dp(4)) }
+                  fun b(text: String) = act.tv(text, 12f, C.MUTED).apply { setLineSpacing(act.dp(3).toFloat(), 1f); setPadding(act.dp(10), act.dp(2), 0, act.dp(3)) }
+
+                  col.addView(h("Imran's Finances"))
+                  col.addView(p("A privacy-first personal finance tracker for Android that reads your bank SMS, automatically categorises transactions, tracks your tolls, and never sends your data anywhere. Everything stays on your phone."))
+                  col.addView(h("What it does"))
+                  col.addView(p("Imran's Finances turns the hundreds of bank SMS and payment notifications cluttering your inbox into a clean, searchable ledger of what you spent, earned, and owed — with category detection, payee grouping, toll tracking, and export to PDF or CSV."))
+                  col.addView(p("No account, no server, no sign-up. The app reads SMS and notifications directly on your device, stores everything in a local SQLite database, and never uploads anything."))
+
+                  col.addView(h("Features"))
+                  col.addView(h2("📩 Automatic transaction import"))
+                  col.addView(b("· SMS scanner — reads your bank SMS from the last N days, extracts amount, merchant, UPI ID, date, reference number, and balance"))
+                  col.addView(b("· Notification listener — captures payment notifications from UPI apps (Paytm, PhonePe, GPay, Amazon Pay, Mobikwik, Jio Payments, etc.)"))
+                  col.addView(b("· Duplicate detection — deduplicates on SMS key, ref number + account, and fuzzy match (time ± 5 min, same amount, same merchant, same day)"))
+                  col.addView(b("· Rescan anytime — incremental scan picks up only new SMS since last scan"))
+
+                  col.addView(h2("🏦 Multi-bank, multi-channel"))
+                  col.addView(b("· Detects 40+ Indian banks (HDFC, SBI, ICICI, Axis, Kotak, IDFC, PNB, Canara, Union, Federal, Jupiter, Fi, and more) from SMS sender headers"))
+                  col.addView(b("· Handles UPI, IMPS, NEFT, RTGS, ATM, FASTag, Credit Card, Cash, and CDM (Cash Deposit Machine) deposits"))
+                  col.addView(b("· Differentiates debit vs credit correctly, and pulls out your available balance when the SMS has it"))
+
+                  col.addView(h2("🧠 UPI & Mobile intelligence"))
+                  col.addView(b("· UPI ID extraction — pulls the VPA out of Federal Bank-style UPIOUT/…/vpa@handle/… messages, cleans stray spaces, validates the handle"))
+                  col.addView(b("· Mobile number detection — recognises 10-digit Indian mobiles (6/7/8/9 first digit) inside UPI usernames"))
+                  col.addView(b("· Brand recognition — 150 built-in brand → category mappings"))
+                  col.addView(b("· Machine Learning review screen — the app proposes display names and categories for new UPI/mobile merchants. You get a review screen with tick boxes to accept or reject each suggestion."))
+                  col.addView(b("· Contacts screen — two tabs (UPI / Mobile) listing every UPI ID and mobile number the app has seen"))
+
+                  col.addView(h2("📒 Ledger"))
+                  col.addView(b("· Year-grouped, collapsible transaction list"))
+                  col.addView(b("· Search by merchant, body, sender, tag, or >amount"))
+                  col.addView(b("· Filter by All / Sent / Received, by category, by tag, or by date range"))
+                  col.addView(b("· Bulk select to delete, re-categorise, or move to Tolls in one go"))
+                  col.addView(b("· Long-press any txn for Edit / View raw SMS / Delete / Categorize / Move to tolls"))
+                  col.addView(b("· Tag transactions and filter by tag (#food, #trip-ooty)"))
+
+                  col.addView(h2("🚗 Travel & Tolls"))
+                  col.addView(b("· FASTag toll detection — matches toll SMS to known plazas by name/amount"))
+                  col.addView(b("· Date-grouped toll list — one collapsible section per day"))
+                  col.addView(b("· Map view — routes drawn via OSRM, going vs returning trips coloured differently"))
+                  col.addView(b("· Move to tolls — one-tap from any txn, bulk-select in Ledger, or Move ALL for a whole payee"))
+                  col.addView(b("· Export toll list to PDF or long screenshot"))
+
+                  col.addView(h2("👥 Payees"))
+                  col.addView(b("· Auto-grouped by merchant / UPI ID"))
+                  col.addView(b("· Merge duplicate payees into one survivor, with undo"))
+                  col.addView(b("· Recurring detection — flags payees that look like subscriptions"))
+                  col.addView(b("· Per-payee view — total sent, total received, full transaction history"))
+
+                  col.addView(h2("💰 Accounts & Net Worth"))
+                  col.addView(b("· Grouped by Bank / Wallet / Card / FASTag / Loan / Insurance"))
+                  col.addView(b("· Reclassify any account (tap to move Bank → Wallet, or Bank → Loan, etc.)"))
+                  col.addView(b("· Net worth = assets − liabilities, computed from latest balance per account"))
+
+                  col.addView(h2("📊 Dashboard"))
+                  col.addView(b("· Month picker with prev/next navigation"))
+                  col.addView(b("· Spend vs income with month-over-month delta"))
+                  col.addView(b("· Projected month-end spend based on current run rate"))
+                  col.addView(b("· Category donut, spending heatmap by hour, latest transactions"))
+
+                  col.addView(h2("💸 Bills & Budgets"))
+                  col.addView(b("· Bills — add recurring bills with amount, due day, category, frequency"))
+                  col.addView(b("· Budgets — set a monthly limit per category, with notification when exceeded"))
+
+                  col.addView(h2("🔐 Privacy & security"))
+                  col.addView(b("· All data is local — SQLite on your device. No cloud sync, no telemetry, no ads."))
+                  col.addView(b("· FLAG_SECURE — blocks screenshots and screen recording of sensitive screens"))
+                  col.addView(b("· Biometric lock — optional fingerprint/face unlock, re-prompts after 60 seconds in background"))
+
+                  col.addView(h2("💾 Backup & data portability"))
+                  col.addView(b("· CSV backup — every table exported to Downloads/ImransFinances/"))
+                  col.addView(b("· Auto-backup — once or twice a day, keeps the 7 newest backups"))
+                  col.addView(b("· Restore — list of stored backups with parsed date/time"))
+                  col.addView(b("· CSV bank statement import, toll JSON import"))
+                  col.addView(b("· Clean DB + restore — wipe and restore from a backup in one action"))
+
+                  col.addView(h2("Privacy"))
+                  col.addView(b("· No analytics, no ads, no third-party tracking"))
+                  col.addView(b("· No cloud — your SMS, transactions, and rules never leave your device"))
+                  col.addView(b("· Network used only for OpenStreetMap tiles and OSRM routing"))
+
+                  col.addView(h2("Technical"))
+                  col.addView(b("· Language: Kotlin · Min SDK: 30 (Android 11) · Target SDK: 33"))
+                  col.addView(b("· Data store: SQLite (fintrack.db, version 16)"))
+                  col.addView(b("· Build: GitHub Actions → debug APK → GitHub Release"))
+                  col.addView(b("· Dependencies: AppCompat, Core-KTX, Biometric, osmdroid, Material 3, WorkManager"))
+
+                  col.addView(h2("License"))
+                  col.addView(p("Personal project, shared as-is. Not affiliated with any bank, UPI provider, or financial institution. Use at your own discretion."))
+                  return col
+              }
+          }
+          EOF_ABOUT
+
           cat > app/src/main/java/com/example/fintrack/MainActivity.kt <<'EOF_19'
           package com.example.fintrack
           import android.Manifest
@@ -1540,6 +1857,7 @@ jobs:
               fun loansIndex() = screens.indexOfFirst { it is LoansScreen }
               fun contactsIndex() = screens.indexOfFirst { it is ContactsScreen }
               fun mlIndex() = screens.indexOfFirst { it is MLScreen }
+              fun aboutIndex() = screens.indexOfFirst { it is AboutScreen }
               fun openDrawer() { try { drawerScrim.visibility = View.VISIBLE; drawerPanel.visibility = View.VISIBLE } catch (_: Exception) {} }
               fun closeDrawer() { try { drawerPanel.visibility = View.GONE; drawerScrim.visibility = View.GONE } catch (_: Exception) {} }
               fun colorPalette(): String = getSharedPreferences("fin", MODE_PRIVATE).getString("color_palette", "purple") ?: "purple"
@@ -1563,8 +1881,9 @@ jobs:
                       window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
                       try { org.osmdroid.config.Configuration.getInstance().apply { userAgentValue = "ImransFinances/12.5.0"; tileFileSystemCacheMaxBytes = 600L*1024*1024; tileFileSystemCacheTrimBytes = 500L*1024*1024; load(this@MainActivity, getSharedPreferences("osmdroid", MODE_PRIVATE)) } } catch (_: Exception) {}
                       try { ForegroundHelper.start(this) } catch (_: Exception) {}
+                      try { BackupScheduler.reschedule(this) } catch (_: Exception) {}
                       home = HomeScreen(this); ledger = LedgerScreen(this)
-                      screens.addAll(listOf(home, ledger, TravelScreen(this), PayeesScreen(this), ChartsScreen(this), DataBackupScreen(this), AccountsScreen(this), BillsScreen(this), BudgetsScreen(this), CategoriesScreen(this), SearchScreen(this), RulesScreen(this), LoansScreen(this), ContactsScreen(this), MLScreen(this)))
+                      screens.addAll(listOf(home, ledger, TravelScreen(this), PayeesScreen(this), ChartsScreen(this), DataBackupScreen(this), AccountsScreen(this), BillsScreen(this), BudgetsScreen(this), CategoriesScreen(this), SearchScreen(this), RulesScreen(this), LoansScreen(this), ContactsScreen(this), MLScreen(this), AboutScreen(this)))
                       content = FrameLayout(this)
                       val root = FrameLayout(this)
                       val main = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(C.BG) }
@@ -1593,7 +1912,7 @@ jobs:
               }
               private fun buildBottomNav(): LinearLayout { val bar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setBackgroundColor(C.CARD); elevation = dp(6).toFloat(); setPadding(0, dp(4), 0, dp(4)) }; val icons = intArrayOf(R.drawable.ic_bank, R.drawable.ic_transfer, R.drawable.ic_fastag, R.drawable.ic_contacts, R.drawable.ic_networth, R.drawable.ic_settings); val names = listOf(Str.s("dashboard"), Str.s("ledger"), Str.s("travel"), Str.s("payees"), Str.s("accounts"), Str.s("settings")); val targets = intArrayOf(0, ledgerIndex(), travelIndex(), payeesIndex(), accountsIndex(), settingsIndex()); for (i in names.indices) { val isActive = i == activeTab; val item = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(dp(6), dp(8), dp(6), dp(8)); tag = i; if (isActive) background = shape(C.CARD2, 16); addView(icon(icons[i], if (isActive) C.ACCENT else C.MUTED, 34)); addView(tv(names[i], 11f, if (isActive) C.ACCENT else C.MUTED, isActive).apply { gravity = Gravity.CENTER; setPadding(0, dp(2), 0, 0) }); setOnClickListener { activeTab = i; refreshNav(); show(targets[i]) } }; bar.addView(item, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(dp(3), dp(3), dp(3), dp(3)) }) }; return bar }
               private fun refreshNav() { try { val bar = nav; for (i in 0 until bar.childCount) { val item = bar.getChildAt(i) as? LinearLayout ?: continue; val isActive = i == activeTab; item.background = if (isActive) shape(C.CARD2, 16) else null; if (item.childCount >= 2) { val ic = item.getChildAt(0) as? android.widget.ImageView; ic?.setColorFilter(if (isActive) C.ACCENT else C.MUTED); val lbl = item.getChildAt(1) as? TextView; lbl?.setTextColor(if (isActive) C.ACCENT else C.MUTED); lbl?.typeface = android.graphics.Typeface.create(if (isActive) "sans-serif-medium" else "sans-serif", if (isActive) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL) } } } catch (_: Exception) {} }
-              private fun buildDrawer(): LinearLayout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(C.CARD); visibility = View.GONE; setPadding(dp(16), dp(24), dp(16), dp(16)); addView(tv(Str.s("app_title"), 22f, C.TEXT, true).apply { setPadding(0, 0, 0, dp(16)) }); val items = listOf(Triple(Str.s("dashboard"), R.drawable.ic_bank, 0), Triple(Str.s("ledger"), R.drawable.ic_transfer, ledgerIndex()), Triple(Str.s("travel"), R.drawable.ic_fastag, travelIndex()), Triple(Str.s("payees"), R.drawable.ic_contacts, payeesIndex()), Triple(Str.s("accounts"), R.drawable.ic_bank, accountsIndex()), Triple(Str.s("contacts"), R.drawable.ic_contacts, contactsIndex()), Triple(Str.s("machine_learning"), R.drawable.ic_ml, mlIndex()), Triple(Str.s("bills"), R.drawable.ic_bills, billsIndex()), Triple(Str.s("budgets"), R.drawable.ic_budget, budgetsIndex()), Triple(Str.s("categories"), R.drawable.ic_category, categoriesIndex()), Triple(Str.s("rules"), R.drawable.ic_rules, rulesIndex()), Triple(Str.s("loans"), R.drawable.ic_loan, loansIndex()), Triple(Str.s("settings"), R.drawable.ic_settings, settingsIndex())); for ((t, r, idx) in items) { val row = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dp(8), dp(12), dp(8), dp(12)); setOnClickListener { closeDrawer(); if (idx in screens.indices) show(idx) } }; row.addView(icon(r, C.ICON, 34)); row.addView(tv(t, 15f, C.TEXT).apply { setPadding(dp(14), 0, 0, 0) }); addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)) } }
+              private fun buildDrawer(): LinearLayout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(C.CARD); visibility = View.GONE; setPadding(dp(16), dp(24), dp(16), dp(16)); addView(tv(Str.s("app_title"), 22f, C.TEXT, true).apply { setPadding(0, 0, 0, dp(16)) }); val items = listOf(Triple(Str.s("dashboard"), R.drawable.ic_bank, 0), Triple(Str.s("ledger"), R.drawable.ic_transfer, ledgerIndex()), Triple(Str.s("travel"), R.drawable.ic_fastag, travelIndex()), Triple(Str.s("payees"), R.drawable.ic_contacts, payeesIndex()), Triple(Str.s("accounts"), R.drawable.ic_bank, accountsIndex()), Triple(Str.s("contacts"), R.drawable.ic_contacts, contactsIndex()), Triple(Str.s("machine_learning"), R.drawable.ic_ml, mlIndex()), Triple(Str.s("bills"), R.drawable.ic_bills, billsIndex()), Triple(Str.s("budgets"), R.drawable.ic_budget, budgetsIndex()), Triple(Str.s("categories"), R.drawable.ic_category, categoriesIndex()), Triple(Str.s("rules"), R.drawable.ic_rules, rulesIndex()), Triple(Str.s("loans"), R.drawable.ic_loan, loansIndex()), Triple(Str.s("settings"), R.drawable.ic_settings, settingsIndex()), Triple(Str.s("about"), R.drawable.ic_info, aboutIndex())); for ((t, r, idx) in items) { val row = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dp(8), dp(12), dp(8), dp(12)); setOnClickListener { closeDrawer(); if (idx in screens.indices) show(idx) } }; row.addView(icon(r, C.ICON, 34)); row.addView(tv(t, 15f, C.TEXT).apply { setPadding(dp(14), 0, 0, 0) }); addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)) } }
               private fun quickAdd() { AlertDialog.Builder(this).setTitle(Str.s("quick_add")).setItems(arrayOf(Str.s("cash_entry"), Str.s("add_bill"), Str.s("set_budget"))) { _, i -> when (i) { 0 -> ledger.addCash(); 1 -> show(billsIndex()); 2 -> show(budgetsIndex()) } }.setNegativeButton(Str.s("cancel"), null).show() }
               override fun onStop() { super.onStop(); stopAt = System.currentTimeMillis() }
               override fun onStart() { super.onStart(); if (unlocked && stopAt > 0 && System.currentTimeMillis() - stopAt > 60_000) { lock(); authenticate() } }
@@ -1623,11 +1942,31 @@ jobs:
                           var savedPath = ""
                           try { val values = ContentValues().apply { put(MediaStore.Downloads.DISPLAY_NAME, csvName); put(MediaStore.Downloads.MIME_TYPE, "text/csv"); put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/ImransFinances") }; val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values); if (uri != null) { contentResolver.openOutputStream(uri)?.use { it.write(csv.toByteArray()) }; savedPath = "Downloads/ImransFinances/$csvName" } } catch (_: Exception) {}
                           try { val rulesJson = Backup.exportRulesJson(this); val values = ContentValues().apply { put(MediaStore.Downloads.DISPLAY_NAME, jsonName); put(MediaStore.Downloads.MIME_TYPE, "application/json"); put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/ImransFinances") }; val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values); if (uri != null) { contentResolver.openOutputStream(uri)?.use { it.write(rulesJson.toByteArray()) } } } catch (_: Exception) {}
-                          try { val dir = File(getExternalFilesDir(null), "backups"); dir.mkdirs(); File(dir, csvName).writeText(csv); File(dir, jsonName).writeText(Backup.exportRulesJson(this)); if (savedPath.isEmpty()) savedPath = dir.absolutePath + "/" + csvName; try { val files = dir.listFiles { _, n -> n.endsWith(".csv") }?.sortedBy { it.name } ?: emptyList(); if (files.size > 20) for (i in 0 until files.size - 20) files[i].delete() } catch (_: Exception) {} } catch (_: Exception) {}
+                          try { val dir = File(getExternalFilesDir(null), "backups"); dir.mkdirs(); File(dir, csvName).writeText(csv); File(dir, jsonName).writeText(Backup.exportRulesJson(this)); if (savedPath.isEmpty()) savedPath = dir.absolutePath + "/" + csvName; try { val csvs = dir.listFiles { _, n -> n.startsWith("imrans_finances_") && n.endsWith(".csv") }?.sortedBy { it.name } ?: emptyList(); if (csvs.size > 7) for (f in csvs.take(csvs.size - 7)) { val base = f.name.removeSuffix(".csv"); try { f.delete() } catch (_: Exception) {}; try { File(dir, "$base.rules.json").delete() } catch (_: Exception) {} } } catch (_: Exception) {} } catch (_: Exception) {}
                           if (savedPath.isEmpty()) throw RuntimeException("All write paths failed — check storage permission")
                           runOnUiThread { toast(Str.s("backup_saved_to") + " " + savedPath) }
                       } catch (ex: Exception) { runOnUiThread { toast(Str.s("backup_failed") + " " + (ex.message ?: "unknown")) } }
                   }.start()
+              }
+              fun showRestorePicker() {
+                  try {
+                      val backups = BackupScheduler.listBackups(this)
+                      val col = vbox(8)
+                      if (backups.isEmpty()) {
+                          col.addView(tv(Str.s("no_backups"), 13f, C.MUTED))
+                      } else {
+                          val dt = SimpleDateFormat("dd MMM yyyy, HH:mm", Locale.getDefault())
+                          for ((file, ts) in backups) {
+                              val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(10), 0, dp(10)); setOnClickListener { Thread { try { val t = file.readText(); afterRestore(t) } catch (_: Exception) {} }.start() } }
+                              row.addView(icon(R.drawable.ic_bank, C.ACCENT, 28))
+                              row.addView(tv(dt.format(Date(ts)), 13f, C.TEXT, true), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(10) })
+                              row.addView(tv(file.name.removePrefix("imrans_finances_").removeSuffix(".csv"), 10f, C.MUTED))
+                              col.addView(row)
+                          }
+                      }
+                      val scroll = ScrollView(this).apply { addView(col) }
+                      AlertDialog.Builder(this).setTitle(Str.s("backups_available")).setView(scroll).setPositiveButton(Str.s("pick_external")) { _, _ -> pickRestore() }.setNegativeButton(Str.s("cancel"), null).show()
+                  } catch (_: Exception) {}
               }
               fun pickRestore() { openDoc.launch(arrayOf("text/*", "application/csv", "application/json", "*/*")) }
               private fun afterRestore(t: String) { try { val n = Backup.restore(applicationContext, t); val m = Db.get(applicationContext).one("SELECT MAX(ts) FROM txn")?.toLongOrNull() ?: 0L; if (m > 0) getSharedPreferences("fin", MODE_PRIVATE).edit().putLong("last_sms_date", m).apply(); runOnUiThread { toast("$n " + Str.s("restored_rows")); refreshAll() } } catch (ex: Exception) { runOnUiThread { toast(Str.s("restore_failed") + " " + (ex.message ?: "unknown")) } } }
@@ -1701,4 +2040,4 @@ jobs:
           gh release create "$VERSION" /tmp/proj/app/build/outputs/apk/debug/app-debug.apk \
             --repo "${{ github.repository }}" \
             --title "Imran's Finances v12.5.0 Build ${{ github.run_number }}" \
-            --notes "v12.5.0: Six fixes. (1) Machine Learning screen buttons render reliably at top before pending list, with proper row. (2) Icon sizes unified to 34dp: settings gear, PDF icon, ML icon, all drawer icons, top bar icons, bottom nav icons. (3) Scan database button now available in both Machine Learning screen and Settings/Data & Backup card. (4) Color theme chooser shows colored circles only (no text pills), selected circle gets a 3dp text-colored ring. (5) All icons set to 34dp via the icon() helper default and every call site. (6) Adaptive app icon background set to fully transparent #00000000, preserving your transparent source PNG as-is without any purple fill."
+            --notes "v12.5.0 final touches. (1) Settings: Auto-backup section with Off / Once daily 02:00 / Twice daily 02:00 & 14:00, persisted via WorkManager, survives reboot. (2) Retention: 7 newest backups (14 files on disk). (3) Restore: dialog listing stored backups with parsed date/time, plus Pick external file option. (4) Info subtitle under every Settings button. (5) Notification access section shows live status plus read-only list of the 10 apps we read. (6) About screen added to drawer with 300dp 1024x1024 icon, Telegram + WhatsApp + 4 donation UPI buttons, styled scrollable description."
