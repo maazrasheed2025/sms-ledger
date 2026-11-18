@@ -134,7 +134,7 @@ jobs:
           plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
           android {
               namespace = "com.example.fintrack"; compileSdk = 34
-              defaultConfig { applicationId = "com.example.fintrack"; minSdk = 30; targetSdk = 33; versionCode = 49; versionName = "12.5.0" }
+              defaultConfig { applicationId = "com.example.fintrack"; minSdk = 30; targetSdk = 33; versionCode = 50; versionName = "12.6.0" }
               compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
               kotlinOptions { jvmTarget = "17" }
               androidResources { noCompress += "png" }
@@ -161,6 +161,7 @@ jobs:
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
               <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+              <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
               <application android:label="@string/app_name" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round" android:allowBackup="false" android:usesCleartextTraffic="true" android:theme="@style/Theme.Material3.DayNight.NoActionBar">
                   <activity android:name=".MainActivity" android:exported="true" android:configChanges="uiMode">
                       <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
@@ -514,12 +515,12 @@ jobs:
               private val tables = listOf("txn","payees","net_items","senders","merchant_rules","parse_patterns","nb_words","toll_trips","toll_plazas","loans","payee_merges","accounts","bills","budgets","categories","tags","txn_tags","payee_merge_rules")
               private val dateFmt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
               private fun q(s: String): String = "\"" + s.replace("\r"," ").replace("\n"," ").replace("\"","\"\"") + "\""
-              fun export(ctx: Context): String {
-                  val db = Db.get(ctx).readableDatabase; val sb = StringBuilder()
+              fun export(ctx: Context): String { val sw = java.io.StringWriter(); exportTo(ctx, sw); return sw.toString() }
+              fun exportTo(ctx: Context, sb: Appendable) {
+                  val db = Db.get(ctx).readableDatabase
                   sb.append("## CANONICAL").append('\n').append(CANONICAL.joinToString(",")).append('\n')
                   db.rawQuery("SELECT institution, account, ts, body, ref, debit, amount, category, vpa FROM txn ORDER BY ts ASC", null).use { c -> while (c.moveToNext()) { val bank = if (c.isNull(0)) "" else c.getString(0); val acct = if (c.isNull(1)) "" else c.getString(1); val ts = c.getLong(2); val desc = if (c.isNull(3)) "" else c.getString(3); val ref = if (c.isNull(4)) "" else c.getString(4); val debit = c.getInt(5) == 1; val amt = c.getDouble(6); val cat = if (c.isNull(7)) "" else c.getString(7); val upi = if (c.isNull(8)) "" else c.getString(8); sb.append(listOf(q(bank), q(acct), q(dateFmt.format(Date(ts))), q(desc), q(ref), q(if (debit) String.format(Locale.US, "%.2f", amt) else ""), q(if (!debit) String.format(Locale.US, "%.2f", amt) else ""), q(cat), q(upi)).joinToString(",")).append('\n') } }
                   for (t in tables) { val cols = ArrayList<String>(); try { db.rawQuery("PRAGMA table_info($t)", null).use { c -> while (c.moveToNext()) cols.add(c.getString(1)) } } catch (_: Exception) { continue }; if (cols.isEmpty()) continue; sb.append("## ").append(t).append('\n').append(cols.joinToString(",")).append('\n'); db.rawQuery("SELECT * FROM $t", null).use { c -> while (c.moveToNext()) { val parts = ArrayList<String>(); for (i in 0 until c.columnCount) parts.add(if (c.isNull(i)) "" else q(c.getString(i))); sb.append(parts.joinToString(",")).append('\n') } } }
-                  return sb.toString()
               }
               private fun parseLine(line: String): List<String?> {
                   val out = ArrayList<String?>(); val sb = StringBuilder(); var inQ = false; var quoted = false; var i = 0
@@ -639,9 +640,15 @@ jobs:
           import android.content.Context
           object Learner {
               fun norm(s: String): String = s.lowercase().replace(Regex("""[^a-z0-9@. ]"""), " ").replace(Regex("""\s+"""), " ").trim()
-              fun category(db: Db, key: String): String? { if (key.isBlank()) return null; val exact = db.rows("SELECT category FROM merchant_rules WHERE merchant_key=?", key).firstOrNull()?.get("category"); if (exact != null) return exact; var best: String? = null; var bw = 0.0; for (r in db.rows("SELECT merchant_key, category, weight FROM merchant_rules WHERE length(merchant_key) >= 5")) { val k = r["merchant_key"] ?: continue; if (key.contains(k) || k.contains(key)) { val w = r["weight"]?.toDoubleOrNull() ?: 1.0; if (w > bw) { bw = w; best = r["category"] } } }; return best }
-              fun learnCategory(db: Db, key: String, display: String, cat: String) { if (key.isBlank()) return; val old = db.rows("SELECT category FROM merchant_rules WHERE merchant_key=?", key).firstOrNull(); if (old == null) db.exec("INSERT INTO merchant_rules(merchant_key, display, category, weight) VALUES(?,?,?,?)", key, display, cat, 2.0) else if (old["category"] == cat) db.exec("UPDATE merchant_rules SET weight = weight + 1 WHERE merchant_key=?", key) else db.exec("UPDATE merchant_rules SET category=?, weight=2 WHERE merchant_key=?", key, cat) }
-              fun learnVpaCategory(db: Db, vpa: String, cat: String) { if (vpa.isBlank()) return; val key = "vpa:" + vpa.lowercase().trim(); val old = db.rows("SELECT category FROM merchant_rules WHERE merchant_key=?", key).firstOrNull(); if (old == null) db.exec("INSERT INTO merchant_rules(merchant_key, display, category, weight) VALUES(?,?,?,?)", key, vpa, cat, 3.0) else db.exec("UPDATE merchant_rules SET category=?, weight = weight + 1 WHERE merchant_key=?", cat, key) }
+              private var rulesAt = 0L
+              private var rulesCache: List<Triple<String, String, Double>> = emptyList()
+              private var mergeAt = 0L
+              private var mergeCache: List<Triple<String, List<String>, String>> = emptyList()
+              fun invalidate() { rulesAt = 0L; mergeAt = 0L }
+              private fun rules(db: Db): List<Triple<String, String, Double>> { val now = System.currentTimeMillis(); if (now - rulesAt > 3000L) { val l = db.rows("SELECT merchant_key, category, weight FROM merchant_rules").mapNotNull { r -> val k = r["merchant_key"] ?: return@mapNotNull null; Triple(k, r["category"] ?: "", r["weight"]?.toDoubleOrNull() ?: 1.0) }; rulesCache = l; rulesAt = now }; return rulesCache }
+              fun category(db: Db, key: String): String? { if (key.isBlank()) return null; val all = rules(db); val exact = all.firstOrNull { it.first == key }; if (exact != null) return exact.second; var best: String? = null; var bw = 0.0; for ((k, c, w) in all) { if (k.length < 5) continue; if (key.contains(k) || k.contains(key)) { if (w > bw) { bw = w; best = c } } }; return best }
+              fun learnCategory(db: Db, key: String, display: String, cat: String) { invalidate(); if (key.isBlank()) return; val old = db.rows("SELECT category FROM merchant_rules WHERE merchant_key=?", key).firstOrNull(); if (old == null) db.exec("INSERT INTO merchant_rules(merchant_key, display, category, weight) VALUES(?,?,?,?)", key, display, cat, 2.0) else if (old["category"] == cat) db.exec("UPDATE merchant_rules SET weight = weight + 1 WHERE merchant_key=?", key) else db.exec("UPDATE merchant_rules SET category=?, weight=2 WHERE merchant_key=?", key, cat) }
+              fun learnVpaCategory(db: Db, vpa: String, cat: String) { invalidate(); if (vpa.isBlank()) return; val key = "vpa:" + vpa.lowercase().trim(); val old = db.rows("SELECT category FROM merchant_rules WHERE merchant_key=?", key).firstOrNull(); if (old == null) db.exec("INSERT INTO merchant_rules(merchant_key, display, category, weight) VALUES(?,?,?,?)", key, vpa, cat, 3.0) else db.exec("UPDATE merchant_rules SET category=?, weight = weight + 1 WHERE merchant_key=?", cat, key) }
               fun similarCandidates(db: Db, t: Txn, limit: Int = 200): List<Txn> {
                   val out = ArrayList<Txn>(); val seen = HashSet<Long>(); seen.add(t.id)
                   val mk = norm(t.merchant)
@@ -651,8 +658,8 @@ jobs:
                   return out
               }
               fun applySimilar(db: Db, ids: List<Long>, category: String) { if (ids.isEmpty()) return; for (id in ids) db.exec("UPDATE txn SET category=? WHERE id=?", category, id) }
-              fun learnMerge(db: Db, survivorKey: String, mergedKeys: List<String>, survivorName: String) { if (survivorKey.isBlank() || mergedKeys.isEmpty()) return; db.exec("INSERT OR REPLACE INTO payee_merge_rules(survivor_key, merged_keys, survivor_name) VALUES(?,?,?)", survivorKey, mergedKeys.joinToString(","), survivorName) }
-              fun resolveMerge(db: Db, key: String): Pair<String, String>? { if (key.isBlank()) return null; for (r in db.rows("SELECT survivor_key, merged_keys, survivor_name FROM payee_merge_rules")) { val merged = (r["merged_keys"] ?: "").split(","); if (key in merged) { val sk = r["survivor_key"] ?: return null; val sn = r["survivor_name"] ?: sk; return sk to sn } }; return null }
+              fun learnMerge(db: Db, survivorKey: String, mergedKeys: List<String>, survivorName: String) { invalidate(); if (survivorKey.isBlank() || mergedKeys.isEmpty()) return; db.exec("INSERT OR REPLACE INTO payee_merge_rules(survivor_key, merged_keys, survivor_name) VALUES(?,?,?)", survivorKey, mergedKeys.joinToString(","), survivorName) }
+              fun resolveMerge(db: Db, key: String): Pair<String, String>? { if (key.isBlank()) return null; val now = System.currentTimeMillis(); if (now - mergeAt > 3000L) { val l = db.rows("SELECT survivor_key, merged_keys, survivor_name FROM payee_merge_rules").mapNotNull { r -> val sk = r["survivor_key"] ?: return@mapNotNull null; Triple(sk, (r["merged_keys"] ?: "").split(","), r["survivor_name"] ?: sk) }; mergeCache = l; mergeAt = now }; for ((sk, merged, sn) in mergeCache) if (key in merged) return sk to sn; return null }
           }
           EOF_7
 
@@ -717,10 +724,18 @@ jobs:
           object SmsEngine {
               private val amountRe = Regex("""(?i)(?:rs\.?|inr|₹)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)""")
               private val amountAfterRe = Regex("""(?i)\b(?:debited|credited|spent|paid|withdrawn|sent|received|deposited|deducted|recharge\s+of)\s+(?:by|for|of|with)?\s*(?:rs\.?|inr|₹)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)""")
-              private val noiseRe = Regex("""(?i)\b(otp|one[- ]time|verification|requested|pre-?approved|eligible|failed|declined|offer|apply)\b""")
-              private val accountRe = Regex("""(?i)(a/c|\bac\b|acct|account|card|upi|bank|wallet|neft|imps|rtgs|atm|fastag|netc|x{2,}\d{2,}|\*{2,}\d{2,}|airtel|jio|vodafone|policy|insurance)""")
+              private val hardNoiseRe = Regex("""(?i)\b(otp|one[- ]time|verification|failed|declined|unsuccessful)\b""")
+              private val promoRe = Regex("""(?i)\b(requested|pre-?approved|eligible|offer|apply)\b""")
+              private val futureRe = Regex("""(?i)\b(?:(?:will|shall|would)\s+be\s+(?:auto[- ]?)?(?:debited|credited|deducted|charged|processed)|is\s+due|are\s+due|due\s+(?:on|by|date)|(?:total|minimum|min)\s+(?:amount\s+)?due|(?:bill|statement)\s+(?:generated|amount))\b""")
+              private val mandateRe = Regex("""(?i)\b(?:mandate|auto-?pay|standing\s+instruction)\s+(?:has\s+been\s+)?(?:created|registered|set\s?up|approved|activated|cancell?ed|revoked|request(?:ed)?)\b""")
+              private val strongAcctRe = Regex("""(?i)(?:x{2,}\d{2,}|\*{2,}\d{2,}|(?:a/c|acct|account|card)\s*(?:no\.?|number)?\s*[:.]?\s*(?:ending\s*(?:with|in)?\s*)?[x*]*\d{3,}|\b(?:upi|vpa|imps|neft|rtgs|fastag|netc|wallet|atm)\b)""")
+              private val drRe = Regex("""(?i)\b(?:dr|debit|dbt)\b\s*[:.\-/]?\s*(?:rs\.?|inr|₹)?\s*\d""")
+              private val crRe = Regex("""(?i)\b(?:cr|credit)\b\s*[:.\-/]?\s*(?:rs\.?|inr|₹)?\s*\d""")
+              private val suffixRe = Regex("""(?i)\s+(?:pvt\.?\s*ltd\.?|private\s+limited|ltd\.?|limited|llp)$""")
+              private val upiPrefixRe = Regex("""(?i)^upi[-/ ]+""")
+              private val accountRe = Regex("""(?i)(a/c|\bac\b|acct|account|card|upi|wallet|neft|imps|rtgs|atm|fastag|netc|x{2,}\d{2,}|\*{2,}\d{2,}|airtel|jio|vodafone|policy|insurance)""")
               private val debitRe = Regex("""(?i)\b(debited|spent|paid|withdrawn|withdrawal|purchase|sent|transferred|deducted|charged|recharge|topup|premium)\b""")
-              private val creditRe = Regex("""(?i)\b(credited|received|deposited|refund(?:ed)?|added to|maturity|claim)\b""")
+              private val creditRe = Regex("""(?i)\b(credited|received|deposited|refund(?:ed)?|revers(?:ed|al)|cashback|added to|maturity|claim)\b""")
               private val balanceRe = Regex("""(?i)(?:avl\.?\s*bal(?:ance)?|available\s*bal(?:ance)?|bal(?:ance)?|remaining\s+balance:?\s*rs\.?)\s*(?:is|:|-)?\s*(?:rs\.?|inr|₹)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)""")
               private val acctRe = Regex("""(?i)(?:a/c|acct?|account|card|lan|policy\s*(?:no)?)\.?\s*(?:no\.?|number)?\s*(?:ending(?:\s+(?:with|in))?)?\s*(?:x+|\*+|#)?\s*([A-Za-z0-9]{3,20})\b""")
               private val refRe = Regex("""(?i)(?:upi\s*ref(?:\s*no)?|ref(?:erence)?\s*(?:no|number|id)?|rrn|utr|transaction\s*id)\s*[:.\-]?\s*([A-Za-z0-9]{6,22})""")
@@ -741,21 +756,27 @@ jobs:
               private val stopStarts = listOf("your","a/c","ac ","acct","account","upi ","bank","card","you ")
               private fun valid(s: String): Boolean { val t = s.trim().lowercase(); if (t.length < 3 || t in stopExact) return false; for (p in stopStarts) if (t.startsWith(p)) return false; return true }
               private val trailDateRe = Regex("""(?i)\s+(?:on\s+)?\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}.*$""")
-              fun pretty(s: String): String { var t = s.trim().replace(trailDateRe, "").trimEnd('.', '-', ',', ' '); if (t.contains("@")) return t.lowercase(); if (t.none { it.isLowerCase() }) t = t.lowercase().split(" ").joinToString(" ") { w -> w.replaceFirstChar { ch -> ch.uppercase() } }; return t.take(30) }
+              fun pretty(s: String): String { var t = s.trim().replace(trailDateRe, "").replace(upiPrefixRe, "").replace(suffixRe, "").trimEnd('.', '-', ',', ' '); if (t.contains("@")) return t.lowercase(); if (t.none { it.isLowerCase() }) t = t.lowercase().split(" ").joinToString(" ") { w -> w.replaceFirstChar { ch -> ch.uppercase() } }; return t.take(40) }
               private fun cleanVpa(raw: String?): String? { if (raw.isNullOrBlank()) return null; var v = raw.trim().lowercase(); while (v.endsWith(".") || v.endsWith(",") || v.endsWith(";") || v.endsWith(":")) v = v.dropLast(1); v = v.removeSuffix(".ref").removeSuffix(".refno"); if (!v.contains("@")) return null; return v }
               private fun findAmount(body: String): Double? { for (m in amountRe.findAll(body)) { val before = body.substring(maxOf(0, m.range.first - 18), m.range.first).lowercase(); if (before.contains("bal") || before.contains("avl") || before.contains("available") || before.contains("limit")) continue; val v = m.groupValues[1].replace(",", "").toDoubleOrNull(); if (v != null && v > 0) return v }; val m2 = amountAfterRe.find(body); val v2 = m2?.groupValues?.get(1)?.replace(",", "")?.toDoubleOrNull(); return if (v2 != null && v2 > 0) v2 else null }
               private fun findMerchant(body: String, debit: Boolean): String? { val cands = ArrayList<String>(); upiSlashRe.find(body)?.let { cands.add(it.groupValues[1]) }; for (m in (if (debit) toRe else fromRe).findAll(body)) cands.add(m.groupValues[1]); vpaWordRe.find(body)?.let { cands.add(it.groupValues[1]) }; for (c in cands) if (valid(c)) return pretty(c); return null }
+              private fun vpaName(v: String?): String? { if (v.isNullOrBlank()) return null; val local = v.substringBefore("@"); if (local.length < 3 || Regex("""\d{6,}""").containsMatchIn(local)) return null; val n = local.replace(Regex("""[._\-]+"""), " ").replace(Regex("""\d+$"""), "").trim(); return if (n.length >= 3 && valid(n)) pretty(n) else null }
               private fun detectWallet(body: String): String? { val a = walletAfterRe.find(body)?.groupValues?.get(1); if (a != null && a.lowercase() in knownWallets) return pretty(a) + " Wallet"; val b = walletBeforeRe.find(body)?.groupValues?.get(1); if (b != null && b.lowercase() in knownWallets) return pretty(b) + " Wallet"; return null }
               private fun channelOf(b: String, wallet: String?): String { if (atmRe.containsMatchIn(b)) return "ATM"; if (wallet != null) return "WALLET"; val l = b.lowercase(); return when { "fastag" in l || "netc" in l || "ihmcl" in l -> "FASTAG"; "policy" in l || "insurance" in l || "premium" in l -> "POLICY"; "upi" in l || "vpa" in l -> "UPI"; "imps" in l -> "IMPS"; "neft" in l -> "NEFT"; "rtgs" in l -> "RTGS"; "card" in l -> "CARD"; "wallet" in l -> "WALLET"; else -> "OTHER" } }
-              fun extract(body: String): Fields { val f = Fields(); val d = debitRe.find(body); val c = creditRe.find(body); if (d != null || c != null) f.debit = if (d != null && c != null) d.range.first < c.range.first else d != null; f.amount = findAmount(body); f.balance = balanceRe.find(body)?.groupValues?.get(1)?.replace(",", "")?.toDoubleOrNull(); f.account = acctRe.find(body)?.groupValues?.get(1); f.ref = refRe.find(body)?.groupValues?.get(1); f.vpa = cleanVpa(vpaRe.find(body)?.groupValues?.get(1)); f.walletName = detectWallet(body); f.channel = channelOf(body, f.walletName); f.merchant = findMerchant(body, f.debit != false); f.loanNo = loanNoRe.find(body)?.groupValues?.get(1)?.uppercase() ?: policyNoRe.find(body)?.groupValues?.get(1)?.uppercase(); return f }
+              fun extract(body: String): Fields { val f = Fields(); val d = debitRe.find(body); val c = creditRe.find(body); if (d != null || c != null) { f.debit = if (d != null && c != null) { val am = amountRe.find(body)?.range?.first ?: 0; val dd = Math.abs(d.range.first - am); val cd = Math.abs(c.range.first - am); if (dd != cd) dd < cd else d.range.first < c.range.first } else d != null } else { if (drRe.containsMatchIn(body)) f.debit = true else if (crRe.containsMatchIn(body)) f.debit = false }; f.amount = findAmount(body); f.balance = balanceRe.find(body)?.groupValues?.get(1)?.replace(",", "")?.toDoubleOrNull(); f.account = acctRe.find(body)?.groupValues?.get(1); f.ref = refRe.find(body)?.groupValues?.get(1); f.vpa = cleanVpa(vpaRe.find(body)?.groupValues?.get(1)); f.walletName = detectWallet(body); f.channel = channelOf(body, f.walletName); f.merchant = findMerchant(body, f.debit != false) ?: vpaName(f.vpa); f.loanNo = loanNoRe.find(body)?.groupValues?.get(1)?.uppercase() ?: policyNoRe.find(body)?.groupValues?.get(1)?.uppercase(); return f }
+              fun legacyKey(sender: String, body: String): String = sender + "|" + body.hashCode()
+              fun key(sender: String, ts: Long, body: String): String { return try { val h = java.security.MessageDigest.getInstance("SHA-1").digest((sender + "|" + ts + "|" + body).toByteArray()); "v2|" + h.take(10).joinToString("") { String.format("%02x", it) } } catch (_: Exception) { legacyKey(sender, body) + "|" + ts } }
               fun build(ctx: Context, db: Db, sender: String, rawBody: String, ts: Long): Txn? {
                   try {
-                      if (sender.none { it.isLetter() }) return null
+                      if (sender.none { it.isLetter() }) { val dg = sender.count { it.isDigit() }; if (sender.startsWith("+") || dg !in 4..7) return null }
                       val body = rawBody.replace("\n", " ").replace(Regex("""\s+"""), " ").trim()
-                      if (noiseRe.containsMatchIn(body)) return null
+                      if (hardNoiseRe.containsMatchIn(body)) return null
+                      if (futureRe.containsMatchIn(body) || mandateRe.containsMatchIn(body)) return null
+                      val hasVerb = debitRe.containsMatchIn(body) || creditRe.containsMatchIn(body)
+                      if (promoRe.containsMatchIn(body) && !(hasVerb && strongAcctRe.containsMatchIn(body))) return null
                       if (!amountRe.containsMatchIn(body) && !amountAfterRe.containsMatchIn(body)) return null
-                      if (!accountRe.containsMatchIn(body)) return null
-                      val instBase = SenderMap.identify(db, sender).first; val f = extract(body); val inst = f.walletName ?: instBase
+                      val knownSender = SenderMap.identify(db, sender).second != "UNKNOWN"; if (!accountRe.containsMatchIn(body) && !knownSender) return null
+                      val instBase = SenderMap.identifyWithBody(db, sender, body).first; val f = extract(body); val inst = f.walletName ?: instBase
                       var status = "REGEX"
                       if (f.merchant == null) { val h = Heuristic.merchant(body, inst); if (h != null) { f.merchant = h; status = "HEURISTIC" } }
                       if (f.merchant == null && atmRe.containsMatchIn(body)) f.merchant = "ATM Withdrawal"
@@ -766,7 +787,7 @@ jobs:
                       val mk = Learner.norm(merchant)
                       val resolved = Learner.resolveMerge(db, mk)
                       if (resolved != null) { merchant = resolved.second }
-                      return Txn(smsKey = sender + "|" + body.hashCode(), ts = ts, amount = amount, debit = debit, merchant = merchant, category = category, institution = inst, account = f.account, balance = f.balance, channel = f.channel, ref = f.ref, vpa = f.vpa, sender = sender, body = body, source = "SMS", status = status, tpl = "", review = false, loanNo = f.loanNo)
+                      return Txn(smsKey = key(sender, ts, body), ts = ts, amount = amount, debit = debit, merchant = merchant, category = category, institution = inst, account = f.account, balance = f.balance, channel = f.channel, ref = f.ref, vpa = f.vpa, sender = sender, body = body, source = "SMS", status = status, tpl = "", review = false, loanNo = f.loanNo)
                   } catch (_: Exception) { return null }
               }
           }
@@ -779,7 +800,7 @@ jobs:
           }
           data class ScanReport(val scanned: Int, val imported: Int, val duplicates: Int, val ignored: Int, val maxTs: Long)
           object SmsImport {
-              fun run(ctx: Context): ScanReport { try { val db = Db.get(ctx); val prefs = ctx.getSharedPreferences("fin", Context.MODE_PRIVATE); val last = prefs.getLong("last_sms_date", 0L); var maxDate = last; var scanned = 0; var imported = 0; var duplicates = 0; var ignored = 0; val cur = ctx.contentResolver.query(Uri.parse("content://sms/inbox"), arrayOf("address", "body", "date"), "date > ?", arrayOf(last.toString()), "date ASC") ?: return ScanReport(0,0,0,0,maxDate); cur.use { c -> val iA = c.getColumnIndex("address"); val iB = c.getColumnIndex("body"); val iD = c.getColumnIndex("date"); while (c.moveToNext()) { scanned++; val date = c.getLong(iD); if (date > maxDate) maxDate = date; val body = c.getString(iB) ?: ""; val sender = c.getString(iA) ?: ""; val t = SmsEngine.build(ctx, db, sender, body, date); if (t == null) { ignored++; continue }; val existing = db.one("SELECT id FROM txn WHERE sms_key=?", t.smsKey ?: ""); if (existing != null) { duplicates++; continue }; if (Repo.save(ctx, t) > 0) imported++ else duplicates++ } }; prefs.edit().putLong("last_sms_date", maxDate).apply(); return ScanReport(scanned, imported, duplicates, ignored, maxDate) } catch (_: Exception) { return ScanReport(0,0,0,0,0L) } }
+              fun run(ctx: Context): ScanReport { try { val db = Db.get(ctx); val prefs = ctx.getSharedPreferences("fin", Context.MODE_PRIVATE); val last = prefs.getLong("last_sms_date", 0L); var maxDate = last; var scanned = 0; var imported = 0; var duplicates = 0; var ignored = 0; val cur = ctx.contentResolver.query(Uri.parse("content://sms/inbox"), arrayOf("address", "body", "date"), "date > ?", arrayOf(last.toString()), "date ASC") ?: return ScanReport(0,0,0,0,maxDate); cur.use { c -> val iA = c.getColumnIndex("address"); val iB = c.getColumnIndex("body"); val iD = c.getColumnIndex("date"); while (c.moveToNext()) { scanned++; val date = c.getLong(iD); if (date > maxDate) maxDate = date; val body = c.getString(iB) ?: ""; val sender = c.getString(iA) ?: ""; val t = SmsEngine.build(ctx, db, sender, body, date); if (t == null) { ignored++; continue }; val existing = db.one("SELECT id FROM txn WHERE sms_key=? OR sms_key=?", t.smsKey ?: "", SmsEngine.legacyKey(t.sender, t.body)); if (existing != null) { duplicates++; continue }; if (Repo.save(ctx, t) > 0) imported++ else duplicates++ } }; prefs.edit().putLong("last_sms_date", maxDate).apply(); return ScanReport(scanned, imported, duplicates, ignored, maxDate) } catch (_: Exception) { return ScanReport(0,0,0,0,0L) } }
           }
           EOF_12
 
@@ -790,9 +811,21 @@ jobs:
               private fun w(n: String) = n to "WALLET"
               private fun l(n: String) = n to "LOAN"
               private fun p(n: String) = n to "POLICY"
-              private val known: Map<String, Pair<String, String>> = mapOf("HDFCBK" to b("HDFC Bank"),"SBIINB" to b("State Bank of India"),"ICICIB" to b("ICICI Bank"),"AXISBK" to b("Axis Bank"),"KOTAKB" to b("Kotak Mahindra Bank"),"IDFCFB" to b("IDFC FIRST Bank"),"PNBSMS" to b("Punjab National Bank"),"CANBNK" to b("Canara Bank"),"UNIONB" to b("Union Bank of India"),"PAYTMB" to w("Paytm"),"AIRBNK" to w("Airtel"),"AIRTEL" to w("Airtel"),"JIOPAY" to w("Jio Payments Bank"),"PHONPE" to w("PhonePe"),"AMAZON" to w("Amazon Pay"),"GPAY" to w("Google Pay"),"MBKWIK" to w("Mobikwik"),"BAJAJF" to l("Bajaj Finance"),"LICIND" to p("LIC"),"LICI" to p("LIC"),"ICICIP" to p("ICICI Prudential"),"HDFCLF" to p("HDFC Life"),"SBILIF" to p("SBI Life"),"FASTAG" to ("FASTag" to "FASTAG"),"NETCFT" to ("FASTag" to "FASTAG"))
+              private val known: Map<String, Pair<String, String>> = mapOf("HDFCBK" to b("HDFC Bank"),"SBIINB" to b("State Bank of India"),"ICICIB" to b("ICICI Bank"),"AXISBK" to b("Axis Bank"),"KOTAKB" to b("Kotak Mahindra Bank"),"IDFCFB" to b("IDFC FIRST Bank"),"PNBSMS" to b("Punjab National Bank"),"CANBNK" to b("Canara Bank"),"UNIONB" to b("Union Bank of India"),"PAYTMB" to w("Paytm"),"AIRBNK" to w("Airtel"),"AIRTEL" to w("Airtel"),"JIOPAY" to w("Jio Payments Bank"),"PHONPE" to w("PhonePe"),"AMAZON" to w("Amazon Pay"),"GPAY" to w("Google Pay"),"MBKWIK" to w("Mobikwik"),"BAJAJF" to l("Bajaj Finance"),"LICIND" to p("LIC"),"LICI" to p("LIC"),"ICICIP" to p("ICICI Prudential"),"HDFCLF" to p("HDFC Life"),"SBILIF" to p("SBI Life"),"FASTAG" to ("FASTag" to "FASTAG"),"NETCFT" to ("FASTag" to "FASTAG"),"HDFCBN" to b("HDFC Bank"),"SBIPSG" to b("State Bank of India"),"SBIUPI" to b("State Bank of India"),"SBICRD" to b("SBI Card"),"ATMSBI" to b("State Bank of India"),"CBSSBI" to b("State Bank of India"),"BOBSMS" to b("Bank of Baroda"),"BOBTXN" to b("Bank of Baroda"),"BOIIND" to b("Bank of India"),"YESBNK" to b("Yes Bank"),"IDBIBK" to b("IDBI Bank"),"INDBNK" to b("Indian Bank"),"FEDBNK" to b("Federal Bank"),"AUBANK" to b("AU Small Finance Bank"),"RBLBNK" to b("RBL Bank"),"INDUSB" to b("IndusInd Bank"),"UCOBNK" to b("UCO Bank"),"CBINBK" to b("Central Bank of India"),"SIBSMS" to b("South Indian Bank"),"KVBANK" to b("Karur Vysya Bank"),"JKBANK" to b("J&K Bank"),"IPPBMS" to b("India Post Payments Bank"),"PUNBNK" to b("Punjab National Bank"))
               fun core(header: String): String { var p = header.uppercase().trim().split("-").filter { it.isNotEmpty() }; if (p.size >= 2 && p[0].length == 2) p = p.drop(1); if (p.size >= 2 && p.last().length == 1) p = p.dropLast(1); return p.joinToString("-") }
-              fun identify(db: Db, header: String): Pair<String, String> { try { val c = core(header); known[c]?.let { return it }; for ((k, v) in known) if (c.contains(k)) return v; return ("Unknown ($c)") to "UNKNOWN" } catch (_: Exception) { return ("Unknown") to "UNKNOWN" } }
+              private val bodyBanks = listOf("hdfc bank" to b("HDFC Bank"), "icici bank" to b("ICICI Bank"), "axis bank" to b("Axis Bank"), "kotak" to b("Kotak Mahindra Bank"), "state bank" to b("State Bank of India"), "punjab national" to b("Punjab National Bank"), "canara bank" to b("Canara Bank"), "union bank" to b("Union Bank of India"), "bank of baroda" to b("Bank of Baroda"), "bank of india" to b("Bank of India"), "yes bank" to b("Yes Bank"), "idbi" to b("IDBI Bank"), "indian bank" to b("Indian Bank"), "federal bank" to b("Federal Bank"), "indusind" to b("IndusInd Bank"), "rbl bank" to b("RBL Bank"), "uco bank" to b("UCO Bank"), "central bank" to b("Central Bank of India"), "south indian bank" to b("South Indian Bank"), "india post" to b("India Post Payments Bank"), "paytm" to w("Paytm"), "phonepe" to w("PhonePe"))
+              fun identify(db: Db, header: String): Pair<String, String> {
+                  try {
+                      val c = core(header)
+                      try { val r = db.rows("SELECT institution, kind FROM senders WHERE core=?", c).firstOrNull(); if (r != null) { val i = r["institution"]; if (!i.isNullOrBlank()) return i to (r["kind"] ?: "BANK") } } catch (_: Exception) {}
+                      known[c]?.let { return it }
+                      var best: Pair<String, Pair<String, String>>? = null
+                      for ((k, v) in known) if (k.length >= 4 && c.contains(k) && (best == null || k.length > best.first.length)) best = k to v
+                      if (best != null) return best.second
+                      return ("Unknown ($c)") to "UNKNOWN"
+                  } catch (_: Exception) { return ("Unknown") to "UNKNOWN" }
+              }
+              fun identifyWithBody(db: Db, header: String, body: String): Pair<String, String> { val r = identify(db, header); if (r.second != "UNKNOWN") return r; val l = body.lowercase(); for ((k, v) in bodyBanks) if (l.contains(k)) return v; return r }
           }
           EOF_13
 
@@ -819,36 +852,96 @@ jobs:
 
           cat > app/src/main/java/com/example/fintrack/BackupWorker.kt <<'EOF_BW'
           package com.example.fintrack
+          import android.content.ContentValues
           import android.content.Context
+          import android.os.Environment
+          import android.provider.MediaStore
           import androidx.work.Worker
           import androidx.work.WorkerParameters
           import java.io.File
+          import java.io.Writer
           import java.text.SimpleDateFormat
           import java.util.Date
           import java.util.Locale
           class BackupWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params) {
               override fun doWork(): Result {
-                  try {
-                      val ctx = applicationContext
-                      val ts = SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date())
-                      val csv = Backup.export(ctx)
-                      val rules = Backup.exportRulesJson(ctx)
-                      val dir = File(ctx.getExternalFilesDir(null), "backups"); dir.mkdirs()
-                      File(dir, "imrans_finances_$ts.csv").writeText(csv)
-                      File(dir, "imrans_finances_$ts.rules.json").writeText(rules)
-                      trimOld(dir)
-                      return Result.success()
-                  } catch (_: Exception) { return Result.retry() }
+                  return try { BackupStore.run(applicationContext); Result.success() } catch (e: Exception) { BackupStore.recordFailure(applicationContext, e); if (runAttemptCount < 3) Result.retry() else Result.failure() }
               }
-              private fun trimOld(dir: File) {
+          }
+          object BackupStore {
+              private const val KEEP = 7
+              private const val SUB = "/ImransFinances"
+              private fun prefs(ctx: Context) = ctx.getSharedPreferences("fin", Context.MODE_PRIVATE)
+              fun dir(ctx: Context): File { val d = File(ctx.getExternalFilesDir(null) ?: ctx.filesDir, "backups"); d.mkdirs(); return d }
+              fun run(ctx: Context): String {
+                  val app = ctx.applicationContext
+                  val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+                  val csvName = "imrans_finances_$ts.csv"
+                  val jsonName = "imrans_finances_$ts.rules.json"
+                  val rules = Backup.exportRulesJson(app)
+                  var where = ""
+                  var err: Exception? = null
+                  try {
+                      val d = dir(app)
+                      File(d, csvName).bufferedWriter().use { Backup.exportTo(app, it) }
+                      File(d, jsonName).writeText(rules)
+                      trimDir(d)
+                      where = File(d, csvName).absolutePath
+                  } catch (e: Exception) { err = e; try { File(dir(app), csvName).delete() } catch (_: Exception) {} }
+                  try {
+                      toDownloads(app, csvName, "text/csv") { Backup.exportTo(app, it) }
+                      toDownloads(app, jsonName, "application/json") { it.write(rules) }
+                      trimDownloads(app)
+                      where = "Downloads$SUB/$csvName"
+                  } catch (e: Exception) { if (err == null) err = e }
+                  if (where.isEmpty()) throw (err ?: RuntimeException("Backup failed"))
+                  prefs(app).edit().putLong("last_backup_time", System.currentTimeMillis()).putString("last_backup_status", "ok").putString("last_backup_path", where).apply()
+                  return where
+              }
+              fun recordFailure(ctx: Context, e: Exception) {
+                  try { prefs(ctx).edit().putString("last_backup_status", "failed").putString("last_backup_error", e.message ?: e.javaClass.simpleName).apply() } catch (_: Exception) {}
+              }
+              fun lastTime(ctx: Context): Long = try { prefs(ctx).getLong("last_backup_time", 0L) } catch (_: Exception) { 0L }
+              fun statusText(ctx: Context): String {
+                  val p = prefs(ctx)
+                  val t = p.getLong("last_backup_time", 0L)
+                  val fmt = SimpleDateFormat("dd MMM yyyy, HH:mm", Locale.getDefault())
+                  val ok = if (t > 0) "Last backup: " + fmt.format(Date(t)) else "No backup taken yet"
+                  return if (p.getString("last_backup_status", "") == "failed") ok + "\nLast attempt failed: " + (p.getString("last_backup_error", "unknown") ?: "unknown") else ok
+              }
+              private fun toDownloads(ctx: Context, name: String, mime: String, write: (Writer) -> Unit) {
+                  val values = ContentValues().apply { put(MediaStore.Downloads.DISPLAY_NAME, name); put(MediaStore.Downloads.MIME_TYPE, mime); put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + SUB) }
+                  val uri = ctx.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: throw RuntimeException("Downloads insert failed")
+                  try {
+                      val os = ctx.contentResolver.openOutputStream(uri) ?: throw RuntimeException("Cannot open Downloads file")
+                      os.bufferedWriter().use { write(it) }
+                  } catch (e: Exception) { try { ctx.contentResolver.delete(uri, null, null) } catch (_: Exception) {}; throw e }
+              }
+              private fun trimDir(dir: File) {
                   try {
                       val csvs = (dir.listFiles { _, n -> n.startsWith("imrans_finances_") && n.endsWith(".csv") } ?: emptyArray()).sortedBy { it.name }
-                      val maxBackups = 7
-                      if (csvs.size > maxBackups) {
-                          for (f in csvs.take(csvs.size - maxBackups)) {
+                      if (csvs.size > KEEP) {
+                          for (f in csvs.take(csvs.size - KEEP)) {
                               val base = f.name.removeSuffix(".csv")
                               try { f.delete() } catch (_: Exception) {}
                               try { File(dir, "$base.rules.json").delete() } catch (_: Exception) {}
+                          }
+                      }
+                  } catch (_: Exception) {}
+              }
+              private fun trimDownloads(ctx: Context) {
+                  try {
+                      val cr = ctx.contentResolver
+                      val rel = Environment.DIRECTORY_DOWNLOADS + SUB + "%"
+                      val items = ArrayList<Pair<Long, String>>()
+                      cr.query(MediaStore.Downloads.EXTERNAL_CONTENT_URI, arrayOf(MediaStore.Downloads._ID, MediaStore.Downloads.DISPLAY_NAME), MediaStore.Downloads.RELATIVE_PATH + " LIKE ? AND " + MediaStore.Downloads.DISPLAY_NAME + " LIKE ?", arrayOf(rel, "imrans_finances_%.csv"), null)?.use { c ->
+                          while (c.moveToNext()) items.add(c.getLong(0) to (c.getString(1) ?: ""))
+                      }
+                      items.sortBy { it.second }
+                      if (items.size > KEEP) {
+                          for ((id, name) in items.take(items.size - KEEP)) {
+                              try { cr.delete(android.content.ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, id), null, null) } catch (_: Exception) {}
+                              try { cr.delete(MediaStore.Downloads.EXTERNAL_CONTENT_URI, MediaStore.Downloads.DISPLAY_NAME + "=? AND " + MediaStore.Downloads.RELATIVE_PATH + " LIKE ?", arrayOf(name.removeSuffix(".csv") + ".rules.json", rel)) } catch (_: Exception) {}
                           }
                       }
                   } catch (_: Exception) {}
@@ -859,48 +952,48 @@ jobs:
           cat > app/src/main/java/com/example/fintrack/BackupScheduler.kt <<'EOF_BS'
           package com.example.fintrack
           import android.content.Context
-          import androidx.work.Constraints
           import androidx.work.ExistingPeriodicWorkPolicy
+          import androidx.work.ExistingWorkPolicy
+          import androidx.work.OneTimeWorkRequestBuilder
           import androidx.work.PeriodicWorkRequestBuilder
           import androidx.work.WorkManager
           import java.io.File
           import java.text.SimpleDateFormat
-          import java.util.Calendar
           import java.util.Locale
           import java.util.concurrent.TimeUnit
           object BackupScheduler {
               private const val WORK_NAME = "imrans_auto_backup"
               private const val WORK_NAME2 = "imrans_auto_backup_2"
+              private const val WORK_CATCHUP = "imrans_auto_backup_catchup"
+              private fun prefs(ctx: Context) = ctx.getSharedPreferences("fin", Context.MODE_PRIVATE)
+              private fun intervalHours(mode: String): Long = if (mode == "twice") 12L else 24L
               fun schedule(ctx: Context, mode: String) {
-                  cancel(ctx)
-                  if (mode == "off") return
-                  val prefs = ctx.getSharedPreferences("fin", Context.MODE_PRIVATE)
-                  prefs.edit().putString("auto_backup_mode", mode).apply()
+                  try { prefs(ctx).edit().putString("auto_backup_mode", mode).apply() } catch (_: Exception) {}
+                  enqueue(ctx, mode, ExistingPeriodicWorkPolicy.UPDATE)
+              }
+              fun reschedule(ctx: Context) { enqueue(ctx, currentMode(ctx), ExistingPeriodicWorkPolicy.KEEP) }
+              private fun enqueue(ctx: Context, mode: String, policy: ExistingPeriodicWorkPolicy) {
                   try {
-                      val wm = WorkManager.getInstance(ctx)
-                      val constraints = Constraints.Builder().setRequiresBatteryNotLow(true).build()
-                      val r1 = PeriodicWorkRequestBuilder<BackupWorker>(24, TimeUnit.HOURS).setInitialDelay(initialDelayHours(2), TimeUnit.HOURS).setConstraints(constraints).build()
-                      wm.enqueueUniquePeriodicWork(WORK_NAME, ExistingPeriodicWorkPolicy.UPDATE, r1)
-                      if (mode == "twice") {
-                          val r2 = PeriodicWorkRequestBuilder<BackupWorker>(24, TimeUnit.HOURS).setInitialDelay(initialDelayHours(14), TimeUnit.HOURS).setConstraints(constraints).build()
-                          wm.enqueueUniquePeriodicWork(WORK_NAME2, ExistingPeriodicWorkPolicy.UPDATE, r2)
+                      val wm = WorkManager.getInstance(ctx.applicationContext)
+                      wm.cancelUniqueWork(WORK_NAME2)
+                      if (mode == "off") { wm.cancelUniqueWork(WORK_NAME); wm.cancelUniqueWork(WORK_CATCHUP); return }
+                      val h = intervalHours(mode)
+                      val req = PeriodicWorkRequestBuilder<BackupWorker>(h, TimeUnit.HOURS, 2, TimeUnit.HOURS).build()
+                      wm.enqueueUniquePeriodicWork(WORK_NAME, policy, req)
+                      val last = BackupStore.lastTime(ctx)
+                      if (System.currentTimeMillis() - last > (h + 1) * 3_600_000L) {
+                          wm.enqueueUniqueWork(WORK_CATCHUP, ExistingWorkPolicy.KEEP, OneTimeWorkRequestBuilder<BackupWorker>().build())
                       }
                   } catch (_: Exception) {}
               }
-              private fun initialDelayHours(hour: Int): Long {
-                  val now = Calendar.getInstance()
-                  val target = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, hour); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0); if (timeInMillis <= now.timeInMillis) add(Calendar.DAY_OF_MONTH, 1) }
-                  return (target.timeInMillis - now.timeInMillis) / 3_600_000L
-              }
-              fun cancel(ctx: Context) { try { val wm = WorkManager.getInstance(ctx); wm.cancelUniqueWork(WORK_NAME); wm.cancelUniqueWork(WORK_NAME2) } catch (_: Exception) {} }
-              fun reschedule(ctx: Context) { try { val prefs = ctx.getSharedPreferences("fin", Context.MODE_PRIVATE); val mode = prefs.getString("auto_backup_mode", "off") ?: "off"; if (mode != "off") schedule(ctx, mode) } catch (_: Exception) {} }
-              fun currentMode(ctx: Context): String = try { ctx.getSharedPreferences("fin", Context.MODE_PRIVATE).getString("auto_backup_mode", "off") ?: "off" } catch (_: Exception) { "off" }
+              fun cancel(ctx: Context) { try { val wm = WorkManager.getInstance(ctx.applicationContext); wm.cancelUniqueWork(WORK_NAME); wm.cancelUniqueWork(WORK_NAME2); wm.cancelUniqueWork(WORK_CATCHUP) } catch (_: Exception) {} }
+              fun currentMode(ctx: Context): String = try { prefs(ctx).getString("auto_backup_mode", "off") ?: "off" } catch (_: Exception) { "off" }
               fun listBackups(ctx: Context): List<Pair<File, Long>> {
                   return try {
-                      val dir = File(ctx.getExternalFilesDir(null), "backups"); if (!dir.exists()) return emptyList()
+                      val dir = BackupStore.dir(ctx)
                       (dir.listFiles { _, n -> n.startsWith("imrans_finances_") && n.endsWith(".csv") } ?: emptyArray()).mapNotNull { f ->
                           val name = f.name.removePrefix("imrans_finances_").removeSuffix(".csv")
-                          try { val t = SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).parse(name)?.time ?: f.lastModified(); f to t } catch (_: Exception) { f to f.lastModified() }
+                          try { val t = SimpleDateFormat(if (name.length > 13) "yyyyMMdd_HHmmss" else "yyyyMMdd_HHmm", Locale.US).parse(name)?.time ?: f.lastModified(); f to t } catch (_: Exception) { f to f.lastModified() }
                       }.sortedByDescending { it.second }
                   } catch (_: Exception) { emptyList() }
               }
@@ -937,7 +1030,7 @@ jobs:
               fun removeFromTolls(ctx: Context, txnIds: List<Long>): Int { var n = 0; try { val db = Db.get(ctx); for (id in txnIds) { val before = db.num("SELECT COUNT(*) FROM toll_trips WHERE txn_id=?", id.toString()).toInt(); db.exec("DELETE FROM toll_trips WHERE txn_id=?", id); if (before > 0) n++ }; ctx.getSharedPreferences("fin", Context.MODE_PRIVATE).edit().putBoolean("map_cached", false).apply() } catch (_: Exception) {}; return n }
               private val dayFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
               private fun plazaCoord(name: String): DoubleArray? { TOLL_SEED[name]?.let { return it }; for ((k, v) in TOLL_SEED) if (k.equals(name, ignoreCase = true)) return v; return null }
-              fun fetchRoadRoute(wps: List<DoubleArray>): List<DoubleArray> { if (wps.size < 2) return wps.map { doubleArrayOf(it[1], it[0]) }; return try { val coords = wps.joinToString(";") { "${it[0]},${it[1]}" }; val url = URL("https://router.project-osrm.org/route/v1/driving/$coords?overview=full&geometries=polyline"); val conn = url.openConnection() as HttpURLConnection; conn.requestMethod = "GET"; conn.connectTimeout = 8000; conn.readTimeout = 8000; conn.setRequestProperty("User-Agent", "ImransFinances/12.5.0"); if (conn.responseCode != 200) throw RuntimeException("OSRM ${conn.responseCode}"); val txt = conn.inputStream.bufferedReader().use { it.readText() }; val json = org.json.JSONObject(txt); if (json.optString("code") != "Ok") throw RuntimeException("not Ok"); val routes = json.optJSONArray("routes") ?: throw RuntimeException("no routes"); if (routes.length() == 0) throw RuntimeException("no routes"); val geom = routes.getJSONObject(0).optString("geometry", ""); if (geom.isBlank()) throw RuntimeException("no geom"); decodePolyline(geom) } catch (_: Exception) { wps.map { doubleArrayOf(it[1], it[0]) } } }
+              fun fetchRoadRoute(wps: List<DoubleArray>): List<DoubleArray> { if (wps.size < 2) return wps.map { doubleArrayOf(it[1], it[0]) }; return try { val coords = wps.joinToString(";") { "${it[0]},${it[1]}" }; val url = URL("https://router.project-osrm.org/route/v1/driving/$coords?overview=full&geometries=polyline"); val conn = url.openConnection() as HttpURLConnection; conn.requestMethod = "GET"; conn.connectTimeout = 8000; conn.readTimeout = 8000; conn.setRequestProperty("User-Agent", "ImransFinances/12.6.0"); if (conn.responseCode != 200) throw RuntimeException("OSRM ${conn.responseCode}"); val txt = conn.inputStream.bufferedReader().use { it.readText() }; val json = org.json.JSONObject(txt); if (json.optString("code") != "Ok") throw RuntimeException("not Ok"); val routes = json.optJSONArray("routes") ?: throw RuntimeException("no routes"); if (routes.length() == 0) throw RuntimeException("no routes"); val geom = routes.getJSONObject(0).optString("geometry", ""); if (geom.isBlank()) throw RuntimeException("no geom"); decodePolyline(geom) } catch (_: Exception) { wps.map { doubleArrayOf(it[1], it[0]) } } }
               fun decodePolyline(encoded: String): List<DoubleArray> { val points = ArrayList<DoubleArray>(); var index = 0; val len = encoded.length; var lat = 0; var lng = 0; while (index < len) { var b: Int; var shift = 0; var result = 0; do { b = encoded[index++].code - 63; result = result or ((b and 0x1f) shl shift); shift += 5 } while (b >= 0x20); val dlat = if (result and 1 != 0) (result shr 1).inv() else (result shr 1); lat += dlat; shift = 0; result = 0; do { b = encoded[index++].code - 63; result = result or ((b and 0x1f) shl shift); shift += 5 } while (b >= 0x20); val dlng = if (result and 1 != 0) (result shr 1).inv() else (result shr 1); lng += dlng; points.add(doubleArrayOf(lat * 1e-5, lng * 1e-5)) }; return points }
               fun buildTrips(ctx: Context): Pair<List<TollTrip>, Double> { try { val prefs = ctx.getSharedPreferences("fin", Context.MODE_PRIVATE); val cached = prefs.getBoolean("map_cached", false); val rows = Db.get(ctx).rows("SELECT txn_id, plaza, lat, lon, ts, amount FROM toll_trips ORDER BY ts ASC"); val events = rows.mapNotNull { r -> val name = r["plaza"] ?: return@mapNotNull null; val ts = r["ts"]?.toLongOrNull() ?: return@mapNotNull null; val amt = r["amount"]?.toDoubleOrNull() ?: return@mapNotNull null; val seed = plazaCoord(name); val lat = seed?.get(1) ?: r["lat"]?.toDoubleOrNull() ?: 0.0; val lon = seed?.get(0) ?: r["lon"]?.toDoubleOrNull() ?: 0.0; if (lat == 0.0 || lon == 0.0) return@mapNotNull null; TollCheckpoint(name, ts, amt, lat, lon, r["txn_id"]?.toLongOrNull() ?: 0) }.sortedBy { it.ts }; if (events.isEmpty()) return emptyList<TollTrip>() to 0.0; val legs = ArrayList<MutableList<TollCheckpoint>>(); var cur = ArrayList<TollCheckpoint>(); for (ev in events) { if (cur.isEmpty()) { cur.add(ev); continue }; val prev = cur.last(); val gapMs = ev.ts - prev.ts; val samePlaza = ev.plaza.equals(prev.plaza, ignoreCase = true); val sameDay = dayFmt.format(Date(ev.ts)) == dayFmt.format(Date(prev.ts)); if (samePlaza || gapMs > 6L * 60 * 60 * 1000 || !sameDay) { legs.add(cur); cur = ArrayList() }; cur.add(ev) }; if (cur.isNotEmpty()) legs.add(cur); val cache = ConcurrentHashMap<String, List<DoubleArray>>(); val trips = ArrayList<TollTrip>(); var total = 0.0; for ((i, leg) in legs.withIndex()) { val direction = if (i % 2 == 0) "Going" else "Returning"; val wps = leg.map { doubleArrayOf(it.lon, it.lat) }; val key = wps.joinToString("|") { "${it[0]},${it[1]}" }; val route = if (cached) wps.map { doubleArrayOf(it[1], it[0]) } else cache.getOrPut(key) { fetchRoadRoute(wps) }; val legTotal = leg.sumOf { it.amount }; total += legTotal; val title = leg.joinToString(" → ") { it.plaza }; trips.add(TollTrip(i + 1, direction, dayFmt.format(Date(leg.first().ts)), title, legTotal, leg.toList(), route)) }; if (!cached) prefs.edit().putBoolean("map_cached", true).apply(); return trips to total } catch (_: Exception) { return emptyList<TollTrip>() to 0.0 } }
               fun tripsByDate(ctx: Context): Map<String, List<TollCheckpoint>> { val out = LinkedHashMap<String, MutableList<TollCheckpoint>>(); try { val rows = Db.get(ctx).rows("SELECT txn_id, plaza, lat, lon, ts, amount FROM toll_trips ORDER BY ts DESC"); for (r in rows) { val name = r["plaza"] ?: continue; val ts = r["ts"]?.toLongOrNull() ?: continue; val amt = r["amount"]?.toDoubleOrNull() ?: continue; val seed = plazaCoord(name); val lat = seed?.get(1) ?: r["lat"]?.toDoubleOrNull() ?: 0.0; val lon = seed?.get(0) ?: r["lon"]?.toDoubleOrNull() ?: 0.0; val day = dayFmt.format(Date(ts)); out.getOrPut(day) { ArrayList() }.add(TollCheckpoint(name, ts, amt, lat, lon, r["txn_id"]?.toLongOrNull() ?: 0)) } } catch (_: Exception) {}; return out }
@@ -1601,8 +1694,10 @@ jobs:
                           opt.addView(act.tv(lbl, 14f, if (on) C.ACCENT else C.TEXT, on), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                           autoCard.put(opt, 2)
                       }
-                      autoCard.addView(act.subtitle("Keeps the 7 newest backups. Runs in background, survives reboots."))
+                      autoCard.addView(act.subtitle("Keeps the 7 newest backups in the app folder and in Downloads/ImransFinances."))
+                      autoCard.addView(act.subtitle(BackupStore.statusText(act)))
                       body.put(autoCard, 8)
+                      body.put(labelledCard("Allow background backups", "Turn off battery optimisation so auto backup is not skipped") { act.openBatterySettings() }, 8)
                       body.put(labelledCard(Str.s("clean_restore"), Str.s("sub_clean")) { act.cleanAndRestore() }, 8)
                       body.put(labelledCard(Str.s("upload_csv"), Str.s("sub_csv")) { act.pickCsvStatement() }, 8)
                       body.put(labelledCard(Str.s("upload_toll"), Str.s("sub_toll")) { act.pickTollJson() }, 8)
@@ -2017,7 +2112,7 @@ jobs:
                       val night = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
                       C.applyTheme(night, prefs.getString("color_palette", "purple") ?: "purple")
                       window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
-                      try { org.osmdroid.config.Configuration.getInstance().apply { userAgentValue = "ImransFinances/12.5.0"; tileFileSystemCacheMaxBytes = 600L*1024*1024; tileFileSystemCacheTrimBytes = 500L*1024*1024; load(this@MainActivity, getSharedPreferences("osmdroid", MODE_PRIVATE)) } } catch (_: Exception) {}
+                      try { org.osmdroid.config.Configuration.getInstance().apply { userAgentValue = "ImransFinances/12.6.0"; tileFileSystemCacheMaxBytes = 600L*1024*1024; tileFileSystemCacheTrimBytes = 500L*1024*1024; load(this@MainActivity, getSharedPreferences("osmdroid", MODE_PRIVATE)) } } catch (_: Exception) {}
                       try { ForegroundHelper.start(this) } catch (_: Exception) {}
                       try { BackupScheduler.reschedule(this) } catch (_: Exception) {}
                       home = HomeScreen(this); ledger = LedgerScreen(this)
@@ -2073,18 +2168,20 @@ jobs:
               fun backup() {
                   Thread {
                       try {
-                          val csv = Backup.export(this)
-                          val ts = SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date())
-                          val csvName = "imrans_finances_$ts.csv"
-                          val jsonName = "imrans_finances_$ts.rules.json"
-                          var savedPath = ""
-                          try { val values = ContentValues().apply { put(MediaStore.Downloads.DISPLAY_NAME, csvName); put(MediaStore.Downloads.MIME_TYPE, "text/csv"); put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/ImransFinances") }; val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values); if (uri != null) { contentResolver.openOutputStream(uri)?.use { it.write(csv.toByteArray()) }; savedPath = "Downloads/ImransFinances/$csvName" } } catch (_: Exception) {}
-                          try { val rulesJson = Backup.exportRulesJson(this); val values = ContentValues().apply { put(MediaStore.Downloads.DISPLAY_NAME, jsonName); put(MediaStore.Downloads.MIME_TYPE, "application/json"); put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/ImransFinances") }; val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values); if (uri != null) { contentResolver.openOutputStream(uri)?.use { it.write(rulesJson.toByteArray()) } } } catch (_: Exception) {}
-                          try { val dir = File(getExternalFilesDir(null), "backups"); dir.mkdirs(); File(dir, csvName).writeText(csv); File(dir, jsonName).writeText(Backup.exportRulesJson(this)); if (savedPath.isEmpty()) savedPath = dir.absolutePath + "/" + csvName; try { val csvs = dir.listFiles { _, n -> n.startsWith("imrans_finances_") && n.endsWith(".csv") }?.sortedBy { it.name } ?: emptyList(); if (csvs.size > 7) for (f in csvs.take(csvs.size - 7)) { val base = f.name.removeSuffix(".csv"); try { f.delete() } catch (_: Exception) {}; try { File(dir, "$base.rules.json").delete() } catch (_: Exception) {} } } catch (_: Exception) {} } catch (_: Exception) {}
-                          if (savedPath.isEmpty()) throw RuntimeException("All write paths failed — check storage permission")
-                          runOnUiThread { toast(Str.s("backup_saved_to") + " " + savedPath) }
-                      } catch (ex: Exception) { runOnUiThread { toast(Str.s("backup_failed") + " " + (ex.message ?: "unknown")) } }
+                          val where = BackupStore.run(applicationContext)
+                          runOnUiThread { toast(Str.s("backup_saved_to") + " " + where); refreshAll() }
+                      } catch (ex: Exception) {
+                          BackupStore.recordFailure(applicationContext, ex)
+                          runOnUiThread { toast(Str.s("backup_failed") + " " + (ex.message ?: "unknown")) }
+                      }
                   }.start()
+              }
+              fun openBatterySettings() {
+                  try {
+                      val pm = getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager
+                      if (pm.isIgnoringBatteryOptimizations(packageName)) { toast("Battery optimisation is already off for this app"); return }
+                      startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply { data = Uri.parse("package:$packageName") })
+                  } catch (_: Exception) { try { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) } catch (_: Exception) {} }
               }
               fun showRestorePicker() {
                   try {
