@@ -134,7 +134,7 @@ jobs:
           plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
           android {
               namespace = "com.example.fintrack"; compileSdk = 34
-              defaultConfig { applicationId = "com.example.fintrack"; minSdk = 30; targetSdk = 33; versionCode = 52; versionName = "12.8.0" }
+              defaultConfig { applicationId = "com.example.fintrack"; minSdk = 30; targetSdk = 33; versionCode = 53; versionName = "12.9.0" }
               compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
               kotlinOptions { jvmTarget = "17" }
               androidResources { noCompress += "png" }
@@ -580,7 +580,7 @@ jobs:
           import android.database.sqlite.SQLiteDatabase
           import android.database.sqlite.SQLiteOpenHelper
           data class Txn(var id: Long = 0, var smsKey: String? = null, var ts: Long, var amount: Double, var debit: Boolean, var merchant: String, var category: String, var institution: String = "", var account: String? = null, var balance: Double? = null, var channel: String = "OTHER", var ref: String? = null, var vpa: String? = null, var sender: String = "", var body: String = "", var source: String = "SMS", var status: String = "REGEX", var tpl: String = "", var review: Boolean = false, var reviewHash: String? = null, var loanNo: String? = null, var note: String? = null, var voicePath: String? = null, var msgNo: Long = 0)
-          class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "fintrack.db", null, 16) {
+          class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "fintrack.db", null, 17) {
               companion object { @Volatile private var inst: Db? = null; fun get(ctx: Context): Db = inst ?: synchronized(this) { inst ?: Db(ctx.applicationContext).also { inst = it } } }
               override fun onCreate(db: SQLiteDatabase) { createSchema(db); seedTollPlazas(db) }
               private fun createSchema(db: SQLiteDatabase) {
@@ -604,6 +604,7 @@ jobs:
                   db.execSQL("CREATE TABLE IF NOT EXISTS payee_merge_rules (survivor_key TEXT PRIMARY KEY, merged_keys TEXT, survivor_name TEXT)")
                   db.execSQL("CREATE TABLE IF NOT EXISTS pending_review (id INTEGER PRIMARY KEY AUTOINCREMENT, txn_id INTEGER, kind TEXT, raw TEXT, proposed_merchant TEXT, proposed_category TEXT, confidence INTEGER, status TEXT DEFAULT 'pending', created_at INTEGER, UNIQUE(txn_id, kind, raw))")
                   db.execSQL("CREATE TABLE IF NOT EXISTS ml_rejected (kind TEXT, raw TEXT, rejected_at INTEGER, PRIMARY KEY (kind, raw))")
+                  for (ix in listOf("CREATE INDEX IF NOT EXISTS idx_txn_merchant ON txn(merchant_key)", "CREATE INDEX IF NOT EXISTS idx_txn_vpa ON txn(vpa)", "CREATE INDEX IF NOT EXISTS idx_txn_category ON txn(category)", "CREATE INDEX IF NOT EXISTS idx_txn_debit_ts ON txn(debit, ts)", "CREATE INDEX IF NOT EXISTS idx_txn_inst ON txn(institution)", "CREATE INDEX IF NOT EXISTS idx_tags_tag ON txn_tags(tag)")) { try { db.execSQL(ix) } catch (_: Exception) {} }
               }
               private fun seedTollPlazas(db: SQLiteDatabase) { try { var sid = 1000; for ((name, lonLat) in Tolls.TOLL_SEED) db.execSQL("INSERT OR IGNORE INTO toll_plazas(plaza_id, name, state, nh, lat, lon, car_fare) VALUES(?,?,?,?,?,?,?)", arrayOf(sid++, name, "", "", lonLat[1], lonLat[0], 0.0)) } catch (_: Exception) {} }
               override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) { try { createSchema(db) } catch (_: Exception) {}; try { seedTollPlazas(db) } catch (_: Exception) {} }
@@ -621,7 +622,7 @@ jobs:
           object Repo {
               fun save(ctx: Context, t: Txn): Long { val db = Db.get(ctx); val id = db.insertTxn(t); if (id > 0) { t.id = id; afterSave(ctx, t) }; return id }
               fun ensurePayee(ctx: Context, t: Txn) { val db = Db.get(ctx); val key = Learner.norm(t.merchant); val skip = setOf("cash", "fastag", "salary income", "received", ""); if (key.isBlank() || key in skip || t.merchant == "Unknown") return; db.exec("INSERT OR IGNORE INTO payees(merchant_key, display) VALUES(?,?)", key, t.merchant); val vpa = t.vpa; if (!vpa.isNullOrBlank()) db.exec("UPDATE payees SET upi_id=? WHERE merchant_key=? AND (upi_id IS NULL OR upi_id='')", vpa, key) }
-              fun afterSave(ctx: Context, t: Txn) { try { ensurePayee(ctx, t) } catch (_: Exception) {}; try { if (t.category == "Travel" || t.channel == "FASTAG") Tolls.record(ctx, t) } catch (_: Exception) {}; try { Subs.detect(ctx, t) } catch (_: Exception) {}; try { BudgetAlert.check(ctx, t) } catch (_: Exception) {}; try { val d = VpaExtractor.detect(ctx, t); if (d != null) { val rejected = Db.get(ctx).one("SELECT 1 FROM ml_rejected WHERE kind=? AND raw=?", d.kind, d.raw); if (rejected == null) Db.get(ctx).exec("INSERT OR IGNORE INTO pending_review(txn_id, kind, raw, proposed_merchant, proposed_category, confidence, status, created_at) VALUES(?,?,?,?,?,?,?,?)", d.txnId, d.kind, d.raw, d.proposedMerchant, d.proposedCategory, d.confidence, "pending", System.currentTimeMillis()) } } catch (_: Exception) {}; try { val b = BillDetector.detect(t); if (b != null) { val rejected = Db.get(ctx).one("SELECT 1 FROM ml_rejected WHERE kind=? AND raw=?", b.kind, b.raw); if (rejected == null) Db.get(ctx).exec("INSERT OR IGNORE INTO pending_review(txn_id, kind, raw, proposed_merchant, proposed_category, confidence, status, created_at) VALUES(?,?,?,?,?,?,?,?)", b.txnId, b.kind, b.raw, b.proposedMerchant, b.proposedCategory, b.confidence, "pending", System.currentTimeMillis()) } } catch (_: Exception) {} }
+              fun afterSave(ctx: Context, t: Txn) { try { ensurePayee(ctx, t) } catch (e: Exception) { AppLog.e(ctx, "afterSave", e) }; try { if (t.category == "Travel" || t.channel == "FASTAG") Tolls.record(ctx, t) } catch (e: Exception) { AppLog.e(ctx, "afterSave", e) }; try { Subs.detect(ctx, t) } catch (e: Exception) { AppLog.e(ctx, "afterSave", e) }; try { BudgetAlert.check(ctx, t) } catch (e: Exception) { AppLog.e(ctx, "afterSave", e) }; try { val d = VpaExtractor.detect(ctx, t); if (d != null) { val rejected = Db.get(ctx).one("SELECT 1 FROM ml_rejected WHERE kind=? AND raw=?", d.kind, d.raw); if (rejected == null) Db.get(ctx).exec("INSERT OR IGNORE INTO pending_review(txn_id, kind, raw, proposed_merchant, proposed_category, confidence, status, created_at) VALUES(?,?,?,?,?,?,?,?)", d.txnId, d.kind, d.raw, d.proposedMerchant, d.proposedCategory, d.confidence, "pending", System.currentTimeMillis()) } } catch (e: Exception) { AppLog.e(ctx, "afterSave", e) }; try { val b = BillDetector.detect(t); if (b != null) { val rejected = Db.get(ctx).one("SELECT 1 FROM ml_rejected WHERE kind=? AND raw=?", b.kind, b.raw); if (rejected == null) Db.get(ctx).exec("INSERT OR IGNORE INTO pending_review(txn_id, kind, raw, proposed_merchant, proposed_category, confidence, status, created_at) VALUES(?,?,?,?,?,?,?,?)", b.txnId, b.kind, b.raw, b.proposedMerchant, b.proposedCategory, b.confidence, "pending", System.currentTimeMillis()) } } catch (e: Exception) { AppLog.e(ctx, "afterSave", e) } }
           }
           object NetWorth {
               data class Result(val assets: Double, val liabilities: Double, val banks: List<Triple<String, String, Double>>, val wallets: List<Triple<String, String, Double>>, val loans: List<Triple<String, String, Double>>, val fastags: List<Triple<String, String, Double>>)
@@ -764,6 +765,7 @@ jobs:
               private fun detectWallet(body: String): String? { val a = walletAfterRe.find(body)?.groupValues?.get(1); if (a != null && a.lowercase() in knownWallets) return pretty(a) + " Wallet"; val b = walletBeforeRe.find(body)?.groupValues?.get(1); if (b != null && b.lowercase() in knownWallets) return pretty(b) + " Wallet"; return null }
               private fun channelOf(b: String, wallet: String?): String { if (atmRe.containsMatchIn(b)) return "ATM"; if (wallet != null) return "WALLET"; val l = b.lowercase(); return when { "fastag" in l || "netc" in l || "ihmcl" in l -> "FASTAG"; "policy" in l || "insurance" in l || "premium" in l -> "POLICY"; "upi" in l || "vpa" in l -> "UPI"; "imps" in l -> "IMPS"; "neft" in l -> "NEFT"; "rtgs" in l -> "RTGS"; "card" in l -> "CARD"; "wallet" in l -> "WALLET"; else -> "OTHER" } }
               fun extract(body: String): Fields { val f = Fields(); val d = debitRe.find(body); val c = creditRe.find(body); if (d != null || c != null) { f.debit = if (d != null && c != null) { val am = amountRe.find(body)?.range?.first ?: 0; val dd = Math.abs(d.range.first - am); val cd = Math.abs(c.range.first - am); if (dd != cd) dd < cd else d.range.first < c.range.first } else d != null } else { if (drRe.containsMatchIn(body)) f.debit = true else if (crRe.containsMatchIn(body)) f.debit = false }; f.amount = findAmount(body); f.balance = balanceRe.find(body)?.groupValues?.get(1)?.replace(",", "")?.toDoubleOrNull(); f.account = acctRe.find(body)?.groupValues?.get(1); f.ref = refRe.find(body)?.groupValues?.get(1); f.vpa = cleanVpa(vpaRe.find(body)?.groupValues?.get(1)); f.walletName = detectWallet(body); f.channel = channelOf(body, f.walletName); f.merchant = findMerchant(body, f.debit != false) ?: vpaName(f.vpa); f.loanNo = loanNoRe.find(body)?.groupValues?.get(1)?.uppercase() ?: policyNoRe.find(body)?.groupValues?.get(1)?.uppercase(); return f }
+              @Volatile var dryRun = false
               fun legacyKey(sender: String, body: String): String = sender + "|" + body.hashCode()
               fun key(sender: String, ts: Long, body: String): String { return try { val h = java.security.MessageDigest.getInstance("SHA-1").digest((sender + "|" + ts + "|" + body).toByteArray()); "v2|" + h.take(10).joinToString("") { String.format("%02x", it) } } catch (_: Exception) { legacyKey(sender, body) + "|" + ts } }
               fun build(ctx: Context, db: Db, sender: String, rawBody: String, ts: Long): Txn? {
@@ -771,7 +773,7 @@ jobs:
                       if (sender.none { it.isLetter() }) { val dg = sender.count { it.isDigit() }; if (sender.startsWith("+") || dg !in 4..7) return null }
                       val body = rawBody.replace("\n", " ").replace(Regex("""\s+"""), " ").trim()
                       if (hardNoiseRe.containsMatchIn(body)) return null
-                      if (futureRe.containsMatchIn(body)) DueBills.capture(ctx, db, sender, body)
+                      if (futureRe.containsMatchIn(body) && !dryRun) DueBills.capture(ctx, db, sender, body)
                       if (futureRe.containsMatchIn(body) || mandateRe.containsMatchIn(body)) return null
                       val hasVerb = debitRe.containsMatchIn(body) || creditRe.containsMatchIn(body)
                       if (promoRe.containsMatchIn(body) && !(hasVerb && strongAcctRe.containsMatchIn(body))) return null
@@ -801,7 +803,7 @@ jobs:
           }
           data class ScanReport(val scanned: Int, val imported: Int, val duplicates: Int, val ignored: Int, val maxTs: Long)
           object SmsImport {
-              fun run(ctx: Context): ScanReport { try { val db = Db.get(ctx); val prefs = ctx.getSharedPreferences("fin", Context.MODE_PRIVATE); val last = prefs.getLong("last_sms_date", 0L); var maxDate = last; var scanned = 0; var imported = 0; var duplicates = 0; var ignored = 0; val cur = ctx.contentResolver.query(Uri.parse("content://sms/inbox"), arrayOf("address", "body", "date"), "date > ?", arrayOf(last.toString()), "date ASC") ?: return ScanReport(0,0,0,0,maxDate); cur.use { c -> val iA = c.getColumnIndex("address"); val iB = c.getColumnIndex("body"); val iD = c.getColumnIndex("date"); while (c.moveToNext()) { scanned++; val date = c.getLong(iD); if (date > maxDate) maxDate = date; val body = c.getString(iB) ?: ""; val sender = c.getString(iA) ?: ""; val t = SmsEngine.build(ctx, db, sender, body, date); if (t == null) { ignored++; continue }; val existing = db.one("SELECT id FROM txn WHERE sms_key=? OR sms_key=?", t.smsKey ?: "", SmsEngine.legacyKey(t.sender, t.body)); if (existing != null) { duplicates++; continue }; if (Repo.save(ctx, t) > 0) imported++ else duplicates++ } }; prefs.edit().putLong("last_sms_date", maxDate).apply(); return ScanReport(scanned, imported, duplicates, ignored, maxDate) } catch (_: Exception) { return ScanReport(0,0,0,0,0L) } }
+              fun run(ctx: Context): ScanReport { try { val db = Db.get(ctx); val prefs = ctx.getSharedPreferences("fin", Context.MODE_PRIVATE); val last = prefs.getLong("last_sms_date", 0L); var maxDate = last; var scanned = 0; var imported = 0; var duplicates = 0; var ignored = 0; val cur = ctx.contentResolver.query(Uri.parse("content://sms/inbox"), arrayOf("address", "body", "date"), "date > ?", arrayOf(last.toString()), "date ASC") ?: return ScanReport(0,0,0,0,maxDate); cur.use { c -> val iA = c.getColumnIndex("address"); val iB = c.getColumnIndex("body"); val iD = c.getColumnIndex("date"); while (c.moveToNext()) { scanned++; val date = c.getLong(iD); if (date > maxDate) maxDate = date; val body = c.getString(iB) ?: ""; val sender = c.getString(iA) ?: ""; val t = SmsEngine.build(ctx, db, sender, body, date); if (t == null) { ignored++; continue }; val existing = db.one("SELECT id FROM txn WHERE sms_key=? OR sms_key=?", t.smsKey ?: "", SmsEngine.legacyKey(t.sender, t.body)); if (existing != null) { duplicates++; continue }; if (Repo.save(ctx, t) > 0) imported++ else duplicates++ } }; prefs.edit().putLong("last_sms_date", maxDate).apply(); return ScanReport(scanned, imported, duplicates, ignored, maxDate) } catch (e: Exception) { AppLog.e(ctx, "SmsImport", e); return ScanReport(0,0,0,0,0L) } }
           }
           EOF_12
 
@@ -837,7 +839,7 @@ jobs:
           import android.content.Intent
           import android.provider.Telephony
           class SmsReceiver : BroadcastReceiver() {
-              override fun onReceive(context: Context, intent: Intent) { try { if (intent.action != Telephony.Sms.Intents.SMS_RECEIVED_ACTION) return; val msgs = Telephony.Sms.Intents.getMessagesFromIntent(intent) ?: return; if (msgs.isEmpty()) return; val sender = msgs[0].originatingAddress ?: return; val body = msgs.joinToString("") { it.messageBody ?: "" }; val ts = msgs[0].timestampMillis; val app = context.applicationContext; val pending = goAsync(); Thread { try { val t = SmsEngine.build(app, Db.get(app), sender, body, ts); if (t != null) Repo.save(app, t) } catch (e: Exception) {} finally { pending.finish() } }.start() } catch (_: Exception) {} }
+              override fun onReceive(context: Context, intent: Intent) { try { if (intent.action != Telephony.Sms.Intents.SMS_RECEIVED_ACTION) return; val msgs = Telephony.Sms.Intents.getMessagesFromIntent(intent) ?: return; if (msgs.isEmpty()) return; val sender = msgs[0].originatingAddress ?: return; val body = msgs.joinToString("") { it.messageBody ?: "" }; val ts = msgs[0].timestampMillis; val app = context.applicationContext; val pending = goAsync(); Thread { try { val t = SmsEngine.build(app, Db.get(app), sender, body, ts); if (t != null) Repo.save(app, t) } catch (e: Exception) {} finally { pending.finish() } }.start() } catch (e: Exception) { AppLog.e(context, "SmsReceiver", e) } }
           }
           EOF_14
 
@@ -900,6 +902,7 @@ jobs:
                   return where
               }
               fun recordFailure(ctx: Context, e: Exception) {
+                  AppLog.e(ctx, "Backup", e)
                   try { prefs(ctx).edit().putString("last_backup_status", "failed").putString("last_backup_error", e.message ?: e.javaClass.simpleName).apply() } catch (_: Exception) {}
               }
               fun lastTime(ctx: Context): Long = try { prefs(ctx).getLong("last_backup_time", 0L) } catch (_: Exception) { 0L }
@@ -1066,6 +1069,46 @@ jobs:
           }
           EOF_DB
 
+          cat > app/src/main/java/com/example/fintrack/AppLog.kt <<'EOF_LOG'
+          package com.example.fintrack
+          import android.content.Context
+          import java.io.File
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+          object AppLog {
+              private const val MAX = 120000L
+              @Volatile private var file: File? = null
+              private fun stamp(): String = SimpleDateFormat("dd MMM HH:mm:ss", Locale.US).format(Date())
+              private fun ensure(ctx: Context) { if (file == null) { try { file = File(ctx.applicationContext.filesDir, "app_log.txt") } catch (_: Exception) {} } }
+              fun install(ctx: Context) {
+                  try {
+                      ensure(ctx)
+                      val prev = Thread.getDefaultUncaughtExceptionHandler()
+                      Thread.setDefaultUncaughtExceptionHandler { t, e ->
+                          try { write("CRASH in " + t.name, e) } catch (_: Exception) {}
+                          prev?.uncaughtException(t, e)
+                      }
+                  } catch (_: Exception) {}
+              }
+              fun e(ctx: Context, tag: String, e: Throwable) { ensure(ctx); write(tag, e) }
+              fun i(ctx: Context, tag: String, msg: String) { ensure(ctx); append(stamp() + " [" + tag + "] " + msg + "\n") }
+              private fun write(tag: String, e: Throwable) {
+                  val top = e.stackTrace.take(4).joinToString(" <- ") { it.className.substringAfterLast('.') + "." + it.methodName + ":" + it.lineNumber }
+                  append(stamp() + " [" + tag + "] " + e.javaClass.simpleName + ": " + (e.message ?: "") + "  @ " + top + "\n")
+              }
+              @Synchronized private fun append(line: String) {
+                  try {
+                      val f = file ?: return
+                      if (f.exists() && f.length() > MAX) { val keep = f.readText().takeLast((MAX / 2).toInt()); f.writeText(keep) }
+                      f.appendText(line)
+                  } catch (_: Exception) {}
+              }
+              fun read(): String = try { file?.takeIf { it.exists() }?.readText() ?: "" } catch (_: Exception) { "" }
+              fun clear() { try { file?.writeText("") } catch (_: Exception) {} }
+          }
+          EOF_LOG
+
           cat > app/src/main/java/com/example/fintrack/Tolls.kt <<'EOF_15'
           package com.example.fintrack
           import android.content.Context
@@ -1096,7 +1139,7 @@ jobs:
               fun removeFromTolls(ctx: Context, txnIds: List<Long>): Int { var n = 0; try { val db = Db.get(ctx); for (id in txnIds) { val before = db.num("SELECT COUNT(*) FROM toll_trips WHERE txn_id=?", id.toString()).toInt(); db.exec("DELETE FROM toll_trips WHERE txn_id=?", id); if (before > 0) n++ }; ctx.getSharedPreferences("fin", Context.MODE_PRIVATE).edit().putBoolean("map_cached", false).apply() } catch (_: Exception) {}; return n }
               private val dayFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
               private fun plazaCoord(name: String): DoubleArray? { TOLL_SEED[name]?.let { return it }; for ((k, v) in TOLL_SEED) if (k.equals(name, ignoreCase = true)) return v; return null }
-              fun fetchRoadRoute(wps: List<DoubleArray>): List<DoubleArray> { if (wps.size < 2) return wps.map { doubleArrayOf(it[1], it[0]) }; return try { val coords = wps.joinToString(";") { "${it[0]},${it[1]}" }; val url = URL("https://router.project-osrm.org/route/v1/driving/$coords?overview=full&geometries=polyline"); val conn = url.openConnection() as HttpURLConnection; conn.requestMethod = "GET"; conn.connectTimeout = 8000; conn.readTimeout = 8000; conn.setRequestProperty("User-Agent", "ImransFinances/12.8.0"); if (conn.responseCode != 200) throw RuntimeException("OSRM ${conn.responseCode}"); val txt = conn.inputStream.bufferedReader().use { it.readText() }; val json = org.json.JSONObject(txt); if (json.optString("code") != "Ok") throw RuntimeException("not Ok"); val routes = json.optJSONArray("routes") ?: throw RuntimeException("no routes"); if (routes.length() == 0) throw RuntimeException("no routes"); val geom = routes.getJSONObject(0).optString("geometry", ""); if (geom.isBlank()) throw RuntimeException("no geom"); decodePolyline(geom) } catch (_: Exception) { wps.map { doubleArrayOf(it[1], it[0]) } } }
+              fun fetchRoadRoute(wps: List<DoubleArray>): List<DoubleArray> { if (wps.size < 2) return wps.map { doubleArrayOf(it[1], it[0]) }; return try { val coords = wps.joinToString(";") { "${it[0]},${it[1]}" }; val url = URL("https://router.project-osrm.org/route/v1/driving/$coords?overview=full&geometries=polyline"); val conn = url.openConnection() as HttpURLConnection; conn.requestMethod = "GET"; conn.connectTimeout = 8000; conn.readTimeout = 8000; conn.setRequestProperty("User-Agent", "ImransFinances/12.9.0"); if (conn.responseCode != 200) throw RuntimeException("OSRM ${conn.responseCode}"); val txt = conn.inputStream.bufferedReader().use { it.readText() }; val json = org.json.JSONObject(txt); if (json.optString("code") != "Ok") throw RuntimeException("not Ok"); val routes = json.optJSONArray("routes") ?: throw RuntimeException("no routes"); if (routes.length() == 0) throw RuntimeException("no routes"); val geom = routes.getJSONObject(0).optString("geometry", ""); if (geom.isBlank()) throw RuntimeException("no geom"); decodePolyline(geom) } catch (_: Exception) { wps.map { doubleArrayOf(it[1], it[0]) } } }
               fun decodePolyline(encoded: String): List<DoubleArray> { val points = ArrayList<DoubleArray>(); var index = 0; val len = encoded.length; var lat = 0; var lng = 0; while (index < len) { var b: Int; var shift = 0; var result = 0; do { b = encoded[index++].code - 63; result = result or ((b and 0x1f) shl shift); shift += 5 } while (b >= 0x20); val dlat = if (result and 1 != 0) (result shr 1).inv() else (result shr 1); lat += dlat; shift = 0; result = 0; do { b = encoded[index++].code - 63; result = result or ((b and 0x1f) shl shift); shift += 5 } while (b >= 0x20); val dlng = if (result and 1 != 0) (result shr 1).inv() else (result shr 1); lng += dlng; points.add(doubleArrayOf(lat * 1e-5, lng * 1e-5)) }; return points }
               fun buildTrips(ctx: Context): Pair<List<TollTrip>, Double> { try { val prefs = ctx.getSharedPreferences("fin", Context.MODE_PRIVATE); val cached = prefs.getBoolean("map_cached", false); val rows = Db.get(ctx).rows("SELECT txn_id, plaza, lat, lon, ts, amount FROM toll_trips ORDER BY ts ASC"); val events = rows.mapNotNull { r -> val name = r["plaza"] ?: return@mapNotNull null; val ts = r["ts"]?.toLongOrNull() ?: return@mapNotNull null; val amt = r["amount"]?.toDoubleOrNull() ?: return@mapNotNull null; val seed = plazaCoord(name); val lat = seed?.get(1) ?: r["lat"]?.toDoubleOrNull() ?: 0.0; val lon = seed?.get(0) ?: r["lon"]?.toDoubleOrNull() ?: 0.0; if (lat == 0.0 || lon == 0.0) return@mapNotNull null; TollCheckpoint(name, ts, amt, lat, lon, r["txn_id"]?.toLongOrNull() ?: 0) }.sortedBy { it.ts }; if (events.isEmpty()) return emptyList<TollTrip>() to 0.0; val legs = ArrayList<MutableList<TollCheckpoint>>(); var cur = ArrayList<TollCheckpoint>(); for (ev in events) { if (cur.isEmpty()) { cur.add(ev); continue }; val prev = cur.last(); val gapMs = ev.ts - prev.ts; val samePlaza = ev.plaza.equals(prev.plaza, ignoreCase = true); val sameDay = dayFmt.format(Date(ev.ts)) == dayFmt.format(Date(prev.ts)); if (samePlaza || gapMs > 6L * 60 * 60 * 1000 || !sameDay) { legs.add(cur); cur = ArrayList() }; cur.add(ev) }; if (cur.isNotEmpty()) legs.add(cur); val cache = ConcurrentHashMap<String, List<DoubleArray>>(); val trips = ArrayList<TollTrip>(); var total = 0.0; for ((i, leg) in legs.withIndex()) { val direction = if (i % 2 == 0) "Going" else "Returning"; val wps = leg.map { doubleArrayOf(it.lon, it.lat) }; val key = wps.joinToString("|") { "${it[0]},${it[1]}" }; val route = if (cached) wps.map { doubleArrayOf(it[1], it[0]) } else cache.getOrPut(key) { fetchRoadRoute(wps) }; val legTotal = leg.sumOf { it.amount }; total += legTotal; val title = leg.joinToString(" → ") { it.plaza }; trips.add(TollTrip(i + 1, direction, dayFmt.format(Date(leg.first().ts)), title, legTotal, leg.toList(), route)) }; if (!cached) prefs.edit().putBoolean("map_cached", true).apply(); return trips to total } catch (_: Exception) { return emptyList<TollTrip>() to 0.0 } }
               fun tripsByDate(ctx: Context): Map<String, List<TollCheckpoint>> { val out = LinkedHashMap<String, MutableList<TollCheckpoint>>(); try { val rows = Db.get(ctx).rows("SELECT txn_id, plaza, lat, lon, ts, amount FROM toll_trips ORDER BY ts DESC"); for (r in rows) { val name = r["plaza"] ?: continue; val ts = r["ts"]?.toLongOrNull() ?: continue; val amt = r["amount"]?.toDoubleOrNull() ?: continue; val seed = plazaCoord(name); val lat = seed?.get(1) ?: r["lat"]?.toDoubleOrNull() ?: 0.0; val lon = seed?.get(0) ?: r["lon"]?.toDoubleOrNull() ?: 0.0; val day = dayFmt.format(Date(ts)); out.getOrPut(day) { ArrayList() }.add(TollCheckpoint(name, ts, amt, lat, lon, r["txn_id"]?.toLongOrNull() ?: 0)) } } catch (_: Exception) {}; return out }
@@ -1769,6 +1812,8 @@ jobs:
                       body.put(labelledCard(Str.s("backup"), Str.s("sub_backup")) { act.backup() }, 10)
                       body.put(labelledCard(Str.s("restore"), Str.s("sub_restore")) { act.showRestorePicker() }, 8)
                       body.put(labelledCard("Encrypted backup & share", "Password-protected backup to send to Drive or WhatsApp. Restore detects it automatically.") { act.encryptedBackup() }, 8)
+                      body.put(labelledCard("Error log", "Recent errors, crashes and backup problems. Share it if something is not working.") { act.showLog() }, 8)
+                      body.put(labelledCard("Parser test", "Paste any SMS to see how the app reads it, or run built-in samples.") { act.showParserTest() }, 8)
                       val autoCard = act.vbox(12).apply { background = act.shape(C.CARD, radius = 20, strokeColor = C.BORDER); setPadding(act.dp(16), act.dp(14), act.dp(16), act.dp(14)) }
                       autoCard.addView(act.tv(Str.s("auto_backup"), 15f, C.TEXT, true))
                       val currentMode = BackupScheduler.currentMode(act)
@@ -2190,7 +2235,7 @@ jobs:
               private val openBackupRestore = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> if (uri != null) doCleanRestore(uri) }
               private val openFirstRunRestore = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> if (uri != null) doFirstRestore(uri) }
               override fun onCreate(savedInstanceState: Bundle?) {
-                  super.onCreate(savedInstanceState)
+                  super.onCreate(savedInstanceState); AppLog.install(applicationContext)
                   try {
                       val prefs = getSharedPreferences("fin", MODE_PRIVATE)
                       when (prefs.getString("theme_mode", "system")) { "dark" -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES); "light" -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_NO); else -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM) }
@@ -2198,7 +2243,7 @@ jobs:
                       val night = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
                       C.applyTheme(night, prefs.getString("color_palette", "purple") ?: "purple")
                       window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
-                      try { org.osmdroid.config.Configuration.getInstance().apply { userAgentValue = "ImransFinances/12.8.0"; tileFileSystemCacheMaxBytes = 600L*1024*1024; tileFileSystemCacheTrimBytes = 500L*1024*1024; load(this@MainActivity, getSharedPreferences("osmdroid", MODE_PRIVATE)) } } catch (_: Exception) {}
+                      try { org.osmdroid.config.Configuration.getInstance().apply { userAgentValue = "ImransFinances/12.9.0"; tileFileSystemCacheMaxBytes = 600L*1024*1024; tileFileSystemCacheTrimBytes = 500L*1024*1024; load(this@MainActivity, getSharedPreferences("osmdroid", MODE_PRIVATE)) } } catch (_: Exception) {}
                       try { ForegroundHelper.start(this) } catch (_: Exception) {}
                       try { BackupScheduler.reschedule(this) } catch (_: Exception) {}
                       home = HomeScreen(this); ledger = LedgerScreen(this)
@@ -2314,6 +2359,64 @@ jobs:
                           } catch (ex: Exception) { runOnUiThread { toast("Encrypted backup failed: " + (ex.message ?: "unknown")) } }
                       }.start()
                   }
+              }
+              fun showLog() {
+                  val txt = AppLog.read().ifBlank { "No errors logged." }
+                  val tvv = android.widget.TextView(this).apply { text = txt.takeLast(8000); textSize = 11f; typeface = android.graphics.Typeface.MONOSPACE; setTextColor(C.TEXT); setPadding(dp(16), dp(12), dp(16), dp(12)); setTextIsSelectable(true) }
+                  val sv = android.widget.ScrollView(this).apply { addView(tvv) }
+                  AlertDialog.Builder(this).setTitle("Error log").setView(sv)
+                      .setPositiveButton("Share") { _, _ -> try { val si = Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, txt.takeLast(30000)) }; startActivity(Intent.createChooser(si, "Share log")) } catch (_: Exception) {} }
+                      .setNeutralButton("Clear") { _, _ -> AppLog.clear(); toast("Log cleared") }
+                      .setNegativeButton("Close", null).show()
+              }
+              private fun describeSms(sender: String, body: String): String {
+                  if (body.isBlank()) return "Paste an SMS first."
+                  SmsEngine.dryRun = true
+                  return try {
+                      val t = SmsEngine.build(applicationContext, Db.get(applicationContext), sender, body, System.currentTimeMillis())
+                      if (t == null) "IGNORED: not read as a transaction"
+                      else (if (t.debit) "DEBIT " else "CREDIT ") + inr(t.amount) + "\nPayee: " + t.merchant + "\nCategory: " + t.category + "\nBank: " + t.institution + (t.account?.let { " • " + it } ?: "") + "\nChannel: " + t.channel + "   Status: " + t.status
+                  } catch (e: Exception) { AppLog.e(applicationContext, "ParserTest", e); "Error: " + (e.message ?: "unknown") } finally { SmsEngine.dryRun = false }
+              }
+              private fun runSamples(): String {
+                  val samples = listOf(
+                      Triple("AX-HDFCBK-S", "Rs 500.00 debited from A/c XX1234 on 12-11-26 to VPA swiggy@icici (UPI Ref 123456789012). Avl bal Rs 2000. Pre-approved loan offer, apply now", "D:500"),
+                      Triple("VM-ICICIB-S", "ICICI Bank Acct XX123 credited with Rs 250.00 on 12-Nov-26 by UPI-RAHUL KUMAR. Avl Bal Rs 3000", "C:250"),
+                      Triple("AX-HDFCBK-S", "Rs 899.00 spent on HDFC Bank Card x1234 at AMAZON on 12-11-26. Avl limit Rs 50000", "D:899"),
+                      Triple("VM-ICICIB-S", "Rs 499.00 refunded to your A/c XX1234 by AMAZON on 12-11-26", "C:499"),
+                      Triple("AX-HDFCBK-S", "123456 is your OTP for txn of Rs 500 at AMAZON. Do not share it with anyone.", "drop"),
+                      Triple("AX-HDFCBK-S", "Rs 1200 will be debited from your a/c XX1234 on 20-11-26 towards EMI", "drop"),
+                      Triple("AX-HDFCBK-S", "Pre-approved loan of Rs 5,00,000 is waiting for you. Apply now", "drop"),
+                      Triple("AX-HDFCBK-S", "Your UPI txn of Rs 300 failed. Amount debited, if any, will be refunded", "drop"),
+                      Triple("AX-HDFCBK-S", "HDFC Bank Credit Card XX1234: Total Amount Due Rs 12,345.00, Min Due Rs 617. Due Date 05-Dec-2026", "drop")
+                  )
+                  var pass = 0
+                  val sb = StringBuilder()
+                  SmsEngine.dryRun = true
+                  try {
+                      for ((sender, body, exp) in samples) {
+                          val t = try { SmsEngine.build(applicationContext, Db.get(applicationContext), sender, body, System.currentTimeMillis()) } catch (_: Exception) { null }
+                          val got = if (t == null) "drop" else (if (t.debit) "D:" else "C:") + t.amount.toLong()
+                          val ok = got == exp
+                          if (ok) pass++
+                          sb.append(if (ok) "✓ " else "✗ ").append(body.take(46)).append("…  → ").append(got)
+                          if (!ok) sb.append("  (expected ").append(exp).append(")")
+                          sb.append("\n")
+                      }
+                  } finally { SmsEngine.dryRun = false }
+                  return "$pass/${samples.size} passed\n\n" + sb.toString()
+              }
+              fun showParserTest() {
+                  val box = vbox(16)
+                  val sender = android.widget.EditText(this).apply { hint = "Sender (e.g. AX-HDFCBK-S)"; setSingleLine(); setTextColor(C.TEXT); setHintTextColor(C.MUTED) }
+                  val sms = android.widget.EditText(this).apply { hint = "Paste SMS text here"; minLines = 3; gravity = Gravity.TOP; setTextColor(C.TEXT); setHintTextColor(C.MUTED) }
+                  val out = android.widget.TextView(this).apply { textSize = 13f; setTextColor(C.TEXT); setPadding(0, dp(10), 0, 0); setTextIsSelectable(true) }
+                  box.put(sender, 0)
+                  box.put(sms, 6)
+                  box.put(actionBtn("Test this SMS") { out.text = describeSms(sender.text.toString().ifBlank { "AX-TESTBK-S" }, sms.text.toString()) }, 8)
+                  box.put(actionBtn("Run built-in samples") { out.text = runSamples() }, 8)
+                  box.addView(out)
+                  AlertDialog.Builder(this).setTitle("Parser test").setView(android.widget.ScrollView(this).apply { addView(box) }).setNegativeButton("Close", null).show()
               }
               fun showRestorePicker() {
                   try {
