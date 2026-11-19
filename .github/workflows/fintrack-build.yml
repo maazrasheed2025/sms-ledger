@@ -134,7 +134,7 @@ jobs:
           plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
           android {
               namespace = "com.example.fintrack"; compileSdk = 34
-              defaultConfig { applicationId = "com.example.fintrack"; minSdk = 30; targetSdk = 33; versionCode = 51; versionName = "12.7.0" }
+              defaultConfig { applicationId = "com.example.fintrack"; minSdk = 30; targetSdk = 33; versionCode = 52; versionName = "12.8.0" }
               compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
               kotlinOptions { jvmTarget = "17" }
               androidResources { noCompress += "png" }
@@ -771,6 +771,7 @@ jobs:
                       if (sender.none { it.isLetter() }) { val dg = sender.count { it.isDigit() }; if (sender.startsWith("+") || dg !in 4..7) return null }
                       val body = rawBody.replace("\n", " ").replace(Regex("""\s+"""), " ").trim()
                       if (hardNoiseRe.containsMatchIn(body)) return null
+                      if (futureRe.containsMatchIn(body)) DueBills.capture(ctx, db, sender, body)
                       if (futureRe.containsMatchIn(body) || mandateRe.containsMatchIn(body)) return null
                       val hasVerb = debitRe.containsMatchIn(body) || creditRe.containsMatchIn(body)
                       if (promoRe.containsMatchIn(body) && !(hasVerb && strongAcctRe.containsMatchIn(body))) return null
@@ -1000,6 +1001,71 @@ jobs:
           }
           EOF_BS
 
+          cat > app/src/main/java/com/example/fintrack/BackupCrypto.kt <<'EOF_BC'
+          package com.example.fintrack
+          import android.util.Base64
+          import java.security.SecureRandom
+          import javax.crypto.Cipher
+          import javax.crypto.SecretKeyFactory
+          import javax.crypto.spec.GCMParameterSpec
+          import javax.crypto.spec.PBEKeySpec
+          import javax.crypto.spec.SecretKeySpec
+          object BackupCrypto {
+              const val MAGIC = "FENC1:"
+              private const val ITER = 120000
+              fun isEncrypted(t: String): Boolean = t.trimStart().startsWith(MAGIC)
+              private fun key(pw: CharArray, salt: ByteArray): SecretKeySpec {
+                  val f = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+                  return SecretKeySpec(f.generateSecret(PBEKeySpec(pw, salt, ITER, 256)).encoded, "AES")
+              }
+              fun encrypt(plain: String, password: String): String {
+                  val r = SecureRandom()
+                  val salt = ByteArray(16).also { r.nextBytes(it) }
+                  val iv = ByteArray(12).also { r.nextBytes(it) }
+                  val c = Cipher.getInstance("AES/GCM/NoPadding")
+                  c.init(Cipher.ENCRYPT_MODE, key(password.toCharArray(), salt), GCMParameterSpec(128, iv))
+                  val ct = c.doFinal(plain.toByteArray(Charsets.UTF_8))
+                  return MAGIC + Base64.encodeToString(salt + iv + ct, Base64.NO_WRAP)
+              }
+              fun decrypt(text: String, password: String): String {
+                  val raw = Base64.decode(text.trim().removePrefix(MAGIC), Base64.NO_WRAP)
+                  val salt = raw.copyOfRange(0, 16)
+                  val iv = raw.copyOfRange(16, 28)
+                  val ct = raw.copyOfRange(28, raw.size)
+                  val c = Cipher.getInstance("AES/GCM/NoPadding")
+                  c.init(Cipher.DECRYPT_MODE, key(password.toCharArray(), salt), GCMParameterSpec(128, iv))
+                  return String(c.doFinal(ct), Charsets.UTF_8)
+              }
+          }
+          EOF_BC
+
+          cat > app/src/main/java/com/example/fintrack/DueBills.kt <<'EOF_DB'
+          package com.example.fintrack
+          import android.content.Context
+          object DueBills {
+              private val dueAmtRe = Regex("""(?i)(?:total\s+(?:amount\s+)?due|amount\s+due|due\s+amount|total\s+outstanding|(?:minimum|min\.?)\s+(?:amount\s+)?due)\D{0,25}?(?:rs\.?|inr|₹)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)""")
+              private val amtDueRe = Regex("""(?i)(?:rs\.?|inr|₹)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)\s+(?:is\s+|are\s+)?due""")
+              private val dayRe = Regex("""(?i)(?:due\s*(?:on|by|date)?|pay(?:ment)?\s+(?:by|before|on)|last\s+date|before)\s*:?\s*(\d{1,2})(?:st|nd|rd|th)?[\-/\. ]""")
+              private val kindRe = Regex("""(?i)\b(card|statement|bill|emi|premium|loan|policy)\b""")
+              fun capture(ctx: Context, db: Db, sender: String, body: String) {
+                  try {
+                      if (!kindRe.containsMatchIn(body)) return
+                      val m = dueAmtRe.find(body) ?: amtDueRe.find(body) ?: return
+                      val amt = m.groupValues[1].replace(",", "").toDoubleOrNull() ?: return
+                      if (amt <= 0) return
+                      val day = dayRe.find(body)?.groupValues?.get(1)?.toIntOrNull()?.takeIf { it in 1..31 } ?: return
+                      val inst = SenderMap.identifyWithBody(db, sender, body).first
+                      val lower = body.lowercase()
+                      val name = (when { "card" in lower -> "$inst Card"; "emi" in lower || "loan" in lower -> "$inst EMI"; "premium" in lower || "policy" in lower -> "$inst Premium"; else -> "$inst Bill" }).take(40)
+                      val cat = if (lower.contains("emi") || lower.contains("loan")) "EMI/Loan" else "Bills & Recharge"
+                      val id = db.one("SELECT id FROM bills WHERE name=? AND active=1", name)
+                      if (id != null) db.exec("UPDATE bills SET amount=?, due_day=? WHERE id=?", amt, day, id.toLong())
+                      else db.exec("INSERT INTO bills(name, amount, due_day, category, frequency, active, last_paid_ts) VALUES(?,?,?,?,?,1,0)", name, amt, day, cat, "monthly")
+                  } catch (_: Exception) {}
+              }
+          }
+          EOF_DB
+
           cat > app/src/main/java/com/example/fintrack/Tolls.kt <<'EOF_15'
           package com.example.fintrack
           import android.content.Context
@@ -1030,7 +1096,7 @@ jobs:
               fun removeFromTolls(ctx: Context, txnIds: List<Long>): Int { var n = 0; try { val db = Db.get(ctx); for (id in txnIds) { val before = db.num("SELECT COUNT(*) FROM toll_trips WHERE txn_id=?", id.toString()).toInt(); db.exec("DELETE FROM toll_trips WHERE txn_id=?", id); if (before > 0) n++ }; ctx.getSharedPreferences("fin", Context.MODE_PRIVATE).edit().putBoolean("map_cached", false).apply() } catch (_: Exception) {}; return n }
               private val dayFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
               private fun plazaCoord(name: String): DoubleArray? { TOLL_SEED[name]?.let { return it }; for ((k, v) in TOLL_SEED) if (k.equals(name, ignoreCase = true)) return v; return null }
-              fun fetchRoadRoute(wps: List<DoubleArray>): List<DoubleArray> { if (wps.size < 2) return wps.map { doubleArrayOf(it[1], it[0]) }; return try { val coords = wps.joinToString(";") { "${it[0]},${it[1]}" }; val url = URL("https://router.project-osrm.org/route/v1/driving/$coords?overview=full&geometries=polyline"); val conn = url.openConnection() as HttpURLConnection; conn.requestMethod = "GET"; conn.connectTimeout = 8000; conn.readTimeout = 8000; conn.setRequestProperty("User-Agent", "ImransFinances/12.7.0"); if (conn.responseCode != 200) throw RuntimeException("OSRM ${conn.responseCode}"); val txt = conn.inputStream.bufferedReader().use { it.readText() }; val json = org.json.JSONObject(txt); if (json.optString("code") != "Ok") throw RuntimeException("not Ok"); val routes = json.optJSONArray("routes") ?: throw RuntimeException("no routes"); if (routes.length() == 0) throw RuntimeException("no routes"); val geom = routes.getJSONObject(0).optString("geometry", ""); if (geom.isBlank()) throw RuntimeException("no geom"); decodePolyline(geom) } catch (_: Exception) { wps.map { doubleArrayOf(it[1], it[0]) } } }
+              fun fetchRoadRoute(wps: List<DoubleArray>): List<DoubleArray> { if (wps.size < 2) return wps.map { doubleArrayOf(it[1], it[0]) }; return try { val coords = wps.joinToString(";") { "${it[0]},${it[1]}" }; val url = URL("https://router.project-osrm.org/route/v1/driving/$coords?overview=full&geometries=polyline"); val conn = url.openConnection() as HttpURLConnection; conn.requestMethod = "GET"; conn.connectTimeout = 8000; conn.readTimeout = 8000; conn.setRequestProperty("User-Agent", "ImransFinances/12.8.0"); if (conn.responseCode != 200) throw RuntimeException("OSRM ${conn.responseCode}"); val txt = conn.inputStream.bufferedReader().use { it.readText() }; val json = org.json.JSONObject(txt); if (json.optString("code") != "Ok") throw RuntimeException("not Ok"); val routes = json.optJSONArray("routes") ?: throw RuntimeException("no routes"); if (routes.length() == 0) throw RuntimeException("no routes"); val geom = routes.getJSONObject(0).optString("geometry", ""); if (geom.isBlank()) throw RuntimeException("no geom"); decodePolyline(geom) } catch (_: Exception) { wps.map { doubleArrayOf(it[1], it[0]) } } }
               fun decodePolyline(encoded: String): List<DoubleArray> { val points = ArrayList<DoubleArray>(); var index = 0; val len = encoded.length; var lat = 0; var lng = 0; while (index < len) { var b: Int; var shift = 0; var result = 0; do { b = encoded[index++].code - 63; result = result or ((b and 0x1f) shl shift); shift += 5 } while (b >= 0x20); val dlat = if (result and 1 != 0) (result shr 1).inv() else (result shr 1); lat += dlat; shift = 0; result = 0; do { b = encoded[index++].code - 63; result = result or ((b and 0x1f) shl shift); shift += 5 } while (b >= 0x20); val dlng = if (result and 1 != 0) (result shr 1).inv() else (result shr 1); lng += dlng; points.add(doubleArrayOf(lat * 1e-5, lng * 1e-5)) }; return points }
               fun buildTrips(ctx: Context): Pair<List<TollTrip>, Double> { try { val prefs = ctx.getSharedPreferences("fin", Context.MODE_PRIVATE); val cached = prefs.getBoolean("map_cached", false); val rows = Db.get(ctx).rows("SELECT txn_id, plaza, lat, lon, ts, amount FROM toll_trips ORDER BY ts ASC"); val events = rows.mapNotNull { r -> val name = r["plaza"] ?: return@mapNotNull null; val ts = r["ts"]?.toLongOrNull() ?: return@mapNotNull null; val amt = r["amount"]?.toDoubleOrNull() ?: return@mapNotNull null; val seed = plazaCoord(name); val lat = seed?.get(1) ?: r["lat"]?.toDoubleOrNull() ?: 0.0; val lon = seed?.get(0) ?: r["lon"]?.toDoubleOrNull() ?: 0.0; if (lat == 0.0 || lon == 0.0) return@mapNotNull null; TollCheckpoint(name, ts, amt, lat, lon, r["txn_id"]?.toLongOrNull() ?: 0) }.sortedBy { it.ts }; if (events.isEmpty()) return emptyList<TollTrip>() to 0.0; val legs = ArrayList<MutableList<TollCheckpoint>>(); var cur = ArrayList<TollCheckpoint>(); for (ev in events) { if (cur.isEmpty()) { cur.add(ev); continue }; val prev = cur.last(); val gapMs = ev.ts - prev.ts; val samePlaza = ev.plaza.equals(prev.plaza, ignoreCase = true); val sameDay = dayFmt.format(Date(ev.ts)) == dayFmt.format(Date(prev.ts)); if (samePlaza || gapMs > 6L * 60 * 60 * 1000 || !sameDay) { legs.add(cur); cur = ArrayList() }; cur.add(ev) }; if (cur.isNotEmpty()) legs.add(cur); val cache = ConcurrentHashMap<String, List<DoubleArray>>(); val trips = ArrayList<TollTrip>(); var total = 0.0; for ((i, leg) in legs.withIndex()) { val direction = if (i % 2 == 0) "Going" else "Returning"; val wps = leg.map { doubleArrayOf(it.lon, it.lat) }; val key = wps.joinToString("|") { "${it[0]},${it[1]}" }; val route = if (cached) wps.map { doubleArrayOf(it[1], it[0]) } else cache.getOrPut(key) { fetchRoadRoute(wps) }; val legTotal = leg.sumOf { it.amount }; total += legTotal; val title = leg.joinToString(" → ") { it.plaza }; trips.add(TollTrip(i + 1, direction, dayFmt.format(Date(leg.first().ts)), title, legTotal, leg.toList(), route)) }; if (!cached) prefs.edit().putBoolean("map_cached", true).apply(); return trips to total } catch (_: Exception) { return emptyList<TollTrip>() to 0.0 } }
               fun tripsByDate(ctx: Context): Map<String, List<TollCheckpoint>> { val out = LinkedHashMap<String, MutableList<TollCheckpoint>>(); try { val rows = Db.get(ctx).rows("SELECT txn_id, plaza, lat, lon, ts, amount FROM toll_trips ORDER BY ts DESC"); for (r in rows) { val name = r["plaza"] ?: continue; val ts = r["ts"]?.toLongOrNull() ?: continue; val amt = r["amount"]?.toDoubleOrNull() ?: continue; val seed = plazaCoord(name); val lat = seed?.get(1) ?: r["lat"]?.toDoubleOrNull() ?: 0.0; val lon = seed?.get(0) ?: r["lon"]?.toDoubleOrNull() ?: 0.0; val day = dayFmt.format(Date(ts)); out.getOrPut(day) { ArrayList() }.add(TollCheckpoint(name, ts, amt, lat, lon, r["txn_id"]?.toLongOrNull() ?: 0)) } } catch (_: Exception) {}; return out }
@@ -1449,13 +1515,15 @@ jobs:
               companion object { @Volatile var savedQuery: String = "" }
               private var filter = Filter(); private var query = savedQuery; private var selectMode = false
               private val selected = LinkedHashSet<Long>(); private val collapsed = HashSet<Int>()
+              private fun dayLabel(ts: Long): String { val now = Calendar.getInstance(); val c = Calendar.getInstance().apply { timeInMillis = ts }; if (now.get(Calendar.YEAR) == c.get(Calendar.YEAR) && now.get(Calendar.DAY_OF_YEAR) == c.get(Calendar.DAY_OF_YEAR)) return "Today"; now.add(Calendar.DAY_OF_YEAR, -1); if (now.get(Calendar.YEAR) == c.get(Calendar.YEAR) && now.get(Calendar.DAY_OF_YEAR) == c.get(Calendar.DAY_OF_YEAR)) return "Yesterday"; return java.text.SimpleDateFormat("EEE, dd MMM", java.util.Locale.getDefault()).format(java.util.Date(ts)) }
               private val summary = act.tv("", 12f, C.MUTED).apply { setPadding(act.dp(14), act.dp(4), act.dp(14), act.dp(4)) }
               private val chips = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; setPadding(act.dp(8), 0, act.dp(8), 0) }
-              sealed class Row { data class T(val t: Txn) : Row(); data class Y(val y: Int, val n: Int, val net: Double, val c: Boolean) : Row() }
+              sealed class Row { data class T(val t: Txn) : Row(); data class Y(val y: Int, val n: Int, val net: Double, val c: Boolean) : Row(); data class D(val label: String, val net: Double) : Row() }
               private val adapter = RowAdapter<Row>(act, emptyList()) { item, r ->
                   when (item) {
-                      is Row.Y -> { r.icon.setImageResource(R.drawable.ic_bank); r.icon.setColorFilter(C.ACCENT); r.title.text = "${if (item.c) "▶" else "▼"} ${item.y} · ${item.n}"; val (l, c) = inrSigned(item.net); r.sub.text = l; r.sub.setTextColor(c); r.amt.text = "" }
-                      is Row.T -> { val t = item.t; r.icon.setImageResource(Icons.merchantIcon(act, t.merchant, t.institution, t.category)); r.icon.clearColorFilter(); r.title.text = (if (selectMode && selected.contains(t.id)) "☑ " else "") + t.merchant; r.sub.text = fmtDate(t.ts) + " • " + t.institution; r.amt.text = (if (t.debit) "-" else "+") + inr(t.amount, true); r.amt.setTextColor(if (t.debit) C.RED else C.GREEN) }
+                      is Row.Y -> { r.icon.visibility = View.VISIBLE; r.sub.visibility = View.VISIBLE; r.title.textSize = 16f; r.title.setTextColor(C.TEXT); r.amt.textSize = 15f; r.icon.setImageResource(R.drawable.ic_bank); r.icon.setColorFilter(C.ACCENT); r.title.text = "${if (item.c) "▶" else "▼"} ${item.y} · ${item.n}"; val (l, c) = inrSigned(item.net); r.sub.text = l; r.sub.setTextColor(c); r.amt.text = "" }
+                      is Row.D -> { r.icon.visibility = View.GONE; r.sub.visibility = View.GONE; r.title.text = item.label; r.title.textSize = 12f; r.title.setTextColor(C.MUTED); val (dl, dc) = inrSigned(item.net); r.amt.text = dl; r.amt.textSize = 12f; r.amt.setTextColor(dc) }
+                      is Row.T -> { val t = item.t; r.icon.visibility = View.VISIBLE; r.sub.visibility = View.VISIBLE; r.title.textSize = 16f; r.title.setTextColor(C.TEXT); r.amt.textSize = 15f; r.icon.setImageResource(Icons.merchantIcon(act, t.merchant, t.institution, t.category)); r.icon.clearColorFilter(); r.title.text = (if (selectMode && selected.contains(t.id)) "☑ " else "") + t.merchant; r.sub.text = fmtDate(t.ts) + " • " + t.institution; r.amt.text = (if (t.debit) "-" else "+") + inr(t.amount, true); r.amt.setTextColor(if (t.debit) C.RED else C.GREEN) }
                   }
               }
               private lateinit var list: ListView
@@ -1466,6 +1534,7 @@ jobs:
                           when (val i = this@LedgerScreen.adapter.items.getOrNull(pos)) {
                               is Row.T -> if (selectMode) { if (!selected.add(i.t.id)) selected.remove(i.t.id); this@LedgerScreen.adapter.notifyDataSetChanged() } else showTxn(i.t)
                               is Row.Y -> { if (!collapsed.add(i.y)) collapsed.remove(i.y); refresh() }
+                              is Row.D -> {}
                               null -> {}
                           }
                       }
@@ -1512,7 +1581,7 @@ jobs:
                           act.runOnUiThread {
                               try {
                                   val rs = ArrayList<Row>()
-                                  for ((y, lst) in years) { val net = lst.filter { !it.debit }.sumOf { it.amount } - lst.filter { it.debit }.sumOf { it.amount }; val c = collapsed.contains(y); rs.add(Row.Y(y, lst.size, net, c)); if (!c) for (t in lst) rs.add(Row.T(t)) }
+                                  for ((y, lst) in years) { val net = lst.filter { !it.debit }.sumOf { it.amount } - lst.filter { it.debit }.sumOf { it.amount }; val c = collapsed.contains(y); rs.add(Row.Y(y, lst.size, net, c)); if (!c) { var lastKey = ""; val dayFmt = java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.US); val byDay = lst.groupBy { dayFmt.format(java.util.Date(it.ts)) }; for (t in lst) { val k = dayFmt.format(java.util.Date(t.ts)); if (k != lastKey) { lastKey = k; val dl = byDay[k] ?: emptyList(); rs.add(Row.D(dayLabel(t.ts), dl.filter { !it.debit }.sumOf { it.amount } - dl.filter { it.debit }.sumOf { it.amount })) }; rs.add(Row.T(t)) } } }
                                   adapter.items = rs
                                   val (l, c) = inrSigned(i - o)
                                   summary.text = "${all.size}  •  ${Str.s("in_label")} ${inr(i)}  •  ${Str.s("out_label")} ${inr(o)}  •  ${Str.s("net_label")} $l"
@@ -1699,6 +1768,7 @@ jobs:
                       body.put(dataCard, 0)
                       body.put(labelledCard(Str.s("backup"), Str.s("sub_backup")) { act.backup() }, 10)
                       body.put(labelledCard(Str.s("restore"), Str.s("sub_restore")) { act.showRestorePicker() }, 8)
+                      body.put(labelledCard("Encrypted backup & share", "Password-protected backup to send to Drive or WhatsApp. Restore detects it automatically.") { act.encryptedBackup() }, 8)
                       val autoCard = act.vbox(12).apply { background = act.shape(C.CARD, radius = 20, strokeColor = C.BORDER); setPadding(act.dp(16), act.dp(14), act.dp(16), act.dp(14)) }
                       autoCard.addView(act.tv(Str.s("auto_backup"), 15f, C.TEXT, true))
                       val currentMode = BackupScheduler.currentMode(act)
@@ -1744,7 +1814,7 @@ jobs:
                           notifCard.put(r, 0)
                       }
                       body.put(notifCard, 8)
-                      val th = act.card(); th.addView(act.tv("Preferences", 15f, C.TEXT, true)); th.addView(Switch(act).apply { text = Str.s("fingerprint_lock"); isChecked = act.isLockEnabled(); setOnCheckedChangeListener { _, v -> act.setLockEnabled(v); act.toast(if (v) Str.s("lock_on") else Str.s("lock_off")) } }); th.addView(Switch(act).apply { text = Str.s("language") + ": " + (if (act.isHinglish()) Str.s("lang_hinglish") else Str.s("lang_english")); isChecked = act.isHinglish(); setOnCheckedChangeListener { _, v -> act.setLang(v) } }); th.put(act.actionBtn(Str.s("theme") + ": " + act.themeModeLabel()) { act.cycleThemeMode() }, 10); th.put(act.tv(Str.s("color_theme"), 13f, C.TEXT, true).apply { setPadding(act.dp(6), act.dp(12), 0, act.dp(4)) }, 8); val colorRow = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(act.dp(6), act.dp(4), act.dp(6), act.dp(4)) }; for (k in arrayOf("purple","teal","amber","indigo","rose","green","navy")) { val pal = C.paletteOf(k); val selected = act.colorPalette() == k; val circle = android.view.View(act).apply { val sz = act.dp(38); layoutParams = LinearLayout.LayoutParams(sz, sz).apply { setMargins(act.dp(6), act.dp(6), act.dp(6), act.dp(6)) }; background = if (selected) act.shape(pal.accent, radius = 19, strokeColor = C.TEXT, strokeWidthDp = 3) else act.shape(pal.accent, radius = 19); setOnClickListener { act.setColorPalette(k) }; isClickable = true }; colorRow.addView(circle) }; th.addView(colorRow); body.put(th)
+                      val th = act.card(); th.addView(act.tv("Preferences", 15f, C.TEXT, true)); th.addView(Switch(act).apply { text = Str.s("fingerprint_lock"); isChecked = act.isLockEnabled(); setOnCheckedChangeListener { _, v -> act.setLockEnabled(v); act.toast(if (v) Str.s("lock_on") else Str.s("lock_off")) } }); th.addView(act.tv("Auto-lock after", 13f, C.TEXT, true).apply { setPadding(act.dp(6), act.dp(10), 0, act.dp(4)) }); val lockRow = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL }; for ((lbl, ms) in listOf("Instantly" to 0L, "1 min" to 60000L, "5 min" to 300000L, "15 min" to 900000L)) lockRow.addView(act.pill(lbl, act.lockTimeoutMs() == ms) { act.setLockTimeoutMs(ms); act.toast("Auto-lock: $lbl"); refresh() }); th.addView(android.widget.HorizontalScrollView(act).apply { isHorizontalScrollBarEnabled = false; addView(lockRow) }); th.addView(Switch(act).apply { text = Str.s("language") + ": " + (if (act.isHinglish()) Str.s("lang_hinglish") else Str.s("lang_english")); isChecked = act.isHinglish(); setOnCheckedChangeListener { _, v -> act.setLang(v) } }); th.put(act.actionBtn(Str.s("theme") + ": " + act.themeModeLabel()) { act.cycleThemeMode() }, 10); th.put(act.tv(Str.s("color_theme"), 13f, C.TEXT, true).apply { setPadding(act.dp(6), act.dp(12), 0, act.dp(4)) }, 8); val colorRow = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(act.dp(6), act.dp(4), act.dp(6), act.dp(4)) }; for (k in arrayOf("purple","teal","amber","indigo","rose","green","navy")) { val pal = C.paletteOf(k); val selected = act.colorPalette() == k; val circle = android.view.View(act).apply { val sz = act.dp(38); layoutParams = LinearLayout.LayoutParams(sz, sz).apply { setMargins(act.dp(6), act.dp(6), act.dp(6), act.dp(6)) }; background = if (selected) act.shape(pal.accent, radius = 19, strokeColor = C.TEXT, strokeWidthDp = 3) else act.shape(pal.accent, radius = 19); setOnClickListener { act.setColorPalette(k) }; isClickable = true }; colorRow.addView(circle) }; th.addView(colorRow); body.put(th)
                   } catch (_: Exception) {}
               }
           }
@@ -2128,7 +2198,7 @@ jobs:
                       val night = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
                       C.applyTheme(night, prefs.getString("color_palette", "purple") ?: "purple")
                       window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
-                      try { org.osmdroid.config.Configuration.getInstance().apply { userAgentValue = "ImransFinances/12.7.0"; tileFileSystemCacheMaxBytes = 600L*1024*1024; tileFileSystemCacheTrimBytes = 500L*1024*1024; load(this@MainActivity, getSharedPreferences("osmdroid", MODE_PRIVATE)) } } catch (_: Exception) {}
+                      try { org.osmdroid.config.Configuration.getInstance().apply { userAgentValue = "ImransFinances/12.8.0"; tileFileSystemCacheMaxBytes = 600L*1024*1024; tileFileSystemCacheTrimBytes = 500L*1024*1024; load(this@MainActivity, getSharedPreferences("osmdroid", MODE_PRIVATE)) } } catch (_: Exception) {}
                       try { ForegroundHelper.start(this) } catch (_: Exception) {}
                       try { BackupScheduler.reschedule(this) } catch (_: Exception) {}
                       home = HomeScreen(this); ledger = LedgerScreen(this)
@@ -2185,7 +2255,7 @@ jobs:
               private fun buildDrawer(): LinearLayout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(C.CARD); visibility = View.GONE; setPadding(dp(16), dp(24), dp(16), dp(16)); addView(tv(Str.s("app_title"), 22f, C.TEXT, true).apply { setPadding(0, 0, 0, dp(16)) }); val items = listOf(Triple(Str.s("dashboard"), R.drawable.ic_bank, 0), Triple(Str.s("ledger"), R.drawable.ic_transfer, ledgerIndex()), Triple(Str.s("travel"), R.drawable.ic_fastag, travelIndex()), Triple(Str.s("payees"), R.drawable.ic_contacts, payeesIndex()), Triple(Str.s("accounts"), R.drawable.ic_bank, accountsIndex()), Triple(Str.s("contacts"), R.drawable.ic_contacts, contactsIndex()), Triple(Str.s("machine_learning"), R.drawable.ic_ml, mlIndex()), Triple(Str.s("bills"), R.drawable.ic_bills, billsIndex()), Triple(Str.s("budgets"), R.drawable.ic_budget, budgetsIndex()), Triple(Str.s("categories"), R.drawable.ic_category, categoriesIndex()), Triple(Str.s("rules"), R.drawable.ic_rules, rulesIndex()), Triple(Str.s("loans"), R.drawable.ic_loan, loansIndex()), Triple(Str.s("settings"), R.drawable.ic_settings, settingsIndex()), Triple(Str.s("about"), R.drawable.ic_info, aboutIndex())); for ((t, r, idx) in items) { val row = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dp(8), dp(12), dp(8), dp(12)); setOnClickListener { closeDrawer(); if (idx in screens.indices) show(idx) } }; row.addView(icon(r, C.ICON, 34)); row.addView(tv(t, 15f, C.TEXT).apply { setPadding(dp(14), 0, 0, 0) }); addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)) } }
               private fun quickAdd() { AlertDialog.Builder(this).setTitle(Str.s("quick_add")).setItems(arrayOf(Str.s("cash_entry"), Str.s("add_bill"), Str.s("set_budget"))) { _, i -> when (i) { 0 -> ledger.addCash(); 1 -> show(billsIndex()); 2 -> show(budgetsIndex()) } }.setNegativeButton(Str.s("cancel"), null).show() }
               override fun onStop() { super.onStop(); stopAt = System.currentTimeMillis() }
-              override fun onStart() { super.onStart(); if (unlocked && stopAt > 0 && System.currentTimeMillis() - stopAt > 60_000) { lock(); authenticate() } }
+              override fun onStart() { super.onStart(); if (unlocked && stopAt > 0 && System.currentTimeMillis() - stopAt > lockTimeoutMs()) { lock(); authenticate() } }
               private fun lock() { unlocked = false; lockView.visibility = View.VISIBLE }
               private fun unlock() { unlocked = true; lockView.visibility = View.GONE; refreshAll(); val prefs = getSharedPreferences("fin", MODE_PRIVATE); if (!prefs.getBoolean("onboarded_v11", false)) { prefs.edit().putBoolean("onboarded_v11", true).apply(); firstRun() } else scanIfAllowed() }
               private fun authenticate() { if (!isLockEnabled()) { unlock(); return }; if (authBusy) return; val auth = BiometricManager.Authenticators.BIOMETRIC_STRONG or BiometricManager.Authenticators.DEVICE_CREDENTIAL; if (BiometricManager.from(this).canAuthenticate(auth) != BiometricManager.BIOMETRIC_SUCCESS) { unlock(); return }; authBusy = true; BiometricPrompt(this, ContextCompat.getMainExecutor(this), object : BiometricPrompt.AuthenticationCallback() { override fun onAuthenticationSucceeded(r: BiometricPrompt.AuthenticationResult) { authBusy = false; unlock() }; override fun onAuthenticationError(c: Int, e: CharSequence) { authBusy = false; lockMsg.text = "Locked: $e" } }).authenticate(BiometricPrompt.PromptInfo.Builder().setTitle(Str.s("app_title")).setSubtitle("Unlock").setAllowedAuthenticators(auth).build()) }
@@ -2220,6 +2290,31 @@ jobs:
                       startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply { data = Uri.parse("package:$packageName") })
                   } catch (_: Exception) { try { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) } catch (_: Exception) {} }
               }
+              fun lockTimeoutMs(): Long = try { getSharedPreferences("fin", MODE_PRIVATE).getLong("lock_timeout_ms", 60000L) } catch (_: Exception) { 60000L }
+              fun setLockTimeoutMs(v: Long) { try { getSharedPreferences("fin", MODE_PRIVATE).edit().putLong("lock_timeout_ms", v).apply() } catch (_: Exception) {} }
+              fun askPassword(title: String, onOk: (String) -> Unit) {
+                  runOnUiThread {
+                      try {
+                          val et = android.widget.EditText(this).apply { inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD; hint = "Password"; setPadding(dp(20), dp(12), dp(20), dp(12)) }
+                          AlertDialog.Builder(this).setTitle(title).setView(et).setPositiveButton("OK") { _, _ -> val pw = et.text.toString(); if (pw.isNotEmpty()) onOk(pw) }.setNegativeButton(Str.s("cancel"), null).show()
+                      } catch (_: Exception) {}
+                  }
+              }
+              fun encryptedBackup() {
+                  askPassword("Set a backup password (keep it safe, it cannot be recovered)") { pw ->
+                      Thread {
+                          try {
+                              val enc = BackupCrypto.encrypt(Backup.export(applicationContext), pw)
+                              val dir = java.io.File(getExternalFilesDir(null), "exports"); dir.mkdirs()
+                              val f = java.io.File(dir, "imrans_finances_" + java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date()) + ".fenc")
+                              f.writeText(enc)
+                              val uri = androidx.core.content.FileProvider.getUriForFile(this, "$packageName.fileprovider", f)
+                              val si = Intent(Intent.ACTION_SEND).apply { type = "application/octet-stream"; putExtra(Intent.EXTRA_STREAM, uri); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+                              runOnUiThread { toast("Encrypted backup created"); startActivity(Intent.createChooser(si, "Share encrypted backup")) }
+                          } catch (ex: Exception) { runOnUiThread { toast("Encrypted backup failed: " + (ex.message ?: "unknown")) } }
+                      }.start()
+                  }
+              }
               fun showRestorePicker() {
                   try {
                       val backups = BackupScheduler.listBackups(this)
@@ -2241,11 +2336,11 @@ jobs:
                   } catch (_: Exception) {}
               }
               fun pickRestore() { openDoc.launch(arrayOf("text/*", "application/csv", "application/json", "*/*")) }
-              private fun afterRestore(t: String) { try { val n = Backup.restore(applicationContext, t); val m = Db.get(applicationContext).one("SELECT MAX(ts) FROM txn")?.toLongOrNull() ?: 0L; if (m > 0) getSharedPreferences("fin", MODE_PRIVATE).edit().putLong("last_sms_date", m).apply(); runOnUiThread { toast("$n " + Str.s("restored_rows")); refreshAll() } } catch (ex: Exception) { runOnUiThread { toast(Str.s("restore_failed") + " " + (ex.message ?: "unknown")) } } }
+              private fun afterRestore(t0: String) { if (BackupCrypto.isEncrypted(t0)) { askPassword("Backup password") { pw -> Thread { try { afterRestore(BackupCrypto.decrypt(t0, pw)) } catch (_: Exception) { runOnUiThread { toast("Wrong password or damaged backup") } } }.start() }; return }; val t = t0; try { val n = Backup.restore(applicationContext, t); val m = Db.get(applicationContext).one("SELECT MAX(ts) FROM txn")?.toLongOrNull() ?: 0L; if (m > 0) getSharedPreferences("fin", MODE_PRIVATE).edit().putLong("last_sms_date", m).apply(); runOnUiThread { toast("$n " + Str.s("restored_rows")); refreshAll() } } catch (ex: Exception) { runOnUiThread { toast(Str.s("restore_failed") + " " + (ex.message ?: "unknown")) } } }
               private fun doRestore(uri: Uri) { Thread { try { val t = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""; if (t.trimStart().startsWith("{")) { val n = Backup.importRulesJson(applicationContext, t); runOnUiThread { toast("$n rule rows restored"); refreshAll() } } else afterRestore(t) } catch (ex: Exception) { runOnUiThread { toast(Str.s("restore_failed") + " " + (ex.message ?: "unknown")) } } }.start() }
               private fun doRestoreRules(uri: Uri) { Thread { try { val t = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""; val n = Backup.importRulesJson(applicationContext, t); runOnUiThread { toast("$n rule rows restored"); refreshAll() } } catch (ex: Exception) { runOnUiThread { toast(Str.s("restore_failed") + " " + (ex.message ?: "unknown")) } } }.start() }
               fun cleanAndRestore() { AlertDialog.Builder(this).setTitle("Clean database").setMessage("Delete all transactions and rules?").setPositiveButton("Clean + Restore") { _, _ -> openBackupRestore.launch(arrayOf("text/*", "application/csv", "application/json", "*/*")) }.setNeutralButton("Clean only") { _, _ -> Thread { try { Backup.cleanAll(applicationContext); runOnUiThread { toast("Cleared"); refreshAll() } } catch (_: Exception) {} }.start() }.setNegativeButton(Str.s("cancel"), null).show() }
-              private fun doCleanRestore(uri: Uri) { Thread { try { val t = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""; Backup.cleanAll(applicationContext); if (t.trimStart().startsWith("{")) { val n = Backup.importRulesJson(applicationContext, t); runOnUiThread { toast("$n rule rows restored"); refreshAll() } } else afterRestore(t) } catch (ex: Exception) { runOnUiThread { toast(Str.s("restore_failed") + " " + (ex.message ?: "unknown")) } } }.start() }
+              private fun doCleanRestore(uri: Uri) { Thread { try { val t = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""; if (BackupCrypto.isEncrypted(t)) { askPassword("Backup password") { pw -> Thread { try { val plain = BackupCrypto.decrypt(t, pw); Backup.cleanAll(applicationContext); afterRestore(plain) } catch (_: Exception) { runOnUiThread { toast("Wrong password or damaged backup") } } }.start() }; return@Thread }; Backup.cleanAll(applicationContext); if (t.trimStart().startsWith("{")) { val n = Backup.importRulesJson(applicationContext, t); runOnUiThread { toast("$n rule rows restored"); refreshAll() } } else afterRestore(t) } catch (ex: Exception) { runOnUiThread { toast(Str.s("restore_failed") + " " + (ex.message ?: "unknown")) } } }.start() }
               private fun doFirstRestore(uri: Uri) { Thread { try { val t = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""; if (t.trimStart().startsWith("{")) Backup.importRulesJson(applicationContext, t) else afterRestore(t); runOnUiThread { show(0) } } catch (ex: Exception) { runOnUiThread { toast(Str.s("restore_failed") + " " + (ex.message ?: "unknown")) } } }.start() }
               private fun firstRun() { AlertDialog.Builder(this).setTitle(Str.s("welcome")).setMessage(Str.s("first_run_msg")).setPositiveButton(Str.s("scan_sms")) { _, _ -> scanIfAllowed() }.setNeutralButton(Str.s("restore_backup")) { _, _ -> openFirstRunRestore.launch(arrayOf("text/*", "application/csv", "application/json", "*/*")) }.setNegativeButton(Str.s("later"), null).setCancelable(false).show() }
               fun pickTollJson() { openTollJson.launch(arrayOf("application/json", "*/*")) }
